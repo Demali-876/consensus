@@ -1,0 +1,21 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^1.25.0",
+    "dotenv": "^17.2.0",
+    "express": "^5.1.0",
+    "node-cache": "^5.1.2",
+    "viem": "^2.31.7",
+    "x402": "^0.4.1",
+    "x402-fetch": "^0.4.1"
+  }
+}
