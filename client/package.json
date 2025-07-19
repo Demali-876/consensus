@@ -1,21 +1,29 @@
 {
-  "name": "client",
+  "name": "consensus",
   "version": "1.0.0",
+  "description": "Consensus SDK for HTTP API deduplication with x402 payments",
+
   "type": "module",
-  "main": "setup.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "setup": "node setup.js"
+  "bin": {
+    "consensus": "./bin/consensus.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "scripts": {
+    "consensus": "node bin/consensus.js",
+    "setup": "node bin/consensus.js setup",
+    "reset": "node bin/consensus.js setup --force"
+  },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.25.0",
-    "axios": "^1.10.0",
-    "dotenv": "^17.2.0",
     "viem": "^2.31.7",
-    "x402-fetch": "^0.4.1"
+    "dotenv": "^16.4.5",
+    "inquirer": "^9.2.15",
+    "chalk": "^5.3.0",
+    "ora": "^8.0.1"
+  },
+  "keywords": ["consensus", "api", "deduplication", "x402", "payments"],
+  "author": "Demali Gregg",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

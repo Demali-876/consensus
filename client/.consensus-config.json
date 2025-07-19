@@ -1,7 +1,8 @@
 {
-  "api_key": "1a8bebae72a06870c5116704cd02eb8ff1fb0e33dc954a54bb9a7faae4678545",
-  "account_address": "0x83d5E92f8a9C1fAcC6816fD24c7acEcb21b72cAC",
-  "server_url": "http://localhost:8080",
-  "setup_date": "2025-07-16T06:15:17.257Z",
-  "network": "base-sepolia"
+  "wallet_name": "3d3b1d7b9c4608a4",
+  "account_address": "0x6Ab96664552852e50306B2D9e4decD66765f48F3",
+  "api_key": "85a5ac4eb206d281b7616ce2edd5c3784ec579b3aeab3da834fa248e9805804c",
+  "x402_proxy_url": "http://localhost:3001",
+  "setup_date": "2025-07-18T18:08:27.597Z",
+  "version": "1.0.0"
 }
