@@ -211,7 +211,8 @@ app.post('/proxy', validateApiKey, async (req, res) => {
     const response = await fetchWithPayment(consensusServerUrl + '/proxy', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Connection': 'close'
       },
       body: JSON.stringify({
         target_url,
@@ -239,13 +240,11 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       }
     };
 
-    // Store for idempotency protection (with TTL)
     requestTracker.set(idempotencyKey, {
       response: finalResponse,
       timestamp: new Date().toISOString()
     });
 
-    // Clean up old requests (simple TTL)
     setTimeout(() => {
       requestTracker.delete(idempotencyKey);
     }, 24 * 60 * 60 * 1000); // 24 hours
