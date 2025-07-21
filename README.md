@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="assets/logo-light.svg" width="200" alt="Consensus Logo">
+  <picture>
+    <source srcset="assets/logo-dark.svg" media="(prefers-color-scheme: dark)">
+    <source srcset="assets/logo-light.svg" media="(prefers-color-scheme: light)">
+    <img src="assets/logo-light.svg" alt="Consensus logo" width="200" />
+  </picture>
 </p>
 
 <h1 align="center">Consensus</h1>
