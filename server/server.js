@@ -3,33 +3,29 @@ const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cors = require('cors');
-const crypto = require('crypto');
 const { exact } = require('x402/schemes');
 const { useFacilitator } = require('x402/verify');
-const { processPriceToAtomicAmount, settleResponseHeader } = require('x402/shared');
+const { processPriceToAtomicAmount } = require('x402/shared');
+const { settleResponseHeader } = require("x402/types");
 const ConsensusProxy = require('./proxy');
 
 const app = express();
 const port = process.env.CONSENSUS_SERVER_PORT || 8080;
 const proxy = new ConsensusProxy();
 
-// Security middleware
 app.use(helmet());
 app.use(cors());
 
-// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5000, // limit each IP to 5000 requests per windowMs
+  max: 5000,
   message: { error: 'Too many requests, please try again later' }
 });
 app.use(limiter);
 
-// x402 Configuration - Use the correct facilitator URL (with www)
-const facilitatorUrl = process.env.FACILITATOR_URL || "https://www.x402.org/facilitator";
+const facilitatorUrl = process.env.FACILITATOR_URL || "https://facilitator.x402.rs/";
 const payTo = process.env.WALLET_ADDRESS || "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f";
 
-// Configure facilitator with proper settings to avoid content-length issues
 const facilitatorConfig = {
   url: facilitatorUrl,
   timeout: 30000,
@@ -73,7 +69,6 @@ function createPaymentRequirements(resource, description = "Consensus: HTTP Dedu
   }
 }
 
-// CRITICAL FIX: Use only one body parser and configure it properly
 app.use(express.json({ 
   limit: '10mb',
   strict: false,
@@ -107,9 +102,7 @@ async function verifyPayment(req, res, paymentRequirements) {
 
   try {
     console.log(`Verifying payment with facilitator: ${facilitatorUrl}`);
-    
-    // CRITICAL FIX: Use the pre-configured verify function directly
-    // This avoids creating new connections and potential content-length issues
+
     const response = await verify(decodedPayment, paymentRequirements);
     
     if (!response.isValid) {
@@ -130,10 +123,9 @@ async function verifyPayment(req, res, paymentRequirements) {
       message: error.message,
       code: error.code,
       cause: error.cause?.message || 'No cause details',
-      stack: error.stack?.split('\n').slice(0, 5).join('\n') // First 5 lines of stack
+      stack: error.stack?.split('\n').slice(0, 5).join('\n')
     });
     
-    // Handle content-length mismatch specifically
     if (error.message.includes('RequestContentLengthMismatchError') ||
         error.message.includes('content-length') ||
         error.message.includes('Request body length does not match') ||
@@ -141,8 +133,7 @@ async function verifyPayment(req, res, paymentRequirements) {
         error.cause?.code === 'UND_ERR_REQ_CONTENT_LENGTH_MISMATCH') {
       
       console.log('Content-length mismatch detected - this suggests an issue with the HTTP request to the facilitator');
-      
-      // Try a simplified retry with a fresh facilitator instance
+
       try {
         console.log('Attempting retry with fresh facilitator connection...');
         const retryFacilitator = useFacilitator({
@@ -151,12 +142,12 @@ async function verifyPayment(req, res, paymentRequirements) {
           headers: {
             'Content-Type': 'application/json',
             'Accept': 'application/json',
-            'Connection': 'close' // Force close connection to avoid reuse issues
+            'Connection': 'close'
           }
         });
         
         const retryResponse = await retryFacilitator.verify(decodedPayment, paymentRequirements);
-        
+
         if (retryResponse.isValid) {
           console.log('✅ Retry verification successful');
           return { isValid: true, decodedPayment };
@@ -186,8 +177,6 @@ async function verifyPayment(req, res, paymentRequirements) {
         });
       }
     }
-    
-    // Handle network errors
     if (error.message.includes('fetch failed') || 
         error.message.includes('ECONNREFUSED') ||
         error.message.includes('ENOTFOUND') ||
@@ -203,8 +192,7 @@ async function verifyPayment(req, res, paymentRequirements) {
         }
       });
     }
-    
-    // Generic error fallback
+
     return res.status(402).json({
       x402Version,
       error: "Payment verification failed",
@@ -273,7 +261,6 @@ app.get('/stats', (req, res) => {
   });
 });
 
-// Main proxy endpoint - CRITICAL FIX: Remove duplicate body parsing
 app.all('/proxy', async (req, res) => {
   const startTime = Date.now();
   
@@ -316,43 +303,35 @@ app.all('/proxy', async (req, res) => {
 
     console.log(`Processing: ${method} ${target_url} [${idempotencyKey}]`);
 
-    // Check if payment required (cache miss = payment needed)
     const requiresPayment = proxy.requiresPayment(idempotencyKey);
     
     if (requiresPayment) {
       console.log(`Payment required for: ${idempotencyKey}`);
-      
-      // Create payment requirements
+
       const resource = `${req.protocol}://${req.headers.host}/proxy`;
       const paymentRequirements = createPaymentRequirements(
         resource, 
         `Consensus Deduplication: ${target_url}`
       );
 
-      // Verify payment if X-PAYMENT header exists
       const paymentResult = await verifyPayment(req, res, paymentRequirements);
       if (!paymentResult || !paymentResult.isValid) {
-        return; // 402 response already sent by verifyPayment
+        return; 
       }
 
-      // Payment verified - mark as paid
       proxy.markAsPaid(idempotencyKey);
       console.log(`Payment verified for: ${idempotencyKey}`);
 
-      // Settle payment with better error handling
       try {
-        // Use the pre-configured settle function to avoid connection reuse issues
         const settleResponse = await settle(paymentResult.decodedPayment, paymentRequirements);
         const responseHeader = settleResponseHeader(settleResponse);
         res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
         console.log(`Payment settled for: ${idempotencyKey}`);
       } catch (settleError) {
         console.error('Payment settlement failed:', settleError.message);
-        // Continue processing even if settlement fails - payment was verified
       }
     }
 
-    // Process the request (either cached or new)
     const response = await proxy.handleRequest(target_url, method, headers, body);
     const processingTime = Date.now() - startTime;
     
@@ -369,11 +348,9 @@ app.all('/proxy', async (req, res) => {
         server_version: '1.0.1'
       }
     });
-    
   } catch (error) {
     console.error('Proxy request error:', error);
-    
-    // Enhanced error handling
+
     if (error.message.includes('ENOTFOUND') || error.message.includes('ECONNREFUSED')) {
       return res.status(502).json({
         error: 'Target API unreachable',
@@ -381,7 +358,6 @@ app.all('/proxy', async (req, res) => {
         target_url: req.body?.target_url
       });
     }
-    
     if (error.message.includes('timeout')) {
       return res.status(504).json({
         error: 'Request timeout',
@@ -398,7 +374,6 @@ app.all('/proxy', async (req, res) => {
   }
 });
 
-// Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
   res.status(500).json({
@@ -408,7 +383,6 @@ app.use((error, req, res, next) => {
   });
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('Received SIGTERM, shutting down gracefully');
   process.exit(0);
@@ -420,11 +394,10 @@ process.on('SIGINT', () => {
 });
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Consensus Server running on port ${port}`);
-  console.log(`💰 Payment address: ${payTo}`);
-  console.log(`🏗️  Facilitator URL: ${facilitatorUrl}`);
-  console.log(`💳 Price: $0.001 per unique API call`);
-  console.log(`🗄️  Cached responses: FREE`);
+  console.log(`Consensus Server running on port ${port}`);
+  console.log(`Payment address: ${payTo}`);
+  console.log(`Facilitator URL: ${facilitatorUrl}`);
+  console.log(`Price: $0.001 per unique API call`);
   console.log(`🌐 Network: Base Sepolia`);
   console.log(`✅ Ready for x402 payment requests`);
 });
