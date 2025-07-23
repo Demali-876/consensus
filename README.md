@@ -49,7 +49,6 @@ Even if all but one response is ignored, your service may still receive multiple
 
 Whether your backend is behind a serverless API, rate-limited SaaS platform, or payment gateway, Consensus Proxy ensures **you pay once, process once — no matter how many nodes, retries, or consensus rounds are involved.**
 
-
 ---
 
 ### Consensus Proxy
@@ -67,31 +66,33 @@ It acts as a **deduplication layer** that:
 
 ```mermaid
 sequenceDiagram
-    participant R1 as Replica 1
-    participant R2 as Replica 2
-    participant R3 as Replica 3
+    participant R1 as Node 1
+    participant R2 as Node 2
+    participant R3 as Node 3
     participant P as Proxy
     participant API as External API
     participant C as Consensus
 
-   
+    R1->>P: HTTP outcall (idempotency: weather-london-14:00 x-api-key: ba137)
+    R2->>P: HTTP outcall (idempotency: weather-london-14:00 x-api-key: ba137)
+    R3->>P: HTTP outcall (idempotency: weather-london-14:00 x-api-key: ba137)
 
-    R1->>P: HTTP outcall (idempotency: weather-london-14:00)
-    R2->>P: HTTP outcall (idempotency: weather-london-14:00)
-    R3->>P: HTTP outcall (idempotency: weather-london-14:00)
+    Note right of P: First request – cache MISS (proxy is protected by x402)
 
-    Note right of P: First request – cache MISS
+    P-->>R1: 402 Payment Required (x402 challenge)
+    R1->>P: Retry using fetch-with-payment + proof
+
+    Note right of Proxy: Payment verified → request settled
 
     P->>API: Single external API call
     API-->>P: Response: {"temp": 15, "humidity": 80}
 
-    Note right of P: Cache response for 5 minutes
+    Note right of P: Cache response and server remaing incoming request with the same idempotent key
 
     P-->>R1: Same response: {"temp": 15, "humidity": 80}
     P-->>R2: Same response: {"temp": 15, "humidity": 80}
     P-->>R3: Same response: {"temp": 15, "humidity": 80}
 
-   
 
     R1->>C: Process response → State change A
     R2->>C: Process response → State change A
