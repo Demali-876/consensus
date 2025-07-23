@@ -1,5 +1,7 @@
 const NodeCache = require('node-cache');
 const axios = require('axios');
+const zlib = require('zlib');
+
 
 class ConsensusProxy {
   constructor() {
@@ -14,25 +16,19 @@ class ConsensusProxy {
     };
   }
 
-  // Check if payment is required for this idempotency key
   requiresPayment(idempotencyKey) {
-    // If cached or already paid, no payment needed
     if (this.cache.has(idempotencyKey) || this.paidKeys.has(idempotencyKey)) {
       return false;
     }
     return true;
   }
 
-  // Mark an idempotency key as paid
   markAsPaid(idempotencyKey) {
     this.paidKeys.add(idempotencyKey);
     console.log(`Payment recorded for: ${idempotencyKey}`);
   }
 
   async handleRequest(target_url, method, headers, body) {
-    if (!this.supportedMethods.includes(method.toUpperCase())) {
-      throw new Error(`Unsupported method: ${method}. Supported methods: ${this.supportedMethods.join(', ')}`);
-    }
 
     const idempotencyKey = headers['x-idempotency-key'] ||
                           headers['idempotency-key'] ||
@@ -44,7 +40,6 @@ class ConsensusProxy {
 
     this.stats.total_requests++;
 
-    // Check cache first
     const cached = this.cache.get(idempotencyKey);
     if (cached) {
       console.log(`Cache HIT: ${idempotencyKey} (no payment required)`);
@@ -62,10 +57,9 @@ class ConsensusProxy {
 
     console.log(`Cache MISS: ${idempotencyKey} -> ${target_url} (payment required)`);
     this.stats.cache_misses++;
-    
-    // This is a new request - payment should have been verified by server
+
     this.markAsPaid(idempotencyKey);
-    
+
     const requestPromise = this.makeRequest(target_url, method, headers, body);
     this.pendingRequests.set(idempotencyKey, requestPromise);
 
@@ -79,68 +73,79 @@ class ConsensusProxy {
   }
 
   async makeRequest(url, method, headers, body) {
-    const cleanHeaders = { ...headers };
-    
-    // Remove problematic headers that can cause content-length mismatches
-    delete cleanHeaders['host'];
-    delete cleanHeaders['content-length'];
-    delete cleanHeaders['content-encoding'];
-    delete cleanHeaders['transfer-encoding'];
-    delete cleanHeaders['connection'];
-    delete cleanHeaders['x-idempotency-key'];
-    delete cleanHeaders['idempotency-key'];
-    delete cleanHeaders['X-Idempotency-Key'];
+  const cleanHeaders = { ...headers };
 
-    const config = {
-      method: method.toLowerCase(),
-      url,
-      headers: cleanHeaders,
-      timeout: 30000,
-      validateStatus: () => true, // Accept all status codes
-      maxRedirects: 5,
-      // Don't automatically decompress responses
-      decompress: false,
-      // Handle content-length properly
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
-    };
+  delete cleanHeaders['host'];
+  delete cleanHeaders['content-length'];
+  delete cleanHeaders['content-encoding'];
+  delete cleanHeaders['transfer-encoding'];
+  delete cleanHeaders['connection'];
+  delete cleanHeaders['x-idempotency-key'];
+  delete cleanHeaders['idempotency-key'];
+  delete cleanHeaders['X-Idempotency-Key'];
 
-    if (body && ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())) {
-      config.data = body;
-      
-      // Set content-type if not already set
-      if (!cleanHeaders['content-type'] && typeof body === 'object') {
-        config.headers['content-type'] = 'application/json';
-      }
-    }
+  const config = {
+    method: method.toLowerCase(),
+    url,
+    headers: cleanHeaders,
+    timeout: 30000,
+    validateStatus: () => true,
+    maxRedirects: 5,
+    decompress: false, // we'll handle this manually
+    responseType: 'arraybuffer',
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity
+  };
 
-    try {
-      const response = await axios(config);
-      
-      return {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-        data: response.data,
-        timestamp: Date.now()
-      };
-    } catch (error) {
-      console.error(`Request failed for ${url}:`, error.message);
-      
-      // Return error response in consistent format
-      return {
-        status: error.response?.status || 500,
-        statusText: error.response?.statusText || 'Internal Server Error',
-        headers: error.response?.headers || {},
-        data: {
-          error: 'Request failed',
-          message: error.message,
-          code: error.code
-        },
-        timestamp: Date.now()
-      };
+  if (body && ['post', 'put', 'patch'].includes(method.toLowerCase())) {
+    config.data = body;
+
+    if (!cleanHeaders['content-type'] && typeof body === 'object') {
+      config.headers['content-type'] = 'application/json';
     }
   }
+
+  try {
+    const response = await axios(config);
+    let rawData = response.data;
+    let contentEncoding = (response.headers['content-encoding'] || '').toLowerCase();
+
+    if (contentEncoding === 'gzip') {
+      rawData = zlib.gunzipSync(rawData).toString('utf8');
+    } else {
+      rawData = Buffer.from(rawData).toString('utf8');
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(rawData);
+    } catch (e) {
+      parsed = rawData; // fallback for non-JSON
+    }
+
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      data: parsed,
+      timestamp: Date.now()
+    };
+  } catch (error) {
+    console.error(`Request failed for ${url}:`, error.message);
+
+    return {
+      status: error.response?.status || 500,
+      statusText: error.response?.statusText || 'Internal Server Error',
+      headers: error.response?.headers || {},
+      data: {
+        error: 'Request failed',
+        message: error.message,
+        code: error.code
+      },
+      timestamp: Date.now()
+    };
+  }
+}
 
   getStats() {
     return {
@@ -153,8 +158,6 @@ class ConsensusProxy {
       cache_stats: this.cache.getStats()
     };
   }
-
-  // Get payment status for an idempotency key
   getPaymentStatus(idempotencyKey) {
     return {
       is_cached: this.cache.has(idempotencyKey),
@@ -163,11 +166,8 @@ class ConsensusProxy {
     };
   }
 
-  // Clear expired payment keys periodically
   cleanupExpiredKeys() {
-    // Keep only recent payment keys (last 24 hours)
     const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
-    // This is a simple cleanup - in production you'd want to track timestamps
     console.log(`Cleaned up payment keys. Current paid keys: ${this.paidKeys.size}`);
   }
 }
