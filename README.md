@@ -11,6 +11,7 @@
 <p align="center">
   HTTP deduplication protocol with secure, verifiable payments via <strong>x402</strong><br>
   HTTP as it should be for modern blockchains. Protect your APIs from the chaos of consensus
+  Built for decentralization. Runs on a Raspberry Pi
 </p>
 
 <p align="center">
@@ -36,7 +37,6 @@ On the Internet Computer (ICP), for example, when an application subnet performs
 
 * The same HTTP request is made by every node in the subnet (typically 13 for ICP).
 * Millisecond differences can lead to inconsistent responses.
-* The **transform function** can sanitize these differences, but it doesn’t reduce the number of requests.
 * Each request originates from a **different physical machine**, meaning **no shared IP address** — breaking determinism for services that rely on caller identity.
 
 This especially becomes a problem when your target endpoint is **not idempotent**.
@@ -121,3 +121,99 @@ sequenceDiagram
 5. The proxy **makes the external API call** and **caches the result**.
 6. All remaining requests with the same idempotency key receive the **cached response**.
 7. Replicas process identical responses → **state converges** → **consensus succeeds**.
+
+## Quickstart
+
+This library has not yet been published!
+
+### 1. Install
+
+```bash
+npm install consensus
+```
+
+### 2. Configure environment
+
+Consensus proxy currently uses [CDP](https://www.coinbase.com/developer-platform) to configure the client wallet to interact with the x-402 server. In the future we will support browser wallets.
+
+Create a `.env` file:
+
+```env
+CDP_API_KEY_ID=your_api_key_id
+CDP_API_KEY_SECRET=your_api_key_secret
+CDP_WALLET_SECRET=your_wallet_secret
+```
+
+---
+
+### 3. Setup your client
+
+```bash
+npm run consensus setup
+```
+
+This generates:
+
+* Your wallet
+* Proxy URL
+* API key
+* A config file with your client information(**DO NOT EXPOSE THIS FILE!!!**)
+
+---
+
+### 4. Make a request in any language on any platform
+
+```bash
+curl -X POST http://localhost:3001/proxy \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: icp-price-check" \
+  -d '{"target_url": "https://api.coingecko.com/api/v3/simple/price?ids=internet-computer&vs_currencies=usd"}'
+```
+
+Returns:
+
+```json
+{
+  "status": 200,
+  "data": {
+    "internet-computer": {
+      "usd": 6.09
+    }
+  }
+}
+```
+
+> **Want raw metadata, proof of payment, or debug info?**
+> Add the header `X-Verbose: true` to get the full payload.
+
+```json
+{
+  "status": 200,
+  "statusText": "OK",
+  "data": {
+    "internet-computer": {
+      "usd": 6.09
+    }
+  },
+  "timestamp": 1753129159138,
+  "cached": false,
+  "payment_required": true,
+  "billing": {
+    "cost": "$0.001",
+    "reason": "payment_processed",
+    "idempotency_key": "icp-price-check9",
+    "processing_time_ms": 3045
+  },
+  "meta": {
+    "wallet_name": "0cc495c8c94834b3",
+    "account_address": "0x7d19e332F1b84D783bd7FeA5B6aa0b809B9A80A4",
+    "idempotency_key": "icp-price-check9",
+    "processing_time_ms": 3143,
+    "x402_proxy_handled": true,
+    "timestamp": "2025-07-21T20:19:19.142Z"
+  }
+}
+```
+
+Consensus Proxy is HTTP agnostic. This means you can make a request from any language on any platform. You can use `Motoko`, `Javascript/Typescript`, `Rust`, `Python`, `curl` to interact with the Consensus server.
