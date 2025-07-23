@@ -69,36 +69,37 @@ sequenceDiagram
     participant R1 as Node 1
     participant R2 as Node 2
     participant R3 as Node 3
-    participant P as Proxy
+    participant P as Proxy (x402-protected)
     participant API as External API
     participant C as Consensus
 
-    R1->>P: HTTP outcall (idempotency: weather-london-14:00 x-api-key: ba137)
-    R2->>P: HTTP outcall (idempotency: weather-london-14:00 x-api-key: ba137)
-    R3->>P: HTTP outcall (idempotency: weather-london-14:00 x-api-key: ba137)
+    R1->>P: HTTP outcall (idempotency: weather-london-14:00, x-api-key: ba137)
+    R2->>P: HTTP outcall (idempotency: weather-london-14:00, x-api-key: ba137)
+    R3->>P: HTTP outcall (idempotency: weather-london-14:00, x-api-key: ba137)
 
-    Note right of P: First request – cache MISS (proxy is protected by x402)
+    Note right of P: First request → cache MISS (proxy is protected by x402)
 
     P-->>R1: 402 Payment Required (x402 challenge)
-    R1->>P: Retry using fetch-with-payment + proof
+    R1->>P: Retry with fetch + payment
 
-    Note right of Proxy: Payment verified → request settled
+    Note right of P: Payment verified → request settled
 
-    P->>API: Single external API call
+    P->>API: External API call
     API-->>P: Response: {"temp": 15, "humidity": 80}
 
-    Note right of P: Cache response and server remaing incoming request with the same idempotent key
+    Note right of P: Response cached → reused for remaining requests
 
-    P-->>R1: Same response: {"temp": 15, "humidity": 80}
-    P-->>R2: Same response: {"temp": 15, "humidity": 80}
-    P-->>R3: Same response: {"temp": 15, "humidity": 80}
+    P-->>R1: Cached response
+    P-->>R2: Cached response
+    P-->>R3: Cached response
 
-
-    R1->>C: Process response → State change A
-    R2->>C: Process response → State change A
-    R3->>C: Process response → State change A
+    R1->>C: Process response → State A
+    R2->>C: Process response → State A
+    R3->>C: Process response → State A
 
     C-->>R1: Consensus reached
     C-->>R2: Consensus reached
     C-->>R3: Consensus reached
+
+    Note right of C: All replicas receive the same response
 ```
