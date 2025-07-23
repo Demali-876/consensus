@@ -21,6 +21,7 @@
     <img alt="GitHub stars" src="https://img.shields.io/github/stars/Demali-876/consensus?style=social">
   </a>
   <a href="#"><img alt="Status" src="https://img.shields.io/badge/status-experimental-yellow"></a>
+  <a href="#"><img alt="Infra" src="https://img.shields.io/badge/Sovereign%20Infra-No%20Cloud-black?style=flat-square&logo=raspberrypi&logoColor=white"></a>
 </p>
 
 <p align="center">
@@ -206,7 +207,7 @@ Returns:
     "processing_time_ms": 3045
   },
   "meta": {
-    "wallet_name": "0cc495c8c94834b3",
+    "wallet_name": "0cc495c8c94834b3", // In practice, you should not reveal your wallet name.
     "account_address": "0x7d19e332F1b84D783bd7FeA5B6aa0b809B9A80A4",
     "idempotency_key": "icp-price-check9",
     "processing_time_ms": 3143,
@@ -216,4 +217,16 @@ Returns:
 }
 ```
 
-Consensus Proxy is HTTP agnostic. This means you can make a request from any language on any platform. You can use `Motoko`, `Javascript/Typescript`, `Rust`, `Python`, `curl` to interact with the Consensus server.
+Consensus Proxy is language agnostic and is pure HTTPS. This means you can make a request from any language on any platform. You can use `Motoko`, `Javascript/Typescript`, `Rust`, `Python`, `curl` to interact with the Consensus server.
+
+## License
+
+This project is licensed under the Business Source License 1.1 (BUSL-1.1).
+
+The Licensed Work is:
+
+* © 2025 Canister Software Inc
+* Change Date: July 23, 2029
+* Change License: GNU GPL v2.0 or later
+
+For full terms, see the [LICENSE](./LICENSE) file.
