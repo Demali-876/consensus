@@ -32,37 +32,43 @@
 
 Blockchain consensus algorithms are powerful — but they come with baggage.
 
-On the Internet Computer (ICP), for example, when an application subnet performs an HTTP outcall, **each node** in the subnet independently makes the request. These nodes run replicas, and the responses from the HTTP outcalls are compared in the consesus process. This means:
+On the Internet Computer (ICP), for example, when an application subnet performs an HTTP outcall, **each node** in the subnet independently makes the request. These nodes run replicas, and the responses from the HTTP outcalls are compared in the consensus process. This means:
 
-- The same HTTP request is made by the entire subnet (one from each node in the subnet — typically 13 in the case of ICP).
-- Millisecond differences can lead to inconsistent responses.
-- The **transform function** helps by sanitizing the responses, but it doesn’t reduce the number of actual requests.
-- Each node makes the request from a **different physical machine**, which means **no shared IP address**, breaking determinism for services that rely on source identity.
+* The same HTTP request is made by every node in the subnet (typically 13 for ICP).
+* Millisecond differences can lead to inconsistent responses.
+* The **transform function** can sanitize these differences, but it doesn’t reduce the number of requests.
+* Each request originates from a **different physical machine**, meaning **no shared IP address** — breaking determinism for services that rely on caller identity.
 
-This especailly becomes a problem when your target endpoint is **not idempotent**.
+This especially becomes a problem when your target endpoint is **not idempotent**.
 
-Even if all but one response is ignored, your service may still receive multiple requests — potentially triggering **duplicate processing**, **double charges**, or **conflicting writes**.
+Even if only one response is used, your service may still receive **multiple requests**, potentially triggering **duplicate processing**, **double charges**, or **conflicting writes**.
 
-> With Consensus Proxy, only **1 request is executed** no matter how many are sent.
-> In consensus-based systems like ICP, that means cutting traffic by up to **~93%**.
-> In high-scale environments, it means **eliminating duplicate hits** that waste resources, blow past rate limits, or double-charge customers.
+> With Consensus Proxy, only **1 request is executed** — no matter how many are sent.
+> In consensus-based systems like ICP, this reduces outbound traffic by up to **\~93%**.
+> It also eliminates **duplicate hits** that waste resources, exceed rate limits, or create billing issues.
 
-Whether your backend is behind a serverless API, rate-limited SaaS platform, or payment gateway, Consensus Proxy ensures **you pay once, process once — no matter how many nodes, retries, or consensus rounds are involved.**
+Whether your backend is a serverless function, a rate-limited SaaS API, or a payment gateway, Consensus Proxy ensures you **pay once, process once — regardless of how many nodes, retries, or consensus rounds are involved**.
 
 ---
 
-### Consensus Proxy
+## Consensus Proxy
 
 Consensus Proxy solves this problem at the protocol level.
 
 It acts as a **deduplication layer** that:
 
-- Receives all node-originated requests
-- Executes the request **exactly once**
-- Caches and returns the same result to all participants
-- Verifies **payment via `x402`**
+* Receives all node-originated HTTP outcalls
+* Executes the request **exactly once**
+* Caches and returns the same result to all callers
+* Challenges the caller with **x402** to ensure payment before processing
+
+---
 
 ## How it works
+
+Without deduplication, every replica sends its own request — resulting in N redundant API hits per consensus round.
+
+With Consensus Proxy, the **first request triggers an [x402](https://www.x402.org) payment challenge**. The client retries using a wrapper (like `fetch-with-payment`), and upon successful verification, the proxy settles the request, makes the external call, and caches the result for reuse.
 
 ```mermaid
 sequenceDiagram
@@ -73,19 +79,19 @@ sequenceDiagram
     participant API as External API
     participant C as Consensus
 
-    R1->>P: HTTP outcall (idempotency: weather-london-14:00, x-api-key: ba137)
-    R2->>P: HTTP outcall (idempotency: weather-london-14:00, x-api-key: ba137)
-    R3->>P: HTTP outcall (idempotency: weather-london-14:00, x-api-key: ba137)
+    R1->>P: HTTP outcall (idempotency: icp23072025, x-api-key: ba137)
+    R2->>P: HTTP outcall (idempotency: icp23072025, x-api-key: ba137)
+    R3->>P: HTTP outcall (idempotency: icp23072025, x-api-key: ba137)
 
-    Note right of P: First request → cache MISS (proxy is protected by x402)
+    Note right of P: First request → cache MISS → x402 challenge
 
     P-->>R1: 402 Payment Required (x402 challenge)
-    R1->>P: Retry with fetch + payment
+    R1->>P: Retry using fetch-with-payment
 
     Note right of P: Payment verified → request settled
 
     P->>API: External API call
-    API-->>P: Response: {"temp": 15, "humidity": 80}
+    API-->>P: Response: {"usd": 6.09}
 
     Note right of P: Response cached → reused for remaining requests
 
@@ -103,3 +109,15 @@ sequenceDiagram
 
     Note right of C: All replicas receive the same response
 ```
+
+---
+
+### Step-by-Step
+
+1. **All nodes in a subnet execute the same canister function**, triggering identical HTTP outcalls.
+2. Each node sends its request to the **Consensus Proxy**, including an idempotency key.
+3. The **first request** is met with an **x402 challenge** — a payment requirement.
+4. The client request is wrapped automatically to fetch the data with payment, **settling the request**.
+5. The proxy **makes the external API call** and **caches the result**.
+6. All remaining requests with the same idempotency key receive the **cached response**.
+7. Replicas process identical responses → **state converges** → **consensus succeeds**.
