@@ -90,7 +90,7 @@ sequenceDiagram
 
     Note right of P: Payment verified → request settled
 
-    P->>API: External API call
+    P->>API: External API call(eg: coinGecko)
     API-->>P: Response: {"usd": 6.09}
 
     Note right of P: Response cached → reused for remaining requests
