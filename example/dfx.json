@@ -1,0 +1,17 @@
+{
+  "canisters": {
+    "example_backend": {
+      "main": "src/example_backend/main.mo",
+      "type": "motoko",
+      "optimize": "cycles"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}
