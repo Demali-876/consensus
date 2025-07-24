@@ -65,7 +65,7 @@ It acts as a **deduplication layer** that:
 
 ## How it works
 
-Without deduplication, every replica sends its own request — resulting in N redundant API hits per consensus round.
+Without deduplication, every replica sends its own request — resulting in N-1 redundant API hits per consensus round.
 
 With Consensus Proxy, the **first request triggers an [x402](https://www.x402.org) payment challenge**. The client retries using a wrapper (like `fetch-with-payment`), and upon successful verification, the proxy settles the request, makes the external call, and caches the result for reuse.
 
