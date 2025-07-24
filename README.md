@@ -50,8 +50,6 @@ Even if only one response is used, your service may still receive **multiple req
 
 Whether your backend is a serverless function, a rate-limited SaaS API, or a payment gateway, Consensus Proxy ensures you **pay once, process once — regardless of how many nodes, retries, or consensus rounds are involved**.
 
----
-
 ## Consensus Proxy
 
 Consensus Proxy solves this problem at the protocol level.
