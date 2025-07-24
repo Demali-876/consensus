@@ -10,7 +10,7 @@
 
 <p align="center">
   HTTP deduplication protocol with secure, verifiable payments via <strong>x402</strong><br>
-  HTTP as it should be for modern blockchains. Protect your APIs from the chaos of consensus
+  HTTP as it should be for modern blockchains. Protect your APIs from the chaos of consensus<br>
   Built for decentralization. Runs on a Raspberry Pi
 </p>
 
