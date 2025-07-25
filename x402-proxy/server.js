@@ -27,10 +27,28 @@ app.use(limiter);
 
 app.use(express.json({ limit: '10mb' }));
 
+// Storage for wallet management
 const registeredWallets = new Map();
 const walletClients = new Map();
 const apiKeys = new Map();
 const requestTracker = new Map();
+
+// Clean up old request tracking every hour
+setInterval(() => {
+  const oneHourAgo = Date.now() - (60 * 60 * 1000);
+  let cleanedCount = 0;
+  
+  for (const [key, data] of requestTracker.entries()) {
+    if (new Date(data.timestamp).getTime() < oneHourAgo) {
+      requestTracker.delete(key);
+      cleanedCount++;
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`Cleaned up ${cleanedCount} old request tracking entries`);
+  }
+}, 60 * 60 * 1000); // Every hour
 
 function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
@@ -68,9 +86,7 @@ app.post('/register-wallet', async (req, res) => {
     if (!private_key || private_key.length < 64) {
       return res.status(400).json({
         error: 'Invalid private key format',
-        message: 'Private key appears to be invalid or too short',
-        received_format: typeof private_key,
-        received_length: private_key ? private_key.length : 0
+        message: 'Private key appears to be invalid or too short'
       });
     }
 
@@ -85,9 +101,6 @@ app.post('/register-wallet', async (req, res) => {
     try {
       const formattedPrivateKey = private_key.startsWith('0x') ? private_key : `0x${private_key}`;
       const account = privateKeyToAccount(formattedPrivateKey);
-
-      console.log(`Debug - Account created from private key: ${account.address}`);
-      console.log(`Debug - Expected address: ${account_address}`);
 
       if (account.address.toLowerCase() !== account_address.toLowerCase()) {
         return res.status(400).json({
@@ -153,25 +166,27 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       });
     }
 
+    // Generate idempotency key if not provided
     const idempotencyKey = idempotency_key || 
                           headers['x-idempotency-key'] ||
                           `auto-${walletName}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
+    // Check for duplicate requests (x402 proxy level deduplication)
     if (requestTracker.has(idempotencyKey)) {
       const tracked = requestTracker.get(idempotencyKey);
-      console.log(`Duplicate request detected: ${idempotencyKey}`);
+      console.log(`Duplicate request detected at proxy level: ${idempotencyKey}`);
       
       return res.status(200).json({
         ...tracked.response,
         meta: {
           ...tracked.response.meta,
-          duplicate_request: true,
+          duplicate_request_at_proxy: true,
           original_timestamp: tracked.timestamp
         }
       });
     }
 
-    let fetchWithPayment = walletClients.get(walletName);
+    const fetchWithPayment = walletClients.get(walletName);
     if (!fetchWithPayment) {
       return res.status(400).json({
         error: 'Wallet client not found',
@@ -179,8 +194,9 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       });
     }
 
-    console.log(`Processing request: ${method} ${target_url} [${idempotencyKey}]`);
+    console.log(`Forwarding request: ${method} ${target_url} [${idempotencyKey}]`);
 
+    // Forward to consensus server with x402 payment handling
     const response = await fetchWithPayment(consensusServerUrl + '/proxy', {
       method: 'POST',
       headers: {
@@ -198,29 +214,31 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       })
     });
 
+    if (!response.ok && response.status !== 402) {
+      throw new Error(`Consensus server responded with ${response.status}: ${response.statusText}`);
+    }
+
     const responseData = await response.json();
     const processingTime = Date.now() - startTime;
 
     const finalResponse = {
       ...responseData,
       meta: {
+        ...(responseData.meta || {}),
         wallet_name: walletName,
         account_address: registeredWallets.get(walletName),
         idempotency_key: idempotencyKey,
-        processing_time_ms: processingTime,
+        proxy_processing_time_ms: processingTime,
         x402_proxy_handled: true,
         timestamp: new Date().toISOString()
       }
     };
 
+    // Track this request to prevent duplicates
     requestTracker.set(idempotencyKey, {
       response: finalResponse,
       timestamp: new Date().toISOString()
     });
-
-    setTimeout(() => {
-      requestTracker.delete(idempotencyKey);
-    }, 24 * 60 * 60 * 1000); // 24 hours
 
     res.status(response.status).json(finalResponse);
 
@@ -236,10 +254,11 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       });
     }
     
-    if (error.message.includes('network')) {
+    if (error.message.includes('network') || error.message.includes('ECONNREFUSED')) {
       return res.status(503).json({
         error: 'Network error',
         message: 'Unable to connect to consensus server',
+        consensus_server: consensusServerUrl,
         retry_after: 30
       });
     }
@@ -259,6 +278,7 @@ app.get('/health', (req, res) => {
     service: 'x402-payment-proxy',
     registered_wallets: registeredWallets.size,
     active_clients: walletClients.size,
+    tracked_requests: requestTracker.size,
     consensus_server: consensusServerUrl,
     timestamp: new Date().toISOString()
   });
@@ -300,5 +320,6 @@ process.on('SIGINT', () => {
 app.listen(port, () => {
   console.log(`🚀 x402 Payment Proxy running on port ${port}`);
   console.log(`🏗️  Consensus server: ${consensusServerUrl}`);
-  console.log('✅ Ready for wallet registrations and proxy requests');
+  console.log(`💳 Ready for wallet registrations and proxy requests`);
+  console.log(`✅ Clean request forwarding with automatic x402 payments`);
 });

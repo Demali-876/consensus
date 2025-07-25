@@ -7,13 +7,29 @@ import Result "mo:base/Result";
 import Env "../env";
 
 actor {
-  public query func transform({
+  public shared query func transform({
     context : Blob;
     response : IC.http_request_result;
   }) : async IC.http_request_result {
     {
       response with headers = [];
     };
+  };
+
+  private func escapeJson(text : Text) : Text {
+    let chars = text.chars();
+    var result = "";
+    for (char in chars) {
+      switch (char) {
+        case ('\"') { result #= "\\\""; };
+        case ('\\') { result #= "\\\\"; };
+        case ('\n') { result #= "\\n"; };
+        case ('\r') { result #= "\\r"; };
+        case ('\t') { result #= "\\t"; };
+        case (_) { result #= Text.fromChar(char); };
+      };
+    };
+    result;
   };
 
   public func send_sms_ic(to : Text, message : Text) : async Result.Result<Text, Text> {
@@ -29,8 +45,9 @@ actor {
       { name = "Accept"; value = "application/json" },
       { name = "Authorization"; value = auth_header },
     ];
-    
-    let json_payload = "{\"messages\":[{\"destinations\":[{\"to\":\"" # to # "\"}],\"from\":\"" # from_number # "\",\"text\":\"" # message # "\"}]}";
+
+    let escaped_message = escapeJson(message);
+    let json_payload = "{\"messages\":[{\"destinations\":[{\"to\":\"" # to # "\"}],\"from\":\"" # from_number # "\",\"text\":\"" # escaped_message # "\"}]}";
     
     let http_request : IC.http_request_args = {
       url = url;
@@ -65,9 +82,11 @@ actor {
     let from_number = Env.infobip_from_number;
     let auth_header = "App " # Env.infobip_api_key;
 
-    let infobip_payload = "{ \"messages\": [ { \"destinations\": [ { \"to\": \"" # to # "\" } ], \"from\": \"" # from_number # "\", \"text\": \"" # message # "\" } ] }";
-    let target_payload = "{ \"target_url\": \"" # infobip_url # "\", \"idempotency_key\": \"sms-" # to # "\", \"headers\": [{\"name\": \"Authorization\", \"value\": \"" # auth_header # "\"}], \"body\": \"" # infobip_payload # "\" }";
-    
+    let escaped_message = escapeJson(message);
+    let infobip_payload = "{\\\"messages\\\":[{\\\"destinations\\\":[{\\\"to\\\":\\\"" # to # "\\\"}],\\\"from\\\":\\\"" # from_number # "\\\",\\\"text\\\":\\\"" # escaped_message # "\\\"}]}";
+
+    let target_payload = "{\"target_url\":\"" # infobip_url # "\",\"idempotency_key\":\"sms-" # to # "\",\"headers\":[{\"name\":\"Authorization\",\"value\":\"" # auth_header # "\"}],\"body\":\"" # infobip_payload # "\"}";
+
     let request_headers : [IC.http_header] = [
       { name = "X-API-Key"; value = proxy_api_key },
       { name = "Content-Type"; value = "application/json" },
@@ -81,7 +100,7 @@ actor {
       headers = request_headers;
       body = ?Text.encodeUtf8(target_payload);
       method = #post;
-      transform = null;
+      transform = ?transform;
     };
     
     try {

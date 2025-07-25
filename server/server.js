@@ -3,6 +3,8 @@ const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cors = require('cors');
+const axios = require('axios');
+const zlib = require('zlib');
 const { exact } = require('x402/schemes');
 const { useFacilitator } = require('x402/verify');
 const { processPriceToAtomicAmount } = require('x402/shared');
@@ -38,6 +40,96 @@ const facilitatorConfig = {
 
 const { verify, settle } = useFacilitator(facilitatorConfig);
 const x402Version = 1;
+
+// Track concurrent requests to prevent double charging
+const processingRequests = new Map();
+
+// Function to make actual API requests
+async function makeApiRequest(url, method, headers, body) {
+  const cleanHeaders = { ...headers };
+
+  // Remove headers that shouldn't be forwarded
+  delete cleanHeaders['host'];
+  delete cleanHeaders['content-length'];
+  delete cleanHeaders['content-encoding'];
+  delete cleanHeaders['transfer-encoding'];
+  delete cleanHeaders['connection'];
+  delete cleanHeaders['x-idempotency-key'];
+  delete cleanHeaders['idempotency-key'];
+  delete cleanHeaders['X-Idempotency-Key'];
+  delete cleanHeaders['x-payment'];
+  delete cleanHeaders['X-Payment'];
+  delete cleanHeaders['x-verbose'];
+  delete cleanHeaders['X-Verbose'];
+
+  const config = {
+    method: method.toLowerCase(),
+    url,
+    headers: cleanHeaders,
+    timeout: 30000,
+    validateStatus: () => true,
+    maxRedirects: 5,
+    decompress: false,
+    responseType: 'arraybuffer',
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity
+  };
+
+  if (body && ['post', 'put', 'patch'].includes(method.toLowerCase())) {
+    config.data = body;
+    if (!cleanHeaders['content-type'] && typeof body === 'object') {
+      config.headers['content-type'] = 'application/json';
+    }
+  }
+
+  try {
+    console.log(`Making API request: ${method} ${url}`);
+    const response = await axios(config);
+    let rawData = response.data;
+    let contentEncoding = (response.headers['content-encoding'] || '').toLowerCase();
+
+    // Handle compressed responses
+    if (contentEncoding === 'gzip') {
+      rawData = zlib.gunzipSync(rawData);
+    } else if (contentEncoding === 'deflate') {
+      rawData = zlib.inflateSync(rawData);
+    } else if (contentEncoding === 'br') {
+      rawData = zlib.brotliDecompressSync(rawData);
+    }
+
+    const textData = Buffer.from(rawData).toString('utf8');
+
+    let parsed;
+    try {
+      parsed = JSON.parse(textData);
+    } catch (e) {
+      parsed = textData;
+    }
+
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      data: parsed,
+      timestamp: Date.now()
+    };
+  } catch (error) {
+    console.error(`API request failed for ${url}:`, error.message);
+    
+    return {
+      status: error.response?.status || 500,
+      statusText: error.response?.statusText || 'Internal Server Error',
+      headers: error.response?.headers || {},
+      data: {
+        error: 'Request failed',
+        message: error.message,
+        code: error.code,
+        url: url
+      },
+      timestamp: Date.now()
+    };
+  }
+}
 
 function createPaymentRequirements(resource, description = "Consensus: HTTP Deduplication Service") {
   try {
@@ -102,7 +194,6 @@ async function verifyPayment(req, res, paymentRequirements) {
 
   try {
     console.log(`Verifying payment with facilitator: ${facilitatorUrl}`);
-
     const response = await verify(decodedPayment, paymentRequirements);
     
     if (!response.isValid) {
@@ -119,64 +210,7 @@ async function verifyPayment(req, res, paymentRequirements) {
     return { isValid: true, decodedPayment };
   } catch (error) {
     console.error('Payment verification error:', error);
-    console.error('Error details:', {
-      message: error.message,
-      code: error.code,
-      cause: error.cause?.message || 'No cause details',
-      stack: error.stack?.split('\n').slice(0, 5).join('\n')
-    });
     
-    if (error.message.includes('RequestContentLengthMismatchError') ||
-        error.message.includes('content-length') ||
-        error.message.includes('Request body length does not match') ||
-        error.code === 'UND_ERR_REQ_CONTENT_LENGTH_MISMATCH' ||
-        error.cause?.code === 'UND_ERR_REQ_CONTENT_LENGTH_MISMATCH') {
-      
-      console.log('Content-length mismatch detected - this suggests an issue with the HTTP request to the facilitator');
-
-      try {
-        console.log('Attempting retry with fresh facilitator connection...');
-        const retryFacilitator = useFacilitator({
-          url: facilitatorUrl,
-          timeout: 15000,
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'Connection': 'close'
-          }
-        });
-        
-        const retryResponse = await retryFacilitator.verify(decodedPayment, paymentRequirements);
-
-        if (retryResponse.isValid) {
-          console.log('Retry verification successful');
-          return { isValid: true, decodedPayment };
-        } else {
-          console.log('Retry verification failed:', retryResponse.invalidReason);
-          return res.status(402).json({
-            x402Version,
-            error: "Payment verification failed",
-            message: retryResponse.invalidReason,
-            accepts: [paymentRequirements],
-            payer: retryResponse.payer,
-          });
-        }
-      } catch (retryError) {
-        console.error('Retry verification also failed:', retryError.message);
-        
-        return res.status(402).json({
-          x402Version,
-          error: "Facilitator connection error",
-          message: "Unable to verify payment due to persistent facilitator communication issues.",
-          accepts: [paymentRequirements],
-          debug: {
-            issue: "Content-length mismatch with facilitator",
-            facilitator_url: facilitatorUrl,
-            suggestion: "The facilitator service may be experiencing issues. Please try again."
-          }
-        });
-      }
-    }
     if (error.message.includes('fetch failed') || 
         error.message.includes('ECONNREFUSED') ||
         error.message.includes('ENOTFOUND') ||
@@ -184,12 +218,8 @@ async function verifyPayment(req, res, paymentRequirements) {
       return res.status(402).json({
         x402Version,
         error: "Payment network error",
-        message: "Unable to connect to payment facilitator. Please check your internet connection and try again.",
+        message: "Unable to connect to payment facilitator.",
         accepts: [paymentRequirements],
-        debug: {
-          facilitator_url: facilitatorUrl,
-          error_type: "Network connection failure"
-        }
       });
     }
 
@@ -198,10 +228,6 @@ async function verifyPayment(req, res, paymentRequirements) {
       error: "Payment verification failed",
       message: "Unable to verify payment due to an unexpected error.",
       accepts: [paymentRequirements],
-      debug: {
-        error_message: error.message,
-        error_code: error.code
-      }
     });
   }
 }
@@ -221,10 +247,6 @@ app.get('/', (req, res) => {
       proxy: 'POST /proxy - Make deduplicated API calls',
       health: 'GET /health - Service health check',
       stats: 'GET /stats - Service statistics'
-    },
-    usage: {
-      note: 'Use x402-enabled client for automatic payments',
-      x402_proxy: 'Required for payment handling'
     }
   });
 });
@@ -240,7 +262,8 @@ app.get('/health', (req, res) => {
     cache_hits: stats.cache_hits,
     payment_address: payTo,
     facilitator_url: facilitatorUrl,
-    x402_version: x402Version
+    x402_version: x402Version,
+    currently_processing: processingRequests.size
   });
 });
 
@@ -256,6 +279,7 @@ app.get('/stats', (req, res) => {
     network: 'base-sepolia',
     cache_hit_rate: stats.total_requests > 0 ? 
       ((stats.cache_hits / stats.total_requests) * 100).toFixed(2) + '%' : '0%',
+    currently_processing: processingRequests.size,
     uptime: process.uptime(),
     timestamp: new Date().toISOString()
   });
@@ -263,24 +287,26 @@ app.get('/stats', (req, res) => {
 
 app.all('/proxy', async (req, res) => {
   const startTime = Date.now();
-  
+
   try {
-    const { target_url, method = 'GET', headers = {}, body } = req.body;
-    
+    const { target_url, method, headers = {}, body } = req.body;
+
+    // Validate input
     if (!target_url) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing target_url',
-        message: 'target_url is required in request body',
-        example: {
-          target_url: 'https://api.example.com/data',
-          method: 'GET',
-          headers: { 'x-idempotency-key': 'unique-key' }
-        }
+        message: 'target_url is required in request body'
       });
     }
 
     try {
-      new URL(target_url);
+      const parsedUrl = new URL(target_url);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return res.status(400).json({
+          error: 'Invalid protocol',
+          message: 'Only http and https URLs are supported'
+        });
+      }
     } catch (urlError) {
       return res.status(400).json({
         error: 'Invalid target_url',
@@ -288,99 +314,157 @@ app.all('/proxy', async (req, res) => {
       });
     }
 
-    const idempotencyKey = headers['x-idempotency-key'] ||
-                          headers['idempotency-key'] ||
-                          headers['X-Idempotency-Key'];
-    
-    if (!idempotencyKey) {
-      return res.status(400).json({ 
-        error: 'Missing idempotency key',
-        message: 'x-idempotency-key is required in headers',
-        required: 'Include x-idempotency-key in headers object for deduplication'
+    const methodUpper = (method || 'GET').toUpperCase();
+    const allowedMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+    if (!allowedMethods.includes(methodUpper)) {
+      return res.status(400).json({
+        error: 'Unsupported HTTP method',
+        message: `Method "${method}" is not supported`,
+        allowed_methods: allowedMethods
       });
     }
 
-    console.log(`Processing: ${method} ${target_url} [${idempotencyKey}]`);
+    const idempotencyKey = headers['x-idempotency-key'] ||
+                          headers['idempotency-key'] ||
+                          headers['X-Idempotency-Key'];
 
-    const requiresPayment = proxy.requiresPayment(idempotencyKey);
-    
-    if (requiresPayment) {
-      console.log(`Payment required for: ${idempotencyKey}`);
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        error: 'Missing idempotency key',
+        message: 'x-idempotency-key is required in headers'
+      });
+    }
 
-      const resource = `${req.protocol}://${req.headers.host}/proxy`;
-      const paymentRequirements = createPaymentRequirements(
-        resource, 
-        `Consensus Deduplication: ${target_url}`
-      );
+    console.log(`Processing: ${methodUpper} ${target_url} [${idempotencyKey}]`);
 
-      const paymentResult = await verifyPayment(req, res, paymentRequirements);
-      if (!paymentResult || !paymentResult.isValid) {
-        return; 
-      }
-
-      proxy.markAsPaid(idempotencyKey);
-      console.log(`Payment verified for: ${idempotencyKey}`);
-
+    // Check if this request is already being processed
+    if (processingRequests.has(idempotencyKey)) {
+      console.log(`Request already in progress, waiting: ${idempotencyKey}`);
+      
       try {
-        const settleResponse = await settle(paymentResult.decodedPayment, paymentRequirements);
-        const responseHeader = settleResponseHeader(settleResponse);
-        res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
-        console.log(`Payment settled for: ${idempotencyKey}`);
-      } catch (settleError) {
-        console.error('Payment settlement failed:', settleError.message);
+        const existingResponse = await processingRequests.get(idempotencyKey);
+        const processingTime = Date.now() - startTime;
+        
+        console.log(`Returning result for concurrent request: ${idempotencyKey}`);
+        
+        return res.status(existingResponse.status).json({
+          status: existingResponse.status,
+          statusText: existingResponse.statusText || 'OK',
+          headers: existingResponse.headers,
+          data: existingResponse.data
+        });
+      } catch (waitError) {
+        console.error(`Error waiting for existing request: ${waitError.message}`);
+        processingRequests.delete(idempotencyKey);
       }
     }
 
-    const response = await proxy.handleRequest(target_url, method, headers, body);
-    const processingTime = Date.now() - startTime;
+    // Check cache first
+    const cachedResponse = proxy.checkCache(idempotencyKey);
+    if (cachedResponse) {
+      const processingTime = Date.now() - startTime;
+      return res.status(cachedResponse.status).json({
+        status: cachedResponse.status,
+        statusText: cachedResponse.statusText || 'OK',
+        headers: cachedResponse.headers,
+        data: cachedResponse.data
+      });
+    }
 
-    const verboseHeader = req.headers['x-verbose'];
-    const isVerbose = typeof verboseHeader === 'string' && verboseHeader.toLowerCase() === 'true';
+    // Create request promise for concurrent handling
+    const requestPromise = (async () => {
+      let paymentSettled = false;
 
-    if (isVerbose) {
+      // Check if payment is required
+      const requiresPayment = proxy.requiresPayment(idempotencyKey);
+      
+      if (requiresPayment) {
+        console.log(`Payment required for: ${idempotencyKey}`);
+
+        const resource = `${req.protocol}://${req.headers.host}/proxy`;
+        const paymentRequirements = createPaymentRequirements(resource, `Consensus: ${target_url}`);
+
+        const paymentResult = await verifyPayment(req, res, paymentRequirements);
+        if (!paymentResult || !paymentResult.isValid) {
+          throw new Error('Payment verification failed');
+        }
+
+        // Mark as paid immediately after verification
+        proxy.markAsPaid(idempotencyKey);
+        console.log(`Payment verified for: ${idempotencyKey}`);
+
+        try {
+          const settleResponse = await settle(paymentResult.decodedPayment, paymentRequirements);
+          const responseHeader = settleResponseHeader(settleResponse);
+          res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
+          console.log(`Payment settled for: ${idempotencyKey}`);
+          paymentSettled = true;
+        } catch (settleError) {
+          console.error('Payment settlement failed:', settleError.message);
+        }
+      }
+
+      // Make the actual API request
+      try {
+        const response = await makeApiRequest(target_url, methodUpper, headers, body);
+        
+        // Cache the response
+        proxy.cacheResponse(idempotencyKey, response);
+        
+        return response;
+      } catch (error) {
+        // If request fails after payment, remove paid status
+        if (paymentSettled) {
+          console.log(`Request failed after payment, removing paid status: ${idempotencyKey}`);
+          proxy.removePaidStatus(idempotencyKey);
+        }
+        throw error;
+      }
+    })();
+
+    // Store promise to handle concurrent requests
+    processingRequests.set(idempotencyKey, requestPromise);
+
+    // Cleanup function
+    const cleanup = () => {
+      processingRequests.delete(idempotencyKey);
+    };
+    
+    requestPromise.finally(cleanup);
+    setTimeout(cleanup, 5 * 60 * 1000); // 5 minute safety net
+
+    try {
+      const response = await requestPromise;
+      const processingTime = Date.now() - startTime;
+
       return res.status(response.status).json({
         status: response.status,
         statusText: response.statusText || 'OK',
         headers: response.headers,
-        data: response.data,
-        billing: {
-          cost: requiresPayment ? '$0.001' : '$0.000',
-          reason: response.cached ? 'cache_hit' : requiresPayment ? 'payment_processed' : 'already_paid',
-          idempotency_key: idempotencyKey,
-          processing_time_ms: processingTime
-        },
-        meta: {
-          timestamp: new Date().toISOString(),
-          server_version: '1.0.1'
-        }
+        data: response.data
       });
+    } catch (requestError) {
+      throw requestError;
     }
 
-    return res.status(response.status).json({
-      status: response.status,
-      statusText: response.statusText || 'OK',
-      headers: response.headers,
-      data: response.data
-    });
   } catch (error) {
     console.error('Proxy request error:', error);
 
     if (error.message.includes('ENOTFOUND') || error.message.includes('ECONNREFUSED')) {
       return res.status(502).json({
         error: 'Target API unreachable',
-        message: 'Unable to connect to the target API',
-        target_url: req.body?.target_url
-      });
-    }
-    if (error.message.includes('timeout')) {
-      return res.status(504).json({
-        error: 'Request timeout',
-        message: 'Target API did not respond in time',
-        target_url: req.body?.target_url
+        message: 'Unable to connect to the target API'
       });
     }
 
-    res.status(500).json({ 
+    if (error.message.includes('timeout')) {
+      return res.status(504).json({
+        error: 'Request timeout',
+        message: 'Target API did not respond in time'
+      });
+    }
+
+    res.status(500).json({
       error: 'Internal server error',
       message: 'An unexpected error occurred processing your request',
       timestamp: new Date().toISOString()
@@ -408,10 +492,10 @@ process.on('SIGINT', () => {
 });
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`Consensus Server running on port ${port}`);
-  console.log(`Payment address: ${payTo}`);
-  console.log(`Facilitator URL: ${facilitatorUrl}`);
-  console.log(`Price: $0.001 per unique API call`);
+  console.log(`🚀 Consensus Server running on port ${port}`);
+  console.log(`💰 Payment address: ${payTo}`);
+  console.log(`🔗 Facilitator URL: ${facilitatorUrl}`);
+  console.log(`💵 Price: $0.001 per unique API call`);
   console.log(`🌐 Network: Base Sepolia`);
   console.log(`✅ Ready for x402 payment requests`);
 });
