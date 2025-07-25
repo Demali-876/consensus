@@ -8,7 +8,6 @@ class ConsensusProxy {
     this.cache = new NodeCache({ stdTTL: 300 });
     this.pendingRequests = new Map();
     this.paidKeys = new Set();
-    this.supportedMethods = ['GET', 'POST', 'HEAD'];
     this.stats = {
       total_requests: 0,
       cache_hits: 0,

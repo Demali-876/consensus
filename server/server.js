@@ -17,7 +17,7 @@ app.use(helmet());
 app.use(cors());
 
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 5000,
   message: { error: 'Too many requests, please try again later' }
 });
@@ -149,10 +149,10 @@ async function verifyPayment(req, res, paymentRequirements) {
         const retryResponse = await retryFacilitator.verify(decodedPayment, paymentRequirements);
 
         if (retryResponse.isValid) {
-          console.log('✅ Retry verification successful');
+          console.log('Retry verification successful');
           return { isValid: true, decodedPayment };
         } else {
-          console.log('❌ Retry verification failed:', retryResponse.invalidReason);
+          console.log('Retry verification failed:', retryResponse.invalidReason);
           return res.status(402).json({
             x402Version,
             error: "Payment verification failed",
@@ -279,7 +279,6 @@ app.all('/proxy', async (req, res) => {
       });
     }
 
-    // Validate URL format
     try {
       new URL(target_url);
     } catch (urlError) {
@@ -334,19 +333,34 @@ app.all('/proxy', async (req, res) => {
 
     const response = await proxy.handleRequest(target_url, method, headers, body);
     const processingTime = Date.now() - startTime;
-    
-    return res.json({
-      ...response,
-      billing: {
-        cost: requiresPayment ? '$0.001' : '$0.000',
-        reason: response.cached ? 'cache_hit' : requiresPayment ? 'payment_processed' : 'already_paid',
-        idempotency_key: idempotencyKey,
-        processing_time_ms: processingTime
-      },
-      meta: {
-        timestamp: new Date().toISOString(),
-        server_version: '1.0.1'
-      }
+
+    const verboseHeader = req.headers['x-verbose'];
+    const isVerbose = typeof verboseHeader === 'string' && verboseHeader.toLowerCase() === 'true';
+
+    if (isVerbose) {
+      return res.status(response.status).json({
+        status: response.status,
+        statusText: response.statusText || 'OK',
+        headers: response.headers,
+        data: response.data,
+        billing: {
+          cost: requiresPayment ? '$0.001' : '$0.000',
+          reason: response.cached ? 'cache_hit' : requiresPayment ? 'payment_processed' : 'already_paid',
+          idempotency_key: idempotencyKey,
+          processing_time_ms: processingTime
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          server_version: '1.0.1'
+        }
+      });
+    }
+
+    return res.status(response.status).json({
+      status: response.status,
+      statusText: response.statusText || 'OK',
+      headers: response.headers,
+      data: response.data
     });
   } catch (error) {
     console.error('Proxy request error:', error);
