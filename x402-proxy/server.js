@@ -15,27 +15,22 @@ const app = express();
 const port = process.env.X402_PROXY_PORT || 3001;
 const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'http://localhost:8080';
 
-// Security middleware
 app.use(helmet());
 app.use(cors());
 
-// Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // limit each IP to 1000 requests per windowMs
+  windowMs: 15 * 60 * 1000, 
+  max: 1000,
   message: { error: 'Too many requests, please try again later' }
 });
 app.use(limiter);
 
 app.use(express.json({ limit: '10mb' }));
 
-// Wallet storage and client cache
-const registeredWallets = new Map(); // wallet_name -> account_address
-const walletClients = new Map(); // wallet_name -> fetchWithPayment
-const apiKeys = new Map(); // api_key -> wallet_name
-
-// Request tracking for idempotency
-const requestTracker = new Map(); // idempotency_key -> { status, response, timestamp }
+const registeredWallets = new Map();
+const walletClients = new Map();
+const apiKeys = new Map();
+const requestTracker = new Map();
 
 function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
@@ -59,7 +54,6 @@ function validateApiKey(req, res, next) {
   next();
 }
 
-// Register wallet endpoint - Client provides private key
 app.post('/register-wallet', async (req, res) => {
   try {
     const { wallet_name, account_address, private_key } = req.body;
@@ -71,15 +65,6 @@ app.post('/register-wallet', async (req, res) => {
       });
     }
 
-    // Validate wallet name format (16 hex characters)
-    if (!/^[a-f0-9]{16}$/.test(wallet_name)) {
-      return res.status(400).json({
-        error: 'Invalid wallet name format',
-        message: 'Wallet name must be 16 hexadecimal characters'
-      });
-    }
-
-    // Validate private key format (more flexible)
     if (!private_key || private_key.length < 64) {
       return res.status(400).json({
         error: 'Invalid private key format',
@@ -89,7 +74,6 @@ app.post('/register-wallet', async (req, res) => {
       });
     }
 
-    // Check if already registered
     if (registeredWallets.has(wallet_name)) {
       return res.status(409).json({
         error: 'Wallet already registered',
@@ -98,17 +82,13 @@ app.post('/register-wallet', async (req, res) => {
       });
     }
 
-    // Create account directly from private key using viem
     try {
-      // Ensure private key has 0x prefix
       const formattedPrivateKey = private_key.startsWith('0x') ? private_key : `0x${private_key}`;
-      
       const account = privateKeyToAccount(formattedPrivateKey);
-      
+
       console.log(`Debug - Account created from private key: ${account.address}`);
       console.log(`Debug - Expected address: ${account_address}`);
-      
-      // Verify the account address matches what client provided
+
       if (account.address.toLowerCase() !== account_address.toLowerCase()) {
         return res.status(400).json({
           error: 'Address mismatch',
@@ -125,8 +105,7 @@ app.post('/register-wallet', async (req, res) => {
       });
       
       const fetchWithPayment = wrapFetchWithPayment(fetch, walletClient);
-      
-      // Store everything
+
       registeredWallets.set(wallet_name, account_address);
       walletClients.set(wallet_name, fetchWithPayment);
       
@@ -140,7 +119,6 @@ app.post('/register-wallet', async (req, res) => {
       });
     }
 
-    // Generate API key
     const apiKey = crypto.randomBytes(32).toString('hex');
     apiKeys.set(apiKey, wallet_name);
     
@@ -161,7 +139,6 @@ app.post('/register-wallet', async (req, res) => {
   }
 });
 
-// Main proxy endpoint
 app.post('/proxy', validateApiKey, async (req, res) => {
   const startTime = Date.now();
   
@@ -176,12 +153,10 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       });
     }
 
-    // Generate or validate idempotency key
     const idempotencyKey = idempotency_key || 
                           headers['x-idempotency-key'] ||
                           `auto-${walletName}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
-    // Check for duplicate request (idempotency protection)
     if (requestTracker.has(idempotencyKey)) {
       const tracked = requestTracker.get(idempotencyKey);
       console.log(`Duplicate request detected: ${idempotencyKey}`);
@@ -196,7 +171,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       });
     }
 
-    // Get wallet client (should already exist from registration)
     let fetchWithPayment = walletClients.get(walletName);
     if (!fetchWithPayment) {
       return res.status(400).json({
@@ -207,7 +181,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
 
     console.log(`Processing request: ${method} ${target_url} [${idempotencyKey}]`);
 
-    // Make x402-wrapped request to consensus server
     const response = await fetchWithPayment(consensusServerUrl + '/proxy', {
       method: 'POST',
       headers: {
@@ -253,8 +226,7 @@ app.post('/proxy', validateApiKey, async (req, res) => {
 
   } catch (error) {
     console.error('Proxy request error:', error.message);
-    
-    // Enhanced error responses
+
     if (error.message.includes('insufficient funds')) {
       return res.status(402).json({
         error: 'Insufficient funds',
