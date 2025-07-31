@@ -27,15 +27,14 @@ app.use(limiter);
 
 app.use(express.json({ limit: '10mb' }));
 
-// Storage for wallet management
 const registeredWallets = new Map();
 const walletClients = new Map();
 const apiKeys = new Map();
 const requestTracker = new Map();
+const processingRequests = new Map();
 
-// Clean up old request tracking every hour
 setInterval(() => {
-  const oneHourAgo = Date.now() - (60 * 60 * 1000);
+  const oneHourAgo = Date.now() - (60 * 5 * 1000);
   let cleanedCount = 0;
   
   for (const [key, data] of requestTracker.entries()) {
@@ -48,7 +47,7 @@ setInterval(() => {
   if (cleanedCount > 0) {
     console.log(`Cleaned up ${cleanedCount} old request tracking entries`);
   }
-}, 60 * 60 * 1000); // Every hour
+}, 60 * 5 * 1000);
 
 function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
@@ -77,7 +76,7 @@ app.post('/register-wallet', async (req, res) => {
     const { wallet_name, account_address, private_key } = req.body;
     
     if (!wallet_name || !account_address || !private_key) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing required fields',
         required: ['wallet_name', 'account_address', 'private_key']
       });
@@ -166,15 +165,36 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       });
     }
 
-    // Generate idempotency key if not provided
     const idempotencyKey = idempotency_key || 
                           headers['x-idempotency-key'] ||
                           `auto-${walletName}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
-    // Check for duplicate requests (x402 proxy level deduplication)
+    console.log(`Forwarding request: ${method} ${target_url} [${idempotencyKey}]`);
+
+    if (processingRequests.has(idempotencyKey)) {
+      console.log(`Request already in progress at X402 proxy level, waiting: ${idempotencyKey}`);
+      
+      try {
+        const existingResponse = await processingRequests.get(idempotencyKey);
+        
+        return res.status(200).json({
+          ...existingResponse,
+          meta: {
+            ...existingResponse.meta,
+            concurrent_request_at_x402_proxy: true,
+            original_timestamp: existingResponse.meta?.timestamp || new Date().toISOString()
+          }
+        });
+      } catch (waitError) {
+        console.error(`Error waiting for existing X402 proxy request: ${waitError.message}`);
+        processingRequests.delete(idempotencyKey);
+      }
+    }
+
+    // Check for duplicate requests (x402 proxy level deduplication from cache)
     if (requestTracker.has(idempotencyKey)) {
       const tracked = requestTracker.get(idempotencyKey);
-      console.log(`Duplicate request detected at proxy level: ${idempotencyKey}`);
+      console.log(`Duplicate request detected at proxy level cache: ${idempotencyKey}`);
       
       return res.status(200).json({
         ...tracked.response,
@@ -186,61 +206,68 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       });
     }
 
-    const fetchWithPayment = walletClients.get(walletName);
-    if (!fetchWithPayment) {
-      return res.status(400).json({
-        error: 'Wallet client not found',
-        message: 'Wallet may not be properly registered'
-      });
-    }
-
-    console.log(`Forwarding request: ${method} ${target_url} [${idempotencyKey}]`);
-
-    // Forward to consensus server with x402 payment handling
-    const response = await fetchWithPayment(consensusServerUrl + '/proxy', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Connection': 'close'
-      },
-      body: JSON.stringify({
-        target_url,
-        method,
-        headers: {
-          'x-idempotency-key': idempotencyKey,
-          ...headers
-        },
-        body
-      })
-    });
-
-    if (!response.ok && response.status !== 402) {
-      throw new Error(`Consensus server responded with ${response.status}: ${response.statusText}`);
-    }
-
-    const responseData = await response.json();
-    const processingTime = Date.now() - startTime;
-
-    const finalResponse = {
-      ...responseData,
-      meta: {
-        ...(responseData.meta || {}),
-        wallet_name: walletName,
-        account_address: registeredWallets.get(walletName),
-        idempotency_key: idempotencyKey,
-        proxy_processing_time_ms: processingTime,
-        x402_proxy_handled: true,
-        timestamp: new Date().toISOString()
+    const requestPromise = (async () => {
+      const fetchWithPayment = walletClients.get(walletName);
+      if (!fetchWithPayment) {
+        throw new Error('Wallet client not found - may not be properly registered');
       }
+
+      const response = await fetchWithPayment(consensusServerUrl + '/proxy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Connection': 'close'
+        },
+        body: JSON.stringify({
+          target_url,
+          method,
+          headers: {
+            'x-idempotency-key': idempotencyKey,
+            ...headers
+          },
+          body
+        })
+      });
+
+      if (!response.ok && response.status !== 402) {
+        throw new Error(`Consensus server responded with ${response.status}: ${response.statusText}`);
+      }
+
+      const responseData = await response.json();
+      const processingTime = Date.now() - startTime;
+
+      const finalResponse = {
+        ...responseData,
+        meta: {
+          ...(responseData.meta || {}),
+          wallet_name: walletName,
+          account_address: registeredWallets.get(walletName),
+          idempotency_key: idempotencyKey,
+          proxy_processing_time_ms: processingTime,
+          x402_proxy_handled: true,
+          timestamp: new Date().toISOString()
+        }
+      };
+
+      requestTracker.set(idempotencyKey, {
+        response: finalResponse,
+        timestamp: new Date().toISOString()
+      });
+
+      return finalResponse;
+    })();
+
+    processingRequests.set(idempotencyKey, requestPromise);
+
+    const cleanup = () => {
+      processingRequests.delete(idempotencyKey);
     };
+    
+    requestPromise.finally(cleanup);
+    setTimeout(cleanup, 5 * 60 * 1000);
 
-    // Track this request to prevent duplicates
-    requestTracker.set(idempotencyKey, {
-      response: finalResponse,
-      timestamp: new Date().toISOString()
-    });
-
-    res.status(response.status).json(finalResponse);
+    const finalResponse = await requestPromise;
+    res.status(200).json(finalResponse);
 
   } catch (error) {
     console.error('Proxy request error:', error.message);
@@ -279,6 +306,7 @@ app.get('/health', (req, res) => {
     registered_wallets: registeredWallets.size,
     active_clients: walletClients.size,
     tracked_requests: requestTracker.size,
+    currently_processing: processingRequests.size,
     consensus_server: consensusServerUrl,
     timestamp: new Date().toISOString()
   });
@@ -289,6 +317,7 @@ app.get('/stats', (req, res) => {
     registered_wallets: registeredWallets.size,
     active_clients: walletClients.size,
     tracked_requests: requestTracker.size,
+    currently_processing: processingRequests.size,
     consensus_server: consensusServerUrl,
     uptime: process.uptime(),
     memory_usage: process.memoryUsage(),

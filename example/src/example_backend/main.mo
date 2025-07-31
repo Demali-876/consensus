@@ -7,7 +7,8 @@ import Result "mo:base/Result";
 import Env "../env";
 
 actor {
-  public shared query func transform({
+  
+  public query func transform({
     context : Blob;
     response : IC.http_request_result;
   }) : async IC.http_request_result {
@@ -32,7 +33,7 @@ actor {
     result;
   };
 
-  public func send_sms_ic(to : Text, message : Text) : async Result.Result<Text, Text> {
+  public func send_sms_ic(message : Text) : async Result.Result<Text, Text> {
     let host : Text = Env.infobip_host;
     let url = "https://" # host # "/sms/2/text/advanced";
     let api_key = Env.infobip_api_key;
@@ -47,7 +48,7 @@ actor {
     ];
 
     let escaped_message = escapeJson(message);
-    let json_payload = "{\"messages\":[{\"destinations\":[{\"to\":\"" # to # "\"}],\"from\":\"" # from_number # "\",\"text\":\"" # escaped_message # "\"}]}";
+    let json_payload = "{\"messages\":[{\"destinations\":[{\"to\":\"" # Env.to_number # "\"}],\"from\":\"" # from_number # "\",\"text\":\"" # escaped_message # "\"}]}";
     
     let http_request : IC.http_request_args = {
       url = url;
@@ -55,7 +56,10 @@ actor {
       headers = request_headers;
       body = ?Text.encodeUtf8(json_payload);
       method = #post;
-      transform = null;
+      transform = ?{
+        function = transform;
+        context = Blob.fromArray([]);
+      };
     };
     
     try {
@@ -75,32 +79,47 @@ actor {
     };
   };
 
-  public func send_sms_consensus(to : Text, message : Text) : async Result.Result<Text, Text> {
+  public func send_sms_consensus(message : Text) : async Result.Result<Text, Text> {
     let proxy_url = Env.proxy_url;
     let proxy_api_key = Env.consensus_api_key;
     let infobip_url = "https://" # Env.infobip_host # "/sms/2/text/advanced";
     let from_number = Env.infobip_from_number;
     let auth_header = "App " # Env.infobip_api_key;
-
     let escaped_message = escapeJson(message);
-    let infobip_payload = "{\\\"messages\\\":[{\\\"destinations\\\":[{\\\"to\\\":\\\"" # to # "\\\"}],\\\"from\\\":\\\"" # from_number # "\\\",\\\"text\\\":\\\"" # escaped_message # "\\\"}]}";
 
-    let target_payload = "{\"target_url\":\"" # infobip_url # "\",\"idempotency_key\":\"sms-" # to # "\",\"headers\":[{\"name\":\"Authorization\",\"value\":\"" # auth_header # "\"}],\"body\":\"" # infobip_payload # "\"}";
+    let target_payload = "{" #
+      "\"target_url\":\"" # infobip_url # "\"," #
+      "\"method\":\"POST\"," #
+      "\"headers\":{" #
+        "\"Authorization\":\"" # auth_header # "\"," #
+        "\"Content-Type\":\"application/json\"," #
+        "\"x-idempotency-key\":\"sms-test" # "motoko" # "\"" #
+      "}," #
+      "\"body\":{" #
+        "\"messages\":[{" #
+          "\"destinations\":[{\"to\":\"" # Env.to_number # "\"}]," #
+          "\"from\":\"" # from_number # "\"," #
+          "\"text\":\"" # escaped_message # "\"" #
+        "}]" #
+      "}" #
+    "}";
 
     let request_headers : [IC.http_header] = [
       { name = "X-API-Key"; value = proxy_api_key },
       { name = "Content-Type"; value = "application/json" },
-      { name = "idempotency-key"; value = "infobip_sms_001"},
       { name = "Accept-Encoding"; value = "identity" }
     ];
     
     let http_request : IC.http_request_args = {
       url = proxy_url;
-      max_response_bytes = ?2048;
+      max_response_bytes = ?4096;
       headers = request_headers;
       body = ?Text.encodeUtf8(target_payload);
       method = #post;
-      transform = ?transform;
+      transform = ?{
+        function = transform;
+        context = Blob.fromArray([]);
+      };
     };
     
     try {

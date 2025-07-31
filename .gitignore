@@ -1,1 +1,4 @@
 .consensus.config
+
+# Ignore consensus config
+.consensus-config.json
