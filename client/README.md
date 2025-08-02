@@ -65,6 +65,3 @@ When you run the setup command, the Consensus client SDK will:
 > [!WARNING]
 > **DO NOT keep large amounts** in the proxy-delegated wallet - if the proxy is compromised, your delegation could be at risk.
 > Only fund the wallet with amounts you're comfortable delegating for API payments.
-
-> [!NOTE]
-> The setup creates a secure but limited delegation that allows the proxy to make authorized transfers on your behalf for API usage fees.
