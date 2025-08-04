@@ -5,6 +5,7 @@ import express from 'express';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
+import { WalletStore } from './data/store.js';
 import { privateKeyToAccount } from 'viem/accounts';
 import { createWalletClient, http } from 'viem';
 import { baseSepolia } from 'viem/chains';
@@ -14,6 +15,11 @@ import crypto from 'crypto';
 const app = express();
 const port = process.env.X402_PROXY_PORT || 3001;
 const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'http://localhost:8080';
+const walletStore = new WalletStore();
+const registeredWallets = new Map();
+const walletClients = new Map();
+const requestTracker = new Map();
+const processingRequests = new Map();
 
 app.use(helmet());
 app.use(cors());
@@ -27,18 +33,12 @@ app.use(limiter);
 
 app.use(express.json({ limit: '10mb' }));
 
-const registeredWallets = new Map();
-const walletClients = new Map();
-const apiKeys = new Map();
-const requestTracker = new Map();
-const processingRequests = new Map();
-
 setInterval(() => {
-  const oneHourAgo = Date.now() - (60 * 5 * 1000);
+  const fiveminsago = Date.now() - (60 * 5 * 1000);
   let cleanedCount = 0;
   
   for (const [key, data] of requestTracker.entries()) {
-    if (new Date(data.timestamp).getTime() < oneHourAgo) {
+    if (new Date(data.timestamp).getTime() < fiveminsago) {
       requestTracker.delete(key);
       cleanedCount++;
     }
@@ -59,16 +59,50 @@ function validateApiKey(req, res, next) {
     });
   }
   
-  const walletName = apiKeys.get(apiKey);
-  if (!walletName) {
+  const walletData = walletStore.getWalletByApiKey(apiKey);
+  if (!walletData) {
     return res.status(401).json({
       error: 'Invalid API key',
       message: 'API key not registered'
     });
   }
   
-  req.walletName = walletName;
+  req.walletName = walletData.walletName;
   next();
+}
+
+async function restoreWalletData() {
+  console.log('Restoring wallets from secure database...');
+  
+  const wallets = walletStore.getAllWallets();
+  let loadedCount = 0;
+  
+  for (const walletData of wallets) {
+    try {
+      const formattedPrivateKey = walletData.privateKey.startsWith('0x') ? 
+        walletData.privateKey : `0x${walletData.privateKey}`;
+      const account = privateKeyToAccount(formattedPrivateKey);
+      
+      const walletClient = createWalletClient({
+        account,
+        chain: baseSepolia,
+        transport: http()
+      });
+      
+      const fetchWithPayment = wrapFetchWithPayment(fetch, walletClient);
+      
+      registeredWallets.set(walletData.walletName, walletData.accountAddress);
+      walletClients.set(walletData.walletName, fetchWithPayment);
+      
+      loadedCount++;
+      
+    } catch (error) {
+      console.error(`Failed to load wallet ${walletData.walletName}:`, error.message);
+    }
+  }
+  
+  console.log(`Loaded ${loadedCount} wallets from database`);
+  return loadedCount;
 }
 
 app.post('/register-wallet', async (req, res) => {
@@ -89,11 +123,10 @@ app.post('/register-wallet', async (req, res) => {
       });
     }
 
-    if (registeredWallets.has(wallet_name)) {
+    if (walletStore.walletExists(wallet_name)) {
       return res.status(409).json({
         error: 'Wallet already registered',
-        wallet_name,
-        account_address: registeredWallets.get(wallet_name)
+        wallet_name
       });
     }
 
@@ -109,7 +142,8 @@ app.post('/register-wallet', async (req, res) => {
           provided_address: account_address
         });
       }
-      
+      const storeResult = walletStore.storeWallet(wallet_name, account_address, private_key);
+
       const walletClient = createWalletClient({
         account,
         chain: baseSepolia,
@@ -121,7 +155,14 @@ app.post('/register-wallet', async (req, res) => {
       registeredWallets.set(wallet_name, account_address);
       walletClients.set(wallet_name, fetchWithPayment);
       
-      console.log(`✓ Registered wallet: ${wallet_name} (${account_address})`);
+      console.log(`✓ Registered wallet:(${account_address})`);
+      res.json({
+      success: true,
+      wallet_name,
+      account_address,
+      api_key: storeResult.apiKey,
+      message: 'Wallet registered and encrypted in database'
+    });
       
     } catch (importError) {
       console.error('Failed to create wallet client:', importError);
@@ -130,17 +171,6 @@ app.post('/register-wallet', async (req, res) => {
         message: 'Invalid private key provided'
       });
     }
-
-    const apiKey = crypto.randomBytes(32).toString('hex');
-    apiKeys.set(apiKey, wallet_name);
-    
-    res.json({
-      success: true,
-      wallet_name,
-      account_address,
-      api_key: apiKey,
-      message: 'Wallet registered successfully'
-    });
 
   } catch (error) {
     console.error('Wallet registration error:', error.message);
@@ -300,6 +330,7 @@ app.post('/proxy', validateApiKey, async (req, res) => {
 
 // Status endpoints
 app.get('/health', (req, res) => {
+  const dbInfo = walletStore.getDatabaseInfo();
   res.json({ 
     status: 'healthy',
     service: 'x402-payment-proxy',
@@ -307,6 +338,10 @@ app.get('/health', (req, res) => {
     active_clients: walletClients.size,
     tracked_requests: requestTracker.size,
     currently_processing: processingRequests.size,
+    database: {
+      wallets: dbInfo?.walletCount || 0,
+      size_bytes: dbInfo?.sizeBytes || 0
+    },
     consensus_server: consensusServerUrl,
     timestamp: new Date().toISOString()
   });
@@ -338,17 +373,31 @@ app.use((error, req, res, next) => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('Received SIGTERM, shutting down gracefully');
+  walletStore.close();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   console.log('Received SIGINT, shutting down gracefully');
+  walletStore.close();
   process.exit(0);
 });
 
-app.listen(port, () => {
-  console.log(`🚀 x402 Payment Proxy running on port ${port}`);
-  console.log(`🏗️  Consensus server: ${consensusServerUrl}`);
-  console.log(`💳 Ready for wallet registrations and proxy requests`);
-  console.log(`✅ Clean request forwarding with automatic x402 payments`);
-});
+async function boot() {
+  try {
+    await restoreWalletData();
+    
+    app.listen(port, () => {
+      console.log(`🚀 x402 Payment Proxy running on port ${port}`);
+      console.log(`🏗️  Consensus server: ${consensusServerUrl}`);
+      console.log(`🔐 Loaded ${registeredWallets.size} wallets from encrypted database`);
+      console.log(`💳 Ready for wallet registrations and proxy requests`);
+    });
+    
+  } catch (error) {
+    console.error('Failed to start server:', error.message);
+    process.exit(1);
+  }
+}
+
+boot();
