@@ -47,7 +47,11 @@ export class WalletStore {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           wallet_name TEXT UNIQUE NOT NULL,
           account_address TEXT NOT NULL,
-          encrypted_private_key TEXT NOT NULL,
+          wallet_type TEXT CHECK (wallet_type IN ('cdp', 'metamask')),
+          encrypted_private_key TEXT NULL,
+          signature_encrypted TEXT NULL,
+          encrypted_message TEXT NULL,
+          connection_id TEXT NULL,
           nonce TEXT NOT NULL,
           auth_tag TEXT NOT NULL,
           api_key_hash TEXT UNIQUE NOT NULL,
@@ -57,6 +61,7 @@ export class WalletStore {
         CREATE INDEX IF NOT EXISTS idx_wallet_name ON wallets(wallet_name);
         CREATE INDEX IF NOT EXISTS idx_api_key_hash ON wallets(api_key_hash);
         CREATE INDEX IF NOT EXISTS idx_account_address ON wallets(account_address);
+        CREATE INDEX IF NOT EXISTS idx_wallets_wallet_type ON wallets(wallet_type);
       `);
 
       console.log("Database schema created/verified");
@@ -68,61 +73,58 @@ export class WalletStore {
   /**
    * Store wallet with encrypted private key
    */
-  storeWallet(walletName, accountAddress, privateKey) {
-    try {
-      const apiKey = this.cipher.generateApiKey();
-      const apiKeyHash = this.cipher.hashAPIKey(apiKey);
-      const encrypted = this.cipher.encrypt(privateKey);
-      const stmt = this.db.prepare(`
-        INSERT INTO wallets (wallet_name, account_address, encrypted_private_key, nonce, auth_tag, api_key_hash)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-
-      const result = stmt.run(
-        walletName,
-        accountAddress,
-        encrypted.ciphertext,
-        encrypted.nonce,
-        encrypted.tag,
-        apiKeyHash
-      );
-      return {
-        success: true,
-        apiKey: apiKey,
-      };
-    } catch (error) {
-      if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
-        throw new Error(`Wallet '${walletName}' already exists`);
-      }
-      throw error;
+  storeWallet(walletName, accountAddress, privateKey = null, signature = null, message = null, connectionId = null) {
+  try {
+    const apiKey = this.cipher.generateApiKey();
+    const apiKeyHash = this.cipher.hashAPIKey(apiKey);
+    
+    let walletType, encryptedPrivateKey = null, signatureEncrypted = null, encryptedMessage = null;
+    let encrypted;
+    
+    if (privateKey) {
+      walletType = 'cdp';
+      encrypted = this.cipher.encrypt(privateKey);
+      encryptedPrivateKey = encrypted.ciphertext;
+    } else if (signature && message && connectionId) {
+      walletType = 'metamask';
+      encrypted = this.cipher.encrypt(signature);
+      signatureEncrypted = encrypted.ciphertext;
+      
+      const encryptedMsg = this.cipher.encrypt(message);
+      encryptedMessage = encryptedMsg.ciphertext;
+    } else {
+      throw new Error('Invalid parameters: provide either privateKey (CDP) or signature+message+connectionId (MetaMask)');
     }
-  }
-  /**
-   * Get wallet by name and decrypt private key
-   */
-  getWallet(walletName) {
-    try {
-      const stmt = this.db.prepare(
-        "SELECT * FROM wallets WHERE wallet_name = ?"
-      );
-      const row = stmt.get(walletName);
-      if (!row) return null;
-
-      const privateKey = this.cipher.decrypt({
-        ciphertext: row.encrypted_private_key,
-        nonce: row.nonce,
-        tag: row.auth_tag,
-      });
-      return {
-        walletName: row.wallet_name,
-        accountAddress: row.account_address,
-        privateKey: privateKey,
-      };
-    } catch (error) {
-      console.error(`Failed to get wallet ${walletName}:`, error.message);
-      return null;
+    
+    const stmt = this.db.prepare(`
+      INSERT INTO wallets (wallet_name, account_address, wallet_type, encrypted_private_key, signature_encrypted, encrypted_message, connection_id, nonce, auth_tag, api_key_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    
+    const result = stmt.run(
+      walletName,
+      accountAddress,
+      walletType,
+      encryptedPrivateKey,
+      signatureEncrypted,
+      encryptedMessage,
+      connectionId,
+      encrypted.nonce,
+      encrypted.tag,
+      apiKeyHash
+    );
+    
+    return {
+      success: true,
+      apiKey: apiKey,
+    };
+  } catch (error) {
+    if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      throw new Error(`Wallet '${walletName}' already exists`);
     }
+    throw error;
   }
+}
   /**
    * Get wallet by API key and decrypt private key
    */

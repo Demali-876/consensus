@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Consensus Protocol</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #000000;
+            --button-bg: #000000;
+            --button-text: #ffffff;
+            --button-hover: #333333;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #000000;
+                --text-color: #ffffff;
+                --button-bg: #ffffff;
+                --button-text: #000000;
+                --button-hover: #cccccc;
+            }
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        .container {
+            text-align: center;
+            max-width: 400px;
+            padding: 2rem;
+        }
+        .logo {
+            width: 120px;
+            height: 120px;
+            margin-bottom: 2rem;
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+            transition: opacity 0.3s ease;
+            animation: rotateLogo 5s linear infinite;
+        }
+        .logo.stopped {
+            animation: none;
+        }
+        .logo-light {
+            display: none;
+        }
+        .logo-dark {
+            display: block;
+        }
+        @media (prefers-color-scheme: dark) {
+            .logo-light {
+                display: block;
+            }
+            .logo-dark {
+                display: none;
+            }
+        }
+        .title {
+            font-size: 1.5rem;
+            font-weight: 300;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+        }
+        .subtitle {
+            font-size: 0.9rem;
+            font-weight: 400;
+            letter-spacing: 0.3px;
+            margin-bottom: 3rem;
+            opacity: 0.7;
+        }
+        .connect-button {
+            background-color: var(--button-bg);
+            color: var(--button-text);
+            border: none;
+            padding: 1rem 2rem;
+            font-size: 1rem;
+            font-weight: 500;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            min-width: 200px;
+            text-transform: none;
+            letter-spacing: 0.3px;
+        }
+        .connect-button:hover {
+            background-color: var(--button-hover);
+            transform: translateY(-1px);
+        }
+        .connect-button:active {
+            transform: translateY(0);
+        }
+        .connect-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .status {
+            margin-top: 2rem;
+            padding: 1rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        .status.show {
+            opacity: 1;
+        }
+        .status.success {
+            background-color: rgba(34, 197, 94, 0.1);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.2);
+        }
+        .status.error {
+            background-color: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+        .status.warning {
+            background-color: rgba(245, 158, 11, 0.1);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+        @media (max-width: 480px) {
+            .container {
+                padding: 1rem;
+            }
+            .logo {
+                width: 100px;
+                height: 100px;
+            }
+            .title {
+                font-size: 1.25rem;
+                margin-bottom: 2rem;
+            }
+            .connect-button {
+                padding: 0.875rem 1.5rem;
+                font-size: 0.9rem;
+                min-width: 180px;
+            }
+        }
+        @keyframes rotateLogo {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <img src="../assets/logo-light.svg" alt="Consensus Protocol" class="logo logo-light" />
+        <img src="../assets/logo-dark.svg" alt="Consensus Protocol" class="logo logo-dark" />
+        
+        <h1 class="title">Consensus Protocol</h1>
+        <p class="subtitle">X-402 Protected Service</p>
+        
+        <button id="connectButton" class="connect-button" onclick="connectMetaMask()">
+            Connect with MetaMask
+        </button>
+        
+        <div id="status" class="status"></div>
+    </div>
+    
+    <script>
+        let isConnecting = false;
+        let connectedAddress = null;
+
+        async function connectMetaMask() {
+            if (isConnecting) return;
+            
+            const button = document.getElementById('connectButton');
+            const status = document.getElementById('status');
+            
+            if (typeof window.ethereum === 'undefined') {
+                showStatus('MetaMask not detected. Please install MetaMask.', 'error');
+                return;
+            }
+
+            isConnecting = true;
+            button.disabled = true;
+            button.textContent = 'Connecting...';
+            
+            try {
+                const accounts = await window.ethereum.request({
+                    method: 'eth_requestAccounts'
+                });
+                
+                if (accounts.length === 0) {
+                    throw new Error('No accounts found');
+                }
+                
+                connectedAddress = accounts[0];
+                showStatus(`Connected: ${connectedAddress.slice(0, 6)}...${connectedAddress.slice(-4)}`, 'success');
+                
+                await requestSignature();
+                
+            } catch (error) {
+                showStatus(`Connection failed: ${error.message}`, 'error');
+                resetButton();
+            }
+        }
+
+        async function requestSignature() {
+            const button = document.getElementById('connectButton');
+            
+            try {
+                button.textContent = 'Sign Authorization...';
+                showStatus('Please sign the authorization message in MetaMask', 'warning');
+                
+                const connectionId = generateConnectionId();
+                const message = `Consensus Protocol X-402 Authorization
+
+I authorize this wallet to make automatic payments for X-402 API requests.
+
+Wallet: ${connectedAddress}
+Connection ID: ${connectionId}
+Domain: ${window.location.hostname}
+
+This authorization remains valid until revoked.`;
+                
+                const signature = await window.ethereum.request({
+                    method: 'personal_sign',
+                    params: [message, connectedAddress]
+                });
+                
+                showStatus('Authorization signed! Registering...', 'success');
+                await registerWithProxy(connectedAddress, signature, message, connectionId);
+                
+            } catch (error) {
+                if (error.code === 4001) {
+                    showStatus('Authorization cancelled by user', 'error');
+                } else {
+                    showStatus(`Authorization failed: ${error.message}`, 'error');
+                }
+                resetButton();
+            }
+        }
+
+        async function registerWithProxy(address, signature, message, connectionId) {
+            const button = document.getElementById('connectButton');
+            
+            try {
+                button.textContent = 'Registering...';
+                
+                const response = await fetch('/register-metamask', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        wallet_name: generateWalletName(),
+                        account_address: address,
+                        signature: signature,
+                        message: message,
+                        connection_id: connectionId,
+                        wallet_type: 'metamask'
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.querySelectorAll('.logo').forEach(logo => {
+                        logo.classList.add('stopped');
+                    });
+                    
+                    showStatus(`✅ Success! API Key: ${result.api_key.slice(0, 12)}...`, 'success');
+                    button.textContent = 'Authorized';
+                    button.disabled = true;
+                    
+                    setTimeout(() => {
+                        showCompletionInfo(result);
+                    }, 2000);
+                } else {
+                    throw new Error(result.error || 'Registration failed');
+                }
+                
+            } catch (error) {
+                showStatus(`Registration failed: ${error.message}`, 'error');
+                resetButton();
+            }
+        }
+
+        function showCompletionInfo(result) {
+            const status = document.getElementById('status');
+            status.innerHTML = `
+                <div style="text-align: left; font-size: 0.8rem;">
+                    <strong>Setup Complete!</strong><br>
+                    <span style="opacity: 0.8;">API Key: ${result.api_key}</span><br>
+                    <span style="opacity: 0.8;">Wallet: ${result.account_address}</span><br><br>
+                    <span style="opacity: 0.6;">You can now close this window and use your API key.</span>
+                </div>
+            `;
+            status.className = 'status success show';
+        }
+
+        function generateConnectionId() {
+            return Array.from(crypto.getRandomValues(new Uint8Array(16)))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+        }
+
+        function generateWalletName() {
+            return Array.from(crypto.getRandomValues(new Uint8Array(8)))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+        }
+
+        function resetButton() {
+            const button = document.getElementById('connectButton');
+            button.disabled = false;
+            button.textContent = 'Connect with MetaMask';
+            isConnecting = false;
+            connectedAddress = null;
+        }
+
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = `status ${type} show`;
+        }
+
+        window.addEventListener('load', async () => {
+            if (typeof window.ethereum !== 'undefined') {
+                try {
+                    const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+                    if (accounts.length > 0) {
+                        showStatus('MetaMask detected', 'warning');
+                    }
+                } catch (error) {
+                    // Silent fail
+                }
+            }
+        });
+    </script>
+</body>
+</html>
