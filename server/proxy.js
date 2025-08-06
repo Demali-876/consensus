@@ -6,14 +6,12 @@ class ConsensusProxy {
   constructor() {
     this.cache = new NodeCache({ stdTTL: 300 });
     this.pendingRequests = new Map();
-    this.paidKeys = new Map(); // CHANGED: Set to Map to store timestamps
+    this.paidKeys = new Map();
     this.stats = {
       total_requests: 0,
       cache_hits: 0,
       cache_misses: 0
     };
-    
-    // ADDED: Clean up expired paid keys every minute
     setInterval(() => this.cleanupExpiredKeys(), 60000);
   }
 
@@ -25,11 +23,10 @@ class ConsensusProxy {
   }
 
   markAsPaid(idempotencyKey) {
-    this.paidKeys.set(idempotencyKey, Date.now()); // CHANGED: Store with timestamp
+    this.paidKeys.set(idempotencyKey, Date.now());
     console.log(`Payment recorded for: ${idempotencyKey}`);
   }
 
-  // ADDED: Method to remove paid status (for failed requests)
   removePaidStatus(idempotencyKey) {
     this.paidKeys.delete(idempotencyKey);
     console.log(`Removed paid status for: ${idempotencyKey}`);
@@ -52,35 +49,44 @@ class ConsensusProxy {
       this.stats.cache_hits++;
       return { ...cached, cached: true, payment_required: false };
     }
-
-    // Check if request is pending
     if (this.pendingRequests.has(idempotencyKey)) {
-      console.log(`Request PENDING: ${idempotencyKey} (no additional payment)`);
-      const response = await this.pendingRequests.get(idempotencyKey);
-      this.stats.cache_hits++;
-      return { ...response, cached: true, payment_required: false };
+      console.log(`Request PENDING: ${idempotencyKey} (waiting for existing request)`);
+      try {
+        const response = await this.pendingRequests.get(idempotencyKey);
+        this.stats.cache_hits++;
+        return { ...response, cached: true, payment_required: false };
+      } catch (error) {
+        console.error(`Error waiting for pending request: ${error.message}`);
+        this.pendingRequests.delete(idempotencyKey);
+      }
     }
-
-    console.log(`Cache MISS: ${idempotencyKey} -> ${target_url} (payment required)`);
+    console.log(`Cache MISS: ${idempotencyKey}`);
     this.stats.cache_misses++;
 
-    this.markAsPaid(idempotencyKey);
+    const requestPromise = this.makeRequest(target_url, method, headers, body)
+      .then(response => {
+        this.cache.set(idempotencyKey, response);
+        this.pendingRequests.delete(idempotencyKey);
+        return response;
+      })
+      .catch(error => {
+        this.pendingRequests.delete(idempotencyKey);
+        this.removePaidStatus(idempotencyKey);
+        throw error;
+      });
 
-    const requestPromise = this.makeRequest(target_url, method, headers, body);
     this.pendingRequests.set(idempotencyKey, requestPromise);
 
     try {
       const response = await requestPromise;
-      this.cache.set(idempotencyKey, response);
       return { ...response, cached: false, payment_required: true };
-    } finally {
-      this.pendingRequests.delete(idempotencyKey);
+    } catch (error) {
+      throw error;
     }
   }
 
   async makeRequest(url, method, headers, body) {
     const cleanHeaders = { ...headers };
-
     delete cleanHeaders['host'];
     delete cleanHeaders['content-length'];
     delete cleanHeaders['content-encoding'];
@@ -89,7 +95,6 @@ class ConsensusProxy {
     delete cleanHeaders['x-idempotency-key'];
     delete cleanHeaders['idempotency-key'];
     delete cleanHeaders['X-Idempotency-Key'];
-    // ADDED: Remove payment headers
     delete cleanHeaders['x-payment'];
     delete cleanHeaders['X-Payment'];
     delete cleanHeaders['x-verbose'];
@@ -110,7 +115,6 @@ class ConsensusProxy {
 
     if (body && ['post', 'put', 'patch'].includes(method.toLowerCase())) {
       config.data = body;
-
       if (!cleanHeaders['content-type'] && typeof body === 'object') {
         config.headers['content-type'] = 'application/json';
       }
@@ -118,10 +122,10 @@ class ConsensusProxy {
 
     try {
       const response = await axios(config);
+      
       let rawData = response.data;
       let contentEncoding = (response.headers['content-encoding'] || '').toLowerCase();
-
-      // IMPROVED: Better compression handling
+      
       if (contentEncoding === 'gzip') {
         rawData = zlib.gunzipSync(rawData);
       } else if (contentEncoding === 'deflate') {
@@ -131,7 +135,6 @@ class ConsensusProxy {
       }
 
       const textData = Buffer.from(rawData).toString('utf8');
-
       let parsed;
       try {
         parsed = JSON.parse(textData);
@@ -148,7 +151,6 @@ class ConsensusProxy {
       };
     } catch (error) {
       console.error(`Request failed for ${url}:`, error.message);
-
       return {
         status: error.response?.status || 500,
         statusText: error.response?.statusText || 'Internal Server Error',
@@ -157,7 +159,7 @@ class ConsensusProxy {
           error: 'Request failed',
           message: error.message,
           code: error.code,
-          url: url // ADDED: Include URL in error
+          url: url
         },
         timestamp: Date.now()
       };
@@ -184,11 +186,10 @@ class ConsensusProxy {
     };
   }
 
-  // UPDATED: 5-minute cleanup instead of 24 hours
   cleanupExpiredKeys() {
     const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
     let removedCount = 0;
-
+    
     for (const [key, timestamp] of this.paidKeys.entries()) {
       if (timestamp < fiveMinutesAgo) {
         this.paidKeys.delete(key);
@@ -201,7 +202,6 @@ class ConsensusProxy {
     }
   }
 
-  // ADDED: Clear specific key from all tracking
   clearKey(idempotencyKey) {
     this.cache.del(idempotencyKey);
     this.paidKeys.delete(idempotencyKey);

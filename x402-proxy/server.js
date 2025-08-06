@@ -23,379 +23,392 @@ const processingRequests = new Map();
 
 app.use(helmet());
 app.use(cors());
-
-const limiter = rateLimit({
+app.use(rateLimit({
   windowMs: 15 * 60 * 1000, 
   max: 1000,
-  message: { error: 'Too many requests, please try again later' }
-});
-app.use(limiter);
-
+  message: { error: 'Too many requests' }
+}));
 app.use(express.json({ limit: '10mb' }));
 
 setInterval(() => {
-  const fiveminsago = Date.now() - (60 * 5 * 1000);
-  let cleanedCount = 0;
-  
+  const fiveMinsAgo = Date.now() - (5 * 60 * 1000);
+  let cleaned = 0;
   for (const [key, data] of requestTracker.entries()) {
-    if (new Date(data.timestamp).getTime() < fiveminsago) {
+    if (new Date(data.timestamp).getTime() < fiveMinsAgo) {
       requestTracker.delete(key);
-      cleanedCount++;
+      cleaned++;
     }
   }
-  
-  if (cleanedCount > 0) {
-    console.log(`Cleaned up ${cleanedCount} old request tracking entries`);
-  }
-}, 60 * 5 * 1000);
+  if (cleaned > 0) console.log(`Cleaned ${cleaned} old entries`);
+}, 5 * 60 * 1000);
 
 function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
-  
   if (!apiKey) {
-    return res.status(401).json({
-      error: 'Missing API key',
-      message: 'X-API-Key header required'
-    });
+    return res.status(401).json({ error: 'Missing API key' });
   }
-  
   const walletData = walletStore.getWalletByApiKey(apiKey);
   if (!walletData) {
-    return res.status(401).json({
-      error: 'Invalid API key',
-      message: 'API key not registered'
-    });
+    return res.status(401).json({ error: 'Invalid API key' });
   }
-  
   req.walletName = walletData.walletName;
   next();
 }
 
-async function restoreWalletData() {
-  console.log('Restoring wallets from secure database...');
+// Helper to create wallet client
+function createWallet(privateKey, address) {
+  const formattedKey = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+  const account = privateKeyToAccount(formattedKey);
   
+  if (account.address.toLowerCase() !== address.toLowerCase()) {
+    throw new Error('Address mismatch');
+  }
+  
+  const walletClient = createWalletClient({
+    account,
+    chain: baseSepolia,
+    transport: http()
+  });
+  
+  return { account, fetchWithPayment: wrapFetchWithPayment(fetch, walletClient) };
+}
+
+// Restore wallets on startup
+async function restoreWallets() {
+  console.log('Restoring wallets...');
   const wallets = walletStore.getAllWallets();
-  let loadedCount = 0;
+  let loaded = 0;
   
-  for (const walletData of wallets) {
+  for (const wallet of wallets) {
     try {
-      const formattedPrivateKey = walletData.privateKey.startsWith('0x') ? 
-        walletData.privateKey : `0x${walletData.privateKey}`;
-      const account = privateKeyToAccount(formattedPrivateKey);
-      
-      const walletClient = createWalletClient({
-        account,
-        chain: baseSepolia,
-        transport: http()
-      });
-      
-      const fetchWithPayment = wrapFetchWithPayment(fetch, walletClient);
-      
-      registeredWallets.set(walletData.walletName, walletData.accountAddress);
-      walletClients.set(walletData.walletName, fetchWithPayment);
-      
-      loadedCount++;
-      
+      const { account, fetchWithPayment } = createWallet(wallet.privateKey, wallet.accountAddress);
+      registeredWallets.set(wallet.walletName, wallet.accountAddress);
+      walletClients.set(wallet.walletName, fetchWithPayment);
+      loaded++;
     } catch (error) {
-      console.error(`Failed to load wallet ${walletData.walletName}:`, error.message);
+      console.error(`Failed to load wallet ${wallet.walletName}:`, error.message);
     }
   }
   
-  console.log(`Loaded ${loadedCount} wallets from database`);
-  return loadedCount;
+  console.log(`Loaded ${loaded} wallets`);
+  return loaded;
 }
 
+// Register wallet endpoint
 app.post('/register-wallet', async (req, res) => {
   try {
     const { wallet_name, account_address, private_key } = req.body;
     
     if (!wallet_name || !account_address || !private_key) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        required: ['wallet_name', 'account_address', 'private_key']
-      });
+      return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    if (!private_key || private_key.length < 64) {
-      return res.status(400).json({
-        error: 'Invalid private key format',
-        message: 'Private key appears to be invalid or too short'
-      });
+    if (private_key.length < 64) {
+      return res.status(400).json({ error: 'Invalid private key' });
     }
 
     if (walletStore.walletExists(wallet_name)) {
-      return res.status(409).json({
-        error: 'Wallet already registered',
-        wallet_name
-      });
+      return res.status(409).json({ error: 'Wallet already registered' });
     }
 
-    try {
-      const formattedPrivateKey = private_key.startsWith('0x') ? private_key : `0x${private_key}`;
-      const account = privateKeyToAccount(formattedPrivateKey);
-
-      if (account.address.toLowerCase() !== account_address.toLowerCase()) {
-        return res.status(400).json({
-          error: 'Address mismatch',
-          message: 'Private key does not correspond to provided address',
-          derived_address: account.address,
-          provided_address: account_address
-        });
-      }
-      const storeResult = walletStore.storeWallet(wallet_name, account_address, private_key);
-
-      const walletClient = createWalletClient({
-        account,
-        chain: baseSepolia,
-        transport: http()
-      });
-      
-      const fetchWithPayment = wrapFetchWithPayment(fetch, walletClient);
-
-      registeredWallets.set(wallet_name, account_address);
-      walletClients.set(wallet_name, fetchWithPayment);
-      
-      console.log(`✓ Registered wallet:(${account_address})`);
-      res.json({
+    const { account, fetchWithPayment } = createWallet(private_key, account_address);
+    const storeResult = walletStore.storeWallet(wallet_name, account_address, private_key);
+    
+    registeredWallets.set(wallet_name, account_address);
+    walletClients.set(wallet_name, fetchWithPayment);
+    
+    console.log(`✓ Registered wallet: ${account_address}`);
+    res.json({
       success: true,
       wallet_name,
       account_address,
-      api_key: storeResult.apiKey,
-      message: 'Wallet registered and encrypted in database'
+      api_key: storeResult.apiKey
     });
-      
-    } catch (importError) {
-      console.error('Failed to create wallet client:', importError);
-      return res.status(400).json({
-        error: 'Failed to create wallet client',
-        message: 'Invalid private key provided'
-      });
-    }
-
+    
   } catch (error) {
-    console.error('Wallet registration error:', error.message);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: 'Failed to register wallet'
-    });
+    console.error('Registration error:', error.message);
+    res.status(400).json({ error: error.message });
   }
 });
 
+// Build error response helper
+function buildErrorResponse(error, walletName, startTime) {
+  const msg = error.message.toLowerCase();
+  const address = registeredWallets.get(walletName);
+  
+  let status = 500;
+  let errorType = 'Request failed';
+  let details = {};
+  
+  if (msg.includes('insufficient funds') || msg.includes('insufficient balance')) {
+    status = 402;
+    errorType = 'Insufficient funds';
+    details = { 
+      wallet: walletName, 
+      address,
+      faucet: 'https://faucet.circle.com/' 
+    };
+  } else if (msg.includes('payment failed') || msg.includes('transaction failed')) {
+    status = 402;
+    errorType = 'Payment failed';
+    details = { wallet: walletName, address };
+  } else if (msg.includes('wallet') || msg.includes('account')) {
+    status = 400;
+    errorType = 'Wallet error';
+    details = { wallet: walletName };
+  } else if (msg.includes('econnrefused') || msg.includes('network')) {
+    status = 503;
+    errorType = 'Network error';
+    details = { server: consensusServerUrl };
+  }
+  
+  return {
+    status,
+    error: errorType,
+    message: error.message,
+    details,
+    meta: {
+      wallet: walletName,
+      address,
+      processing_ms: Date.now() - startTime,
+      timestamp: new Date().toISOString()
+    }
+  };
+}
+
+// Main proxy endpoint
 app.post('/proxy', validateApiKey, async (req, res) => {
   const startTime = Date.now();
   
   try {
     const { target_url, method = 'GET', headers = {}, body, idempotency_key } = req.body;
     const walletName = req.walletName;
+    const isVerbose = ['true', 'True', 'TRUE'].includes(headers['x-verbose']);
     
     if (!target_url) {
-      return res.status(400).json({ 
-        error: 'Missing target_url',
-        message: 'target_url is required in request body'
-      });
+      return res.status(400).json({ error: 'Missing target_url' });
     }
 
     const idempotencyKey = idempotency_key || 
-                          headers['x-idempotency-key'] ||
-                          `auto-${walletName}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+                          headers['idempotency-key'] || 
+                          headers['Idempotency-Key'] ||
+                          `${Date.now()}-${crypto.randomBytes(16).toString('hex')}`;
 
-    console.log(`Forwarding request: ${method} ${target_url} [${idempotencyKey}]`);
+    console.log(`${method} request with key: ${idempotencyKey}`);
 
+    // Check if already processing
     if (processingRequests.has(idempotencyKey)) {
-      console.log(`Request already in progress at X402 proxy level, waiting: ${idempotencyKey}`);
-      
+      console.log(`Waiting for existing request: ${idempotencyKey}`);
       try {
-        const existingResponse = await processingRequests.get(idempotencyKey);
-        
-        return res.status(200).json({
-          ...existingResponse,
-          meta: {
-            ...existingResponse.meta,
-            concurrent_request_at_x402_proxy: true,
-            original_timestamp: existingResponse.meta?.timestamp || new Date().toISOString()
-          }
+        const existing = await processingRequests.get(idempotencyKey);
+        if (existing.error) {
+          return res.status(existing.status).json(isVerbose ? existing : {
+            error: existing.error,
+            message: existing.message
+          });
+        }
+        return res.json(isVerbose ? existing : {
+          status: existing.status,
+          statusText: existing.statusText,
+          data: existing.data
         });
       } catch (waitError) {
-        console.error(`Error waiting for existing X402 proxy request: ${waitError.message}`);
+        console.error(`Wait error: ${waitError.message}`);
         processingRequests.delete(idempotencyKey);
       }
     }
 
-    // Check for duplicate requests (x402 proxy level deduplication from cache)
+    // Check cache
     if (requestTracker.has(idempotencyKey)) {
-      const tracked = requestTracker.get(idempotencyKey);
-      console.log(`Duplicate request detected at proxy level cache: ${idempotencyKey}`);
+      const cached = requestTracker.get(idempotencyKey);
+      console.log(`Cache hit (${cached.isError ? 'error' : 'success'}): ${idempotencyKey}`);
       
-      return res.status(200).json({
-        ...tracked.response,
-        meta: {
-          ...tracked.response.meta,
-          duplicate_request_at_proxy: true,
-          original_timestamp: tracked.timestamp
-        }
+      const response = cached.response;
+      if (cached.isError) {
+        return res.status(response.status).json(isVerbose ? response : {
+          error: response.error,
+          message: response.message
+        });
+      }
+      
+      return res.json(isVerbose ? response : {
+        status: response.status,
+        statusText: response.statusText,
+        data: response.data
       });
     }
 
+    // Create request promise
     const requestPromise = (async () => {
       const fetchWithPayment = walletClients.get(walletName);
       if (!fetchWithPayment) {
-        throw new Error('Wallet client not found - may not be properly registered');
+        throw new Error('Wallet not registered');
       }
 
-      const response = await fetchWithPayment(consensusServerUrl + '/proxy', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Connection': 'close'
-        },
-        body: JSON.stringify({
-          target_url,
-          method,
-          headers: {
-            'x-idempotency-key': idempotencyKey,
-            ...headers
-          },
-          body
-        })
-      });
+      const consensusHeaders = { 
+        'Content-Type': 'application/json',
+        'Connection': 'close'
+      };
+      if (isVerbose) consensusHeaders['X-Verbose'] = 'true';
 
-      if (!response.ok && response.status !== 402) {
-        throw new Error(`Consensus server responded with ${response.status}: ${response.statusText}`);
+      let response, errorResponse;
+      
+      try {
+        response = await fetchWithPayment(consensusServerUrl + '/proxy', {
+          method: 'POST',
+          headers: consensusHeaders,
+          body: JSON.stringify({
+            target_url,
+            method,
+            headers: { 'x-idempotency-key': idempotencyKey, ...headers },
+            body
+          })
+        });
+      } catch (fetchError) {
+        errorResponse = buildErrorResponse(fetchError, walletName, startTime);
+        requestTracker.set(idempotencyKey, {
+          response: errorResponse,
+          timestamp: new Date().toISOString(),
+          isError: true
+        });
+        return errorResponse;
       }
 
+      // Handle non-ok responses
+      if (response && !response.ok && response.status !== 402) {
+        let errorDetails;
+        try {
+          errorDetails = await response.json();
+        } catch {
+          errorDetails = { message: response.statusText };
+        }
+        
+        errorResponse = {
+          status: response.status,
+          error: errorDetails.error || 'Server error',
+          message: errorDetails.message || response.statusText,
+          meta: {
+            wallet: walletName,
+            address: registeredWallets.get(walletName),
+            processing_ms: Date.now() - startTime,
+            timestamp: new Date().toISOString()
+          }
+        };
+        
+        requestTracker.set(idempotencyKey, {
+          response: errorResponse,
+          timestamp: new Date().toISOString(),
+          isError: true
+        });
+        
+        return errorResponse;
+      }
+
+      // Handle success
       const responseData = await response.json();
-      const processingTime = Date.now() - startTime;
-
-      const finalResponse = {
+      const fullResponse = {
         ...responseData,
         meta: {
           ...(responseData.meta || {}),
-          wallet_name: walletName,
-          account_address: registeredWallets.get(walletName),
+          wallet: walletName,
+          address: registeredWallets.get(walletName),
           idempotency_key: idempotencyKey,
-          proxy_processing_time_ms: processingTime,
-          x402_proxy_handled: true,
+          processing_ms: Date.now() - startTime,
           timestamp: new Date().toISOString()
         }
       };
 
       requestTracker.set(idempotencyKey, {
-        response: finalResponse,
+        response: fullResponse,
         timestamp: new Date().toISOString()
       });
 
-      return finalResponse;
+      return fullResponse;
     })();
 
+    // Store and cleanup promise
     processingRequests.set(idempotencyKey, requestPromise);
-
-    const cleanup = () => {
-      processingRequests.delete(idempotencyKey);
-    };
-    
+    const cleanup = () => processingRequests.delete(idempotencyKey);
     requestPromise.finally(cleanup);
     setTimeout(cleanup, 5 * 60 * 1000);
 
+    // Await and return response
     const finalResponse = await requestPromise;
-    res.status(200).json(finalResponse);
-
-  } catch (error) {
-    console.error('Proxy request error:', error.message);
-
-    if (error.message.includes('insufficient funds')) {
-      return res.status(402).json({
-        error: 'Insufficient funds',
-        message: 'Account needs USDC funding for x402 payments',
-        account_address: registeredWallets.get(req.walletName),
-        faucet_url: 'https://faucet.circle.com/'
+    
+    if (finalResponse.error || finalResponse.status >= 400) {
+      return res.status(finalResponse.status).json(isVerbose ? finalResponse : {
+        error: finalResponse.error,
+        message: finalResponse.message,
+        details: finalResponse.details
       });
     }
     
-    if (error.message.includes('network') || error.message.includes('ECONNREFUSED')) {
-      return res.status(503).json({
-        error: 'Network error',
-        message: 'Unable to connect to consensus server',
-        consensus_server: consensusServerUrl,
-        retry_after: 30
-      });
-    }
+    res.json(isVerbose ? finalResponse : {
+      status: finalResponse.status,
+      statusText: finalResponse.statusText || 'OK',
+      data: finalResponse.data
+    });
 
-    res.status(500).json({
-      error: 'Proxy request failed',
-      message: error.message,
-      timestamp: new Date().toISOString()
+  } catch (error) {
+    console.error('Proxy error:', error.message);
+    const errorResp = buildErrorResponse(error, req.walletName, startTime);
+    res.status(errorResp.status).json({
+      error: errorResp.error,
+      message: errorResp.message,
+      details: errorResp.details
     });
   }
 });
 
-// Status endpoints
+// Health check
 app.get('/health', (req, res) => {
   const dbInfo = walletStore.getDatabaseInfo();
   res.json({ 
     status: 'healthy',
-    service: 'x402-payment-proxy',
-    registered_wallets: registeredWallets.size,
-    active_clients: walletClients.size,
-    tracked_requests: requestTracker.size,
-    currently_processing: processingRequests.size,
-    database: {
-      wallets: dbInfo?.walletCount || 0,
-      size_bytes: dbInfo?.sizeBytes || 0
-    },
-    consensus_server: consensusServerUrl,
-    timestamp: new Date().toISOString()
+    wallets: registeredWallets.size,
+    tracked: requestTracker.size,
+    processing: processingRequests.size,
+    database: dbInfo?.walletCount || 0,
+    server: consensusServerUrl
   });
 });
 
+// Stats
 app.get('/stats', (req, res) => {
   res.json({
-    registered_wallets: registeredWallets.size,
-    active_clients: walletClients.size,
-    tracked_requests: requestTracker.size,
-    currently_processing: processingRequests.size,
-    consensus_server: consensusServerUrl,
+    wallets: registeredWallets.size,
+    tracked: requestTracker.size,
+    processing: processingRequests.size,
     uptime: process.uptime(),
-    memory_usage: process.memoryUsage(),
-    timestamp: new Date().toISOString()
+    memory: process.memoryUsage().heapUsed
   });
 });
 
-// Error handling
+// Error handler
 app.use((error, req, res, next) => {
-  console.error('Unhandled error:', error);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: 'An unexpected error occurred',
-    timestamp: new Date().toISOString()
-  });
+  console.error('Unhandled:', error);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, shutting down gracefully');
-  walletStore.close();
-  process.exit(0);
+['SIGTERM', 'SIGINT'].forEach(signal => {
+  process.on(signal, () => {
+    console.log(`${signal} received, shutting down`);
+    walletStore.close();
+    process.exit(0);
+  });
 });
 
-process.on('SIGINT', () => {
-  console.log('Received SIGINT, shutting down gracefully');
-  walletStore.close();
-  process.exit(0);
-});
-
+// Boot server
 async function boot() {
   try {
-    await restoreWalletData();
-    
+    await restoreWallets();
     app.listen(port, () => {
-      console.log(`🚀 x402 Payment Proxy running on port ${port}`);
-      console.log(`🏗️  Consensus server: ${consensusServerUrl}`);
-      console.log(`🔐 Loaded ${registeredWallets.size} wallets from encrypted database`);
-      console.log(`💳 Ready for wallet registrations and proxy requests`);
+      console.log(`🚀 X402 Proxy on port ${port}`);
+      console.log(`🏗️  Consensus: ${consensusServerUrl}`);
     });
-    
   } catch (error) {
-    console.error('Failed to start server:', error.message);
+    console.error('Boot failed:', error.message);
     process.exit(1);
   }
 }
