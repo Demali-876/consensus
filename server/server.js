@@ -1,11 +1,23 @@
-require('dotenv').config();
-const express = require('express');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const cors = require('cors');
-const { settleResponseHeader } = require("x402/types");
-const ConsensusProxy = require('./proxy');
-const { createPaymentRequirements, verifyPayment, settle, x402Version, facilitatorUrl, payTo } = require('./utils/helper')
+import 'dotenv/config';
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import express from 'express';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import cors from 'cors';
+import { settleResponseHeader } from 'x402/types';
+import ConsensusProxy from './proxy.js';
+import { createPaymentRequirements, verifyPayment, settle, x402Version, facilitatorUrl, payTo } from './utils/helper.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(__dirname, '..');
+
+const MAIN_TLS_KEY  = process.env.MAIN_TLS_KEY_PATH  || path.join(root, 'certs', 'main.key');
+const MAIN_TLS_CERT = process.env.MAIN_TLS_CERT_PATH || path.join(root, 'certs', 'main.crt');
+const CA_CERT       = process.env.CA_CERT_PATH       || path.join(root, 'certs', 'ca.crt');
+
 
 const app = express();
 const port = process.env.CONSENSUS_SERVER_PORT || 8080;
@@ -287,6 +299,17 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Consensus Server running on port ${port}`);
+const server = https.createServer(
+  {
+    key:  fs.readFileSync(MAIN_TLS_KEY),
+    cert: fs.readFileSync(MAIN_TLS_CERT),
+    ca:   fs.readFileSync(CA_CERT),
+    requestCert: true,
+    rejectUnauthorized: true
+  },
+  app
+);
+
+server.listen(port, '0.0.0.0', () => {
+  console.log(` Server (mTLS) on https://0.0.0.0:${port}`);
 });

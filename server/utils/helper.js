@@ -1,8 +1,9 @@
-const { exact } = require('x402/schemes');
-const { useFacilitator } = require('x402/verify');
-const { processPriceToAtomicAmount } = require('x402/shared');
-const payTo = process.env.WALLET_ADDRESS || "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f";
-const facilitatorUrl = process.env.FACILITATOR_URL || "https://facilitator.x402.rs/";
+import { exact } from 'x402/schemes';
+import { useFacilitator } from 'x402/verify';
+import { processPriceToAtomicAmount } from 'x402/shared';
+
+export const payTo = process.env.WALLET_ADDRESS || "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f";
+export const facilitatorUrl = process.env.FACILITATOR_URL || "https://facilitator.x402.rs/";
 
 
 const facilitatorConfig = {
@@ -15,8 +16,8 @@ const facilitatorConfig = {
   }
 };
 
-const { verify, settle } = useFacilitator(facilitatorConfig);
-const x402Version = 1;
+export const { verify, settle } = useFacilitator(facilitatorConfig);
+export const x402Version = 1;
 
 function createPaymentRequirements(amount, resource, description) {
   try {
@@ -177,11 +178,5 @@ async function verifyPayment(req, res, paymentRequirements) {
     });
   }
 }
-module.exports = {
-  payTo,
-  facilitatorUrl,
-  x402Version,
-  createPaymentRequirements,
-  verifyPayment,
-  settle
-};
+
+export{ createPaymentRequirements, verifyPayment};

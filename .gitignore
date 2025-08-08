@@ -2,3 +2,4 @@
 
 # Ignore consensus config
 .consensus-config.json
+/certs

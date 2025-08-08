@@ -1,8 +1,8 @@
-const NodeCache = require('node-cache');
-const axios = require('axios');
-const zlib = require('zlib');
+import NodeCache from 'node-cache';
+import axios from 'axios';
+import zlib from 'zlib';
 
-class ConsensusProxy {
+export default class ConsensusProxy {
   constructor() {
     this.cache = new NodeCache({ stdTTL: 300 });
     this.pendingRequests = new Map();
@@ -209,5 +209,3 @@ class ConsensusProxy {
     console.log(`Cleared all tracking for: ${idempotencyKey}`);
   }
 }
-
-module.exports = ConsensusProxy;

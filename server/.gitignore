@@ -1,2 +1,7 @@
 .env
 /node_modules
+.tmp
+/data/nodes.db
+yarn.lock
+main.key
+main.csr

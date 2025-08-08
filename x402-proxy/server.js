@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { Agent as UndiciAgent } from 'undici';
 import express from 'express';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -12,9 +16,28 @@ import { baseSepolia } from 'viem/chains';
 import { wrapFetchWithPayment } from 'x402-fetch';
 import crypto from 'crypto';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(__dirname, '..');
+
+const PROXY_TLS_KEY  = process.env.PROXY_TLS_KEY_PATH  || path.join(root, 'certs', 'proxy.key');
+const PROXY_TLS_CERT = process.env.PROXY_TLS_CERT_PATH || path.join(root, 'certs', 'proxy.crt');
+const CA_CERT        = process.env.CA_CERT_PATH        || path.join(root, 'certs', 'ca.crt');
+
+const mtlsDispatcher = new UndiciAgent({
+  connect: {
+    tls: {
+      key:  fs.readFileSync(PROXY_TLS_KEY),
+      cert: fs.readFileSync(PROXY_TLS_CERT),
+      ca:   fs.readFileSync(CA_CERT),
+      rejectUnauthorized: true
+    }
+  }
+});
+
+
 const app = express();
 const port = process.env.X402_PROXY_PORT || 3001;
-const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'http://localhost:8080';
+const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://localhost:8080';
 const walletStore = new WalletStore();
 const registeredWallets = new Map();
 const walletClients = new Map();
@@ -262,7 +285,8 @@ app.post('/proxy', validateApiKey, async (req, res) => {
             method,
             headers: { 'x-idempotency-key': idempotencyKey, ...headers },
             body
-          })
+          }),
+          dispatcher: mtlsDispatcher,
         });
       } catch (fetchError) {
         errorResponse = buildErrorResponse(fetchError, walletName, startTime);
