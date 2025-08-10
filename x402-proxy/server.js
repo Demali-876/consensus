@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import 'dotenv/config';
+import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -29,7 +30,8 @@ const mtlsDispatcher = new UndiciAgent({
       key:  fs.readFileSync(PROXY_TLS_KEY),
       cert: fs.readFileSync(PROXY_TLS_CERT),
       ca:   fs.readFileSync(CA_CERT),
-      rejectUnauthorized: true
+      rejectUnauthorized: true,
+      servername: 'consensus.canister.software'
     }
   }
 });
@@ -422,14 +424,82 @@ app.use((error, req, res, next) => {
     process.exit(0);
   });
 });
-
+// Add this function before the boot() function
+async function testConsensusConnection() {
+  console.log('🔍 Testing consensus server connection...');
+  console.log(`   URL: ${consensusServerUrl}/`);
+  console.log(`   Certificates:`);
+  console.log(`   - Key: ${PROXY_TLS_KEY}`);
+  console.log(`   - Cert: ${PROXY_TLS_CERT}`);
+  console.log(`   - CA: ${CA_CERT}`);
+  
+  // Check if certificate files exist
+  try {
+    fs.accessSync(PROXY_TLS_KEY, fs.constants.R_OK);
+    fs.accessSync(PROXY_TLS_CERT, fs.constants.R_OK);
+    fs.accessSync(CA_CERT, fs.constants.R_OK);
+    console.log('   ✅ All certificate files exist and are readable');
+  } catch (fileError) {
+    console.error('   ❌ Certificate file error:', fileError.message);
+    return false;
+  }
+  
+  try {
+    console.log('   Making fetch request...');
+    const response = await fetch(consensusServerUrl + '/', {
+      method: 'GET',
+      dispatcher: mtlsDispatcher,
+    });
+    
+    console.log(`   Response status: ${response.status}`);
+    
+    if (response.ok) {
+      const data = await response.json();
+      console.log('✅ Consensus server connection successful');
+      console.log(`   Server: ${data.name} v${data.version}`);
+      console.log(`   Status: ${data.status}`);
+      return true;
+    } else {
+      console.error(`❌ Consensus server responded with status: ${response.status}`);
+      const text = await response.text();
+      console.error(`   Response body: ${text}`);
+      return false;
+    }
+  } catch (error) {
+    console.error('❌ Failed to connect to consensus server:', error.message);
+    console.error('   Error details:', error);
+    
+    // Check for specific error types
+    if (error.cause) {
+      console.error('   Root cause:', error.cause.message);
+      console.error('   Cause code:', error.cause.code);
+    }
+    
+    console.error('   This could be due to:');
+    console.error('   - Certificate issues (check Ed25519 support)');
+    console.error('   - mTLS configuration problems');
+    console.error('   - Server not running');
+    console.error('   - Network connectivity issues');
+    return false;
+  }
+}
 // Boot server
 async function boot() {
   try {
     await restoreWallets();
-    app.listen(port, () => {
-      console.log(`🚀 X402 Proxy on port ${port}`);
-      console.log(`🏗️  Consensus: ${consensusServerUrl}`);
+    const server = https.createServer(
+      {
+        key:  fs.readFileSync(PROXY_TLS_KEY),
+        cert: fs.readFileSync(PROXY_TLS_CERT),
+        ca:   fs.readFileSync(CA_CERT),
+        requestCert: true,
+        rejectUnauthorized: true
+      },
+      app
+    );
+    await testConsensusConnection();
+    server.listen(port, '0.0.0.0', () => {
+      console.log(` x402-Proxy Server (mTLS) on https://localhost:${port}`);
     });
   } catch (error) {
     console.error('Boot failed:', error.message);
