@@ -5,6 +5,7 @@ import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { URL } from 'url';
 import { Agent as UndiciAgent } from 'undici';
 import express from 'express';
 import helmet from 'helmet';
@@ -20,26 +21,60 @@ import crypto from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
-const PROXY_TLS_KEY  = process.env.PROXY_TLS_KEY_PATH  || path.join(root, 'certs', 'proxy.key');
-const PROXY_TLS_CERT = process.env.PROXY_TLS_CERT_PATH || path.join(root, 'certs', 'proxy.crt');
-const CA_CERT        = process.env.CA_CERT_PATH        || path.join(root, 'certs', 'ca.crt');
+const PROXY_TLS_KEY = process.env.PROXY_TLS_KEY_PATH || path.join(root, 'scripts/certs', 'proxy.key');
+const PROXY_TLS_CERT = process.env.PROXY_TLS_CERT_PATH || path.join(root, 'scripts/certs', 'proxy.crt');
+const CA_CERT = process.env.CA_CERT_PATH || path.join(root, 'scripts/certs', 'ca.crt');
 
-const mtlsDispatcher = new UndiciAgent({
-  connect: {
-    tls: {
-      key:  fs.readFileSync(PROXY_TLS_KEY),
-      cert: fs.readFileSync(PROXY_TLS_CERT),
-      ca:   fs.readFileSync(CA_CERT),
-      rejectUnauthorized: true,
-      servername: 'consensus.canister.software'
+// Hybrid fetch: Native HTTPS for mTLS, Undici for everything else
+function createHybridFetch() {
+  const undiciAgent = new UndiciAgent({ keepAliveTimeout: 10000, connections: 10, pipelining: 1 });
+  const httpsAgent = new https.Agent({
+    key: fs.readFileSync(PROXY_TLS_KEY),
+    cert: fs.readFileSync(PROXY_TLS_CERT),
+    ca: fs.readFileSync(CA_CERT),
+    rejectUnauthorized: true,
+    keepAlive: true,
+    keepAliveMsecs: 10000
+  });
+
+  const nativeRequest = (url, options, agent) => new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const req = https.request({
+      hostname: urlObj.hostname,
+      port: urlObj.port || 443,
+      path: urlObj.pathname + urlObj.search,
+      method: options.method || 'GET',
+      headers: options.headers || {},
+      agent
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve({
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        status: res.statusCode,
+        statusText: res.statusMessage,
+        headers: new Headers(res.headers),
+        json: async () => JSON.parse(data),
+        text: async () => data
+      }));
+    });
+    req.on('error', reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+
+  return async (url, options = {}) => {
+    if (url.includes('consensus.canister.software')) {
+      return nativeRequest(url, options, httpsAgent);
     }
-  }
-});
+    return fetch(url, { ...options, dispatcher: undiciAgent });
+  };
+}
 
-
+const hybridFetch = createHybridFetch();
 const app = express();
 const port = process.env.X402_PROXY_PORT || 3001;
-const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://localhost:8080';
+const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software:8080';
 const walletStore = new WalletStore();
 const registeredWallets = new Map();
 const walletClients = new Map();
@@ -48,11 +83,7 @@ const processingRequests = new Map();
 
 app.use(helmet());
 app.use(cors());
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000, 
-  max: 1000,
-  message: { error: 'Too many requests' }
-}));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, message: { error: 'Too many requests' } }));
 app.use(express.json({ limit: '10mb' }));
 
 setInterval(() => {
@@ -69,18 +100,13 @@ setInterval(() => {
 
 function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
-  if (!apiKey) {
-    return res.status(401).json({ error: 'Missing API key' });
-  }
+  if (!apiKey) return res.status(401).json({ error: 'Missing API key' });
   const walletData = walletStore.getWalletByApiKey(apiKey);
-  if (!walletData) {
-    return res.status(401).json({ error: 'Invalid API key' });
-  }
+  if (!walletData) return res.status(401).json({ error: 'Invalid API key' });
   req.walletName = walletData.walletName;
   next();
 }
 
-// Helper to create wallet client
 function createWallet(privateKey, address) {
   const formattedKey = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
   const account = privateKeyToAccount(formattedKey);
@@ -95,10 +121,9 @@ function createWallet(privateKey, address) {
     transport: http()
   });
   
-  return { account, fetchWithPayment: wrapFetchWithPayment(fetch, walletClient) };
+  return { account, fetchWithPayment: wrapFetchWithPayment(hybridFetch, walletClient) };
 }
 
-// Restore wallets on startup
 async function restoreWallets() {
   console.log('Restoring wallets...');
   const wallets = walletStore.getAllWallets();
@@ -115,11 +140,10 @@ async function restoreWallets() {
     }
   }
   
-  console.log(`Loaded ${loaded} wallets`);
+  console.log(`Loaded ${loaded} wallet(s)`);
   return loaded;
 }
 
-// Register wallet endpoint
 app.post('/register-wallet', async (req, res) => {
   try {
     const { wallet_name, account_address, private_key } = req.body;
@@ -156,7 +180,6 @@ app.post('/register-wallet', async (req, res) => {
   }
 });
 
-// Build error response helper
 function buildErrorResponse(error, walletName, startTime) {
   const msg = error.message.toLowerCase();
   const address = registeredWallets.get(walletName);
@@ -201,7 +224,6 @@ function buildErrorResponse(error, walletName, startTime) {
   };
 }
 
-// Main proxy endpoint
 app.post('/proxy', validateApiKey, async (req, res) => {
   const startTime = Date.now();
   
@@ -288,7 +310,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
             headers: { 'x-idempotency-key': idempotencyKey, ...headers },
             body
           }),
-          dispatcher: mtlsDispatcher,
         });
       } catch (fetchError) {
         errorResponse = buildErrorResponse(fetchError, walletName, startTime);
@@ -352,13 +373,11 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       return fullResponse;
     })();
 
-    // Store and cleanup promise
     processingRequests.set(idempotencyKey, requestPromise);
     const cleanup = () => processingRequests.delete(idempotencyKey);
     requestPromise.finally(cleanup);
     setTimeout(cleanup, 5 * 60 * 1000);
-
-    // Await and return response
+    
     const finalResponse = await requestPromise;
     
     if (finalResponse.error || finalResponse.status >= 400) {
@@ -386,7 +405,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
   }
 });
 
-// Health check
 app.get('/health', (req, res) => {
   const dbInfo = walletStore.getDatabaseInfo();
   res.json({ 
@@ -399,7 +417,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Stats
 app.get('/stats', (req, res) => {
   res.json({
     wallets: registeredWallets.size,
@@ -410,13 +427,11 @@ app.get('/stats', (req, res) => {
   });
 });
 
-// Error handler
 app.use((error, req, res, next) => {
   console.error('Unhandled:', error);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Graceful shutdown
 ['SIGTERM', 'SIGINT'].forEach(signal => {
   process.on(signal, () => {
     console.log(`${signal} received, shutting down`);
@@ -424,82 +439,42 @@ app.use((error, req, res, next) => {
     process.exit(0);
   });
 });
-// Add this function before the boot() function
+
 async function testConsensusConnection() {
-  console.log('🔍 Testing consensus server connection...');
-  console.log(`   URL: ${consensusServerUrl}/`);
-  console.log(`   Certificates:`);
-  console.log(`   - Key: ${PROXY_TLS_KEY}`);
-  console.log(`   - Cert: ${PROXY_TLS_CERT}`);
-  console.log(`   - CA: ${CA_CERT}`);
-  
-  // Check if certificate files exist
   try {
-    fs.accessSync(PROXY_TLS_KEY, fs.constants.R_OK);
-    fs.accessSync(PROXY_TLS_CERT, fs.constants.R_OK);
-    fs.accessSync(CA_CERT, fs.constants.R_OK);
-    console.log('   ✅ All certificate files exist and are readable');
-  } catch (fileError) {
-    console.error('   ❌ Certificate file error:', fileError.message);
-    return false;
-  }
-  
-  try {
-    console.log('   Making fetch request...');
-    const response = await fetch(consensusServerUrl + '/', {
-      method: 'GET',
-      dispatcher: mtlsDispatcher,
-    });
-    
-    console.log(`   Response status: ${response.status}`);
-    
+    const response = await hybridFetch(consensusServerUrl + '/');
     if (response.ok) {
       const data = await response.json();
-      console.log('✅ Consensus server connection successful');
-      console.log(`   Server: ${data.name} v${data.version}`);
-      console.log(`   Status: ${data.status}`);
+      console.log(`✅ Connected: ${data.name} v${data.version}`);
       return true;
-    } else {
-      console.error(`❌ Consensus server responded with status: ${response.status}`);
-      const text = await response.text();
-      console.error(`   Response body: ${text}`);
-      return false;
     }
+    console.error(`Status: ${response.status}`);
+    return false;
   } catch (error) {
-    console.error('❌ Failed to connect to consensus server:', error.message);
-    console.error('   Error details:', error);
-    
-    // Check for specific error types
-    if (error.cause) {
-      console.error('   Root cause:', error.cause.message);
-      console.error('   Cause code:', error.cause.code);
-    }
-    
-    console.error('   This could be due to:');
-    console.error('   - Certificate issues (check Ed25519 support)');
-    console.error('   - mTLS configuration problems');
-    console.error('   - Server not running');
-    console.error('   - Network connectivity issues');
+    console.error(`Connection failed: ${error.message}`);
     return false;
   }
 }
-// Boot server
+
 async function boot() {
   try {
     await restoreWallets();
-    const server = https.createServer(
-      {
-        key:  fs.readFileSync(PROXY_TLS_KEY),
-        cert: fs.readFileSync(PROXY_TLS_CERT),
-        ca:   fs.readFileSync(CA_CERT),
-        requestCert: true,
-        rejectUnauthorized: true
-      },
-      app
-    );
     await testConsensusConnection();
+    
+    const server = https.createServer({
+      key: fs.readFileSync(PROXY_TLS_KEY),
+      cert: fs.readFileSync(PROXY_TLS_CERT),
+      ca: fs.readFileSync(CA_CERT),
+      requestCert: true,
+      rejectUnauthorized: true,
+      handshakeTimeout: 30000,
+      requestTimeout: 30000,
+      headersTimeout: 30000,
+      keepAliveTimeout: 5000
+    }, app);
+    
     server.listen(port, '0.0.0.0', () => {
-      console.log(` x402-Proxy Server (mTLS) on https://localhost:${port}`);
+      console.log(`x402-Proxy Server (mTLS) on https://consensus.proxy.canister.software:${port}`);
     });
   } catch (error) {
     console.error('Boot failed:', error.message);

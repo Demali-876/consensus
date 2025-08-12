@@ -14,9 +14,9 @@ import { createPaymentRequirements, verifyPayment, settle, x402Version, facilita
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
-const MAIN_TLS_KEY  = process.env.MAIN_TLS_KEY_PATH  || path.join(root, 'certs', 'main.key');
-const MAIN_TLS_CERT = process.env.MAIN_TLS_CERT_PATH || path.join(root, 'certs', 'main.crt');
-const CA_CERT       = process.env.CA_CERT_PATH       || path.join(root, 'certs', 'ca.crt');
+const MAIN_TLS_KEY  = process.env.MAIN_TLS_KEY_PATH  || path.join(root, 'scripts/certs', 'main.key');
+const MAIN_TLS_CERT = process.env.MAIN_TLS_CERT_PATH || path.join(root, 'scripts/certs', 'main.crt');
+const CA_CERT       = process.env.CA_CERT_PATH       || path.join(root, 'scripts/certs', 'ca.crt');
 
 
 const app = express();
@@ -45,7 +45,7 @@ app.get('/', (req, res) => {
     name: 'Consensus', 
     status: 'running',
     version: '1.0.1',
-    description: 'HTTP API Deduplication Service with x402 Payments',
+    description: 'HTTPS API Deduplication Service with x402 Payments',
     pricing: '$0.001 per unique API call (cached responses are free)',
     payment_network: 'Base Sepolia',
     payment_address: payTo,
@@ -119,7 +119,7 @@ app.all('/proxy', async (req, res) => {
     const allowedMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
     if (!allowedMethods.includes(methodUpper)) {
       return res.status(400).json({
-        error: 'Unsupported HTTP method',
+        error: 'Unsupported HTTPS method',
         message: `Method "${method}" is not supported`,
         allowed_methods: allowedMethods
       });
@@ -289,15 +289,7 @@ app.use((error, req, res, next) => {
   });
 });
 
-process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, shutting down gracefully');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('Received SIGINT, shutting down gracefully');
-  process.exit(0);
-});
+['SIGTERM', 'SIGINT'].forEach(signal => process.on(signal, () => { walletStore.close(); process.exit(0); }));
 
 const server = https.createServer(
   {
@@ -305,11 +297,16 @@ const server = https.createServer(
     cert: fs.readFileSync(MAIN_TLS_CERT),
     ca:   fs.readFileSync(CA_CERT),
     requestCert: true,
-    rejectUnauthorized: true
+    rejectUnauthorized: true,
+    handshakeTimeout: 30000,
+    requestTimeout: 30000,
+    headersTimeout: 30000,
+    keepAliveTimeout: 5000
+    
   },
   app
 );
 
 server.listen(port, '0.0.0.0', () => {
-  console.log(` Server (mTLS) on https://0.0.0.0:${port}`);
+  console.log(`Consensus Server (mTLS) on https://consensus.canister.software:${port}`);
 });
