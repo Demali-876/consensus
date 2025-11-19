@@ -243,7 +243,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
 
     console.log(`${method} request with key: ${idempotencyKey}`);
 
-    // Check if already processing
     if (processingRequests.has(idempotencyKey)) {
       console.log(`Waiting for existing request: ${idempotencyKey}`);
       try {
@@ -265,7 +264,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       }
     }
 
-    // Check cache
     if (requestTracker.has(idempotencyKey)) {
       const cached = requestTracker.get(idempotencyKey);
       console.log(`Cache hit (${cached.isError ? 'error' : 'success'}): ${idempotencyKey}`);
@@ -285,7 +283,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
       });
     }
 
-    // Create request promise
     const requestPromise = (async () => {
       const fetchWithPayment = walletClients.get(walletName);
       if (!fetchWithPayment) {
@@ -321,7 +318,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
         return errorResponse;
       }
 
-      // Handle non-ok responses
       if (response && !response.ok && response.status !== 402) {
         let errorDetails;
         try {
@@ -351,7 +347,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
         return errorResponse;
       }
 
-      // Handle success
       const responseData = await response.json();
       const fullResponse = {
         ...responseData,
@@ -464,9 +459,9 @@ async function boot() {
     const server = https.createServer({
       key: fs.readFileSync(PROXY_TLS_KEY),
       cert: fs.readFileSync(PROXY_TLS_CERT),
-      ca: fs.readFileSync(CA_CERT),
-      requestCert: true,
-      rejectUnauthorized: true,
+      // REMOVED: ca: fs.readFileSync(CA_CERT),
+      // REMOVED: requestCert: true,
+      // REMOVED: rejectUnauthorized: true,
       handshakeTimeout: 30000,
       requestTimeout: 30000,
       headersTimeout: 30000,
