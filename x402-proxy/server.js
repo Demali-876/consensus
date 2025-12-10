@@ -23,19 +23,23 @@ const root = path.resolve(__dirname, '..');
 
 const PROXY_TLS_KEY = process.env.PROXY_TLS_KEY_PATH || path.join(root, 'scripts/certs', 'proxy.key');
 const PROXY_TLS_CERT = process.env.PROXY_TLS_CERT_PATH || path.join(root, 'scripts/certs', 'proxy.crt');
-const CA_CERT = process.env.CA_CERT_PATH || path.join(root, 'scripts/certs', 'ca.crt');
+
+// mTLS client certs for connecting to main server
+const MTLS_CLIENT_KEY  = path.join(root, 'scripts/mtls-certs', 'client.key');
+const MTLS_CLIENT_CERT = path.join(root, 'scripts/mtls-certs', 'client.crt');
+const MTLS_CA_CERT     = path.join(root, 'scripts/mtls-certs', 'ca.crt');
 
 // Hybrid fetch: Native HTTPS for mTLS, Undici for everything else
 function createHybridFetch() {
   const undiciAgent = new UndiciAgent({ keepAliveTimeout: 10000, connections: 10, pipelining: 1 });
   const httpsAgent = new https.Agent({
-    key: fs.readFileSync(PROXY_TLS_KEY),
-    cert: fs.readFileSync(PROXY_TLS_CERT),
-    ca: fs.readFileSync(CA_CERT),
+    key: fs.readFileSync(MTLS_CLIENT_KEY),
+    cert: fs.readFileSync(MTLS_CLIENT_CERT),
+    ca: fs.readFileSync(MTLS_CA_CERT),
     rejectUnauthorized: true,
     keepAlive: true,
     keepAliveMsecs: 10000
-  });
+});
 
   const nativeRequest = (url, options, agent) => new Promise((resolve, reject) => {
     const urlObj = new URL(url);
@@ -456,18 +460,15 @@ async function boot() {
     await restoreWallets();
     await testConsensusConnection();
     
-    const server = https.createServer({
-      key: fs.readFileSync(PROXY_TLS_KEY),
-      cert: fs.readFileSync(PROXY_TLS_CERT),
-      // REMOVED: ca: fs.readFileSync(CA_CERT),
-      // REMOVED: requestCert: true,
-      // REMOVED: rejectUnauthorized: true,
-      handshakeTimeout: 30000,
-      requestTimeout: 30000,
-      headersTimeout: 30000,
-      keepAliveTimeout: 5000
-    }, app);
     
+    const server = https.createServer({
+    key: fs.readFileSync(PROXY_TLS_KEY),
+    cert: fs.readFileSync(PROXY_TLS_CERT),
+    handshakeTimeout: 30000,
+    requestTimeout: 30000,
+    headersTimeout: 30000,
+    keepAliveTimeout: 5000
+}, app);
     server.listen(port, '0.0.0.0', () => {
       console.log(`x402-Proxy Server (mTLS) on https://consensus.proxy.canister.software:${port}`);
     });

@@ -16,7 +16,11 @@ const root = path.resolve(__dirname, '..');
 
 const MAIN_TLS_KEY  = process.env.MAIN_TLS_KEY_PATH  || path.join(root, 'scripts/certs', 'main.key');
 const MAIN_TLS_CERT = process.env.MAIN_TLS_CERT_PATH || path.join(root, 'scripts/certs', 'main.crt');
-const CA_CERT       = process.env.CA_CERT_PATH       || path.join(root, 'scripts/certs', 'ca.crt');
+
+// mTLS certs
+const MTLS_SERVER_KEY  = path.join(root, 'scripts/mtls-certs', 'server.key');
+const MTLS_SERVER_CERT = path.join(root, 'scripts/mtls-certs', 'server.crt');
+const MTLS_CA_CERT     = path.join(root, 'scripts/mtls-certs', 'ca.crt');
 
 
 const app = express();
@@ -293,16 +297,15 @@ app.use((error, req, res, next) => {
 
 const server = https.createServer(
   {
-    key:  fs.readFileSync(MAIN_TLS_KEY),
-    cert: fs.readFileSync(MAIN_TLS_CERT),
-    ca:   fs.readFileSync(CA_CERT),
+    key:  fs.readFileSync(MTLS_SERVER_KEY),
+    cert: fs.readFileSync(MTLS_SERVER_CERT),
+    ca:   fs.readFileSync(MTLS_CA_CERT),
     requestCert: true,
     rejectUnauthorized: true,
     handshakeTimeout: 30000,
     requestTimeout: 30000,
     headersTimeout: 30000,
     keepAliveTimeout: 5000
-    
   },
   app
 );

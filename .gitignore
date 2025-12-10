@@ -4,3 +4,5 @@
 .consensus-config.json
 /certs
 /scripts/certs/*
+/scripts/mtls-certs/*
+/logs
