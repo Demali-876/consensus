@@ -210,6 +210,101 @@ async function getNamecheapDNS() {
     }).on('error', reject);
   });
 }
+// Add to server/utils/dns.js
+
+export async function updateServerDDNS() {
+  console.log('🌍 Updating DDNS for Consensus servers...\n');
+  
+  try {
+    // Get current public IP
+    const currentIP = await getCurrentIP();
+    if (!currentIP) {
+      throw new Error('Could not determine current IP');
+    }
+    
+    console.log(`📡 Current Public IP: ${currentIP}\n`);
+    
+    // Get current DNS records
+    console.log('📋 Fetching current DNS records...');
+    const records = await getNamecheapDNS();
+    console.log(`   ✓ Found ${records.length} existing records\n`);
+    
+    // Check if update is needed
+    const mainRecord = records.find(r => r.hostname === 'consensus' && r.type === 'A');
+    const proxyRecord = records.find(r => r.hostname === 'consensus.proxy' && r.type === 'A');
+    
+    let needsUpdate = false;
+    
+    if (!mainRecord || mainRecord.address !== currentIP) {
+      console.log(`🔄 Main server IP needs update: ${mainRecord?.address || 'none'} → ${currentIP}`);
+      needsUpdate = true;
+    } else {
+      console.log(`✓ Main server IP is current: ${currentIP}`);
+    }
+    
+    if (!proxyRecord || proxyRecord.address !== currentIP) {
+      console.log(`🔄 Proxy server IP needs update: ${proxyRecord?.address || 'none'} → ${currentIP}`);
+      needsUpdate = true;
+    } else {
+      console.log(`✓ Proxy server IP is current: ${currentIP}`);
+    }
+    
+    if (!needsUpdate) {
+      console.log('\n✅ All DNS records are up to date!\n');
+      return { updated: false, ip: currentIP };
+    }
+    
+    console.log('\n🔄 Updating DNS records...');
+    
+    // Update or add records
+    const updatedRecords = records.filter(r => 
+      !(r.hostname === 'consensus' && r.type === 'A') &&
+      !(r.hostname === 'consensus.proxy' && r.type === 'A')
+    );
+    
+    // Add updated A records
+    updatedRecords.push({
+      hostname: 'consensus',
+      type: 'A',
+      address: currentIP,
+      ttl: 300
+    });
+    
+    updatedRecords.push({
+      hostname: 'consensus.proxy',
+      type: 'A',
+      address: currentIP,
+      ttl: 300
+    });
+    
+    await setNamecheapDNS(updatedRecords);
+    
+    console.log('   ✓ DNS updated successfully\n');
+    console.log('✅ DDNS update complete!\n');
+    console.log(`Main Server:  https://consensus.canister.software → ${currentIP}`);
+    console.log(`Proxy Server: https://consensus.proxy.canister.software → ${currentIP}`);
+    console.log('\n');
+    
+    return { updated: true, ip: currentIP };
+    
+  } catch (error) {
+    console.error('❌ DDNS update failed:', error.message);
+    throw error;
+  }
+}
+
+async function getCurrentIP() {
+  try {
+    // Try IPv4
+    const response = await fetch('https://api.ipify.org', {
+      signal: AbortSignal.timeout(5000)
+    });
+    return (await response.text()).trim();
+  } catch (error) {
+    console.error('Failed to get current IP:', error.message);
+    return null;
+  }
+}
 
 async function setNamecheapDNS(records) {
   const username = process.env.NAMECHEAP_USERNAME;
