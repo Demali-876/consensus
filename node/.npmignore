@@ -1,0 +1,20 @@
+# Test files
+test-benchmark.js
+
+# Config files (user-specific)
+.env
+.consensus-node-config.json
+.consensus-node.key
+.consensus-node.pub
+
+# Certificates (generated)
+certs/
+
+# Development
+node_modules/
+*.log
+.DS_Store
+
+# Git
+.git/
+.gitignore
