@@ -75,6 +75,15 @@ app.get('/', (req, res) => {
 // Health check endpoint
 app.get('/health', (req, res) => {
   const stats = proxy.getStats();
+  const nodes = NodeStore.listNodes();
+
+  const nodeStats = {
+    total: nodes.length,
+    active: nodes.filter(n => n.status === 'active').length,
+    inactive: nodes.filter(n => n.status !== 'active').length,
+    with_heartbeat: nodes.filter(n => n.heartbeat).length
+  };
+  
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
@@ -83,7 +92,12 @@ app.get('/health', (req, res) => {
     cache_hits: stats.cache_hits,
     payment_address: payTo,
     facilitator_url: facilitatorUrl,
-    x402_version: x402Version
+    x402_version: x402Version,
+    network: {
+      total_nodes: nodeStats.total,
+      active_nodes: nodeStats.active,
+      nodes_with_recent_heartbeat: nodeStats.with_heartbeat
+    }
   });
 });
 
