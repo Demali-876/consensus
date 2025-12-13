@@ -441,14 +441,36 @@ app.use((error, req, res, next) => {
 
 async function testConsensusConnection() {
   try {
-    const response = await hybridFetch(consensusServerUrl + '/');
-    if (response.ok) {
-      const data = await response.json();
-      console.log(`✅ Connected: ${data.name} v${data.version}`);
+    const response = await hybridFetch(consensusServerUrl + "/");
+    if (!response.ok) {
+      console.error(`Status: ${response.status}`);
+      return false;
+    }
+
+    const data = await response.json();
+    console.log(`✅ Connected: ${data.name} v${data.version}`);
+
+    const healthResponse = await hybridFetch(consensusServerUrl + "/health");
+    if (!healthResponse.ok) {
+      console.error(`Health check failed with status: ${healthResponse.status}`);
       return true;
     }
-    console.error(`Status: ${response.status}`);
-    return false;
+
+    const health = await healthResponse.json();
+
+    const totalNodes =
+      health.network?.total_nodes ??
+      health.total_nodes ??
+      0;
+
+    const totalHeartbeats =
+      health.network?.nodes_with_recent_heartbeat ??
+      health.nodes_with_recent_heartbeat ??
+      0;
+
+    console.log(`Network: ${totalNodes} total nodes, ${totalHeartbeats} with recent heartbeat`);
+
+    return true;
   } catch (error) {
     console.error(`Connection failed: ${error.message}`);
     return false;
@@ -459,8 +481,6 @@ async function boot() {
   try {
     await restoreWallets();
     await testConsensusConnection();
-    
-    
     const server = https.createServer({
     key: fs.readFileSync(PROXY_TLS_KEY),
     cert: fs.readFileSync(PROXY_TLS_CERT),
