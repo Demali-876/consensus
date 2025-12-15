@@ -426,6 +426,29 @@ app.get('/stats', (req, res) => {
   });
 });
 
+app.get('/network', async (req, res) => {
+  try {
+    console.log('Fetching from:', consensusServerUrl + '/health');
+    const response = await hybridFetch(consensusServerUrl + '/health');
+    console.log('Response status:', response.status);
+    const data = await response.json();
+    
+    res.json({
+      status: data.status,
+      total_nodes: data.network?.total_nodes || 0,
+      active_nodes: data.network?.active_nodes || 0,
+      timestamp: data.timestamp
+    });
+  } catch (error) {
+    console.error('Network fetch error:', error.message);
+    res.status(503).json({
+      error: 'Failed to fetch network stats',
+      details: error.message
+    });
+  }
+});
+
+
 app.use((error, req, res, next) => {
   console.error('Unhandled:', error);
   res.status(500).json({ error: 'Internal server error' });
