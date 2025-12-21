@@ -435,7 +435,7 @@ app.post('/node/request-temp-cert', async (req, res) => {
     }
     console.log('\n📡 Forwarding temp cert request to gateway...');
 
-    const response = await fetch(`${consensusServerUrl}/node/issue-temp-cert`, {
+    const response = await hybridFetch(`${consensusServerUrl}/node/issue-temp-cert`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pubkey_pem })
