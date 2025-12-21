@@ -303,10 +303,47 @@ app.all('/proxy', async (req, res) => {
     });
   }
 });
-
-// NODE NETWORK ENDPOINTS
-
-// Step 1: Request to join network
+app.post('/node/issue-temp-cert', async (req, res) => {
+  try {
+    const { pubkey_pem } = req.body;
+    
+    if (!pubkey_pem) {
+      return res.status(400).json({ error: 'Missing pubkey_pem' });
+    }
+    
+    try {
+      crypto.createPublicKey(pubkey_pem);
+    } catch (error) {
+      return res.status(400).json({ 
+        error: 'Invalid public key format',
+        message: error.message 
+      });
+    }
+    
+    // 6 character hex ID (0-9a-f)
+    const tempId = crypto.randomBytes(3).toString('hex'); // 3 bytes = 6 hex chars
+    const tempDomain = `${tempId}.consensus.canister.software`;
+    
+    const certificates = await issueNodeCertificate(tempId, tempDomain, { validDays: 1 });
+    
+    res.json({
+      temp_id: tempId,
+      domain: tempDomain,
+      issued_at: new Date().toISOString(),
+      certificates: {
+        cert: certificates.cert,
+        key: certificates.key,
+        ca: certificates.ca
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'Failed to issue temporary certificate',
+      message: error.message 
+    });
+  }
+});
 app.post('/node/join', async (req, res) => {
   try {
     const { pubkey_pem, alg, region, capabilities, contact } = req.body;

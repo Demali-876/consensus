@@ -4,17 +4,18 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import inquirer from 'inquirer';
+import https from 'https';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'https://consensus.canister.software:8080';
-const PROXY_URL = process.env.PROXU_URL || 'https://consensus.proxy.canister.software:3001';
+const PROXY_URL = process.env.PROXY_URL || 'https://consensus.proxy.canister.software:3001';
 
 async function getPublicIPv6() {
   try {
     const services = [
-      'https://api6 4.ipify.org',
+      'https://api64.ipify.org',
       'https://v6.ident.me',
       'https://ipv6.icanhazip.com'
     ];
@@ -69,8 +70,70 @@ async function generateKeypair() {
   return { publicKey, privateKey };
 }
 
-async function requestJoin(publicKey, region, capabilities, contact) {
-  console.log('📡 Requesting to join network...');
+async function requestTempCert(publicKey) {
+  console.log('🔐 Requesting temporary certificate...');
+  
+  const response = await fetch(`${PROXY_URL}/node/request-temp-cert`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      pubkey_pem: publicKey
+    })
+  });
+  
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to get temporary certificate');
+  }
+  
+  const data = await response.json();
+  console.log('   ✓ Temporary certificate received');
+  console.log(`   Temp ID: ${data.temp_id}\n`);
+  
+  return data;
+}
+
+async function saveTempCertificates(certData) {
+  console.log('💾 Saving temporary certificates...');
+  
+  const tempCertsDir = path.join(root, '.temp-certs');
+  await fs.mkdir(tempCertsDir, { recursive: true });
+  
+  await fs.writeFile(
+    path.join(tempCertsDir, 'temp.crt'),
+    certData.certificates.cert
+  );
+  
+  await fs.writeFile(
+    path.join(tempCertsDir, 'temp.key'),
+    certData.certificates.key
+  );
+  
+  await fs.writeFile(
+    path.join(tempCertsDir, 'ca.crt'),
+    certData.certificates.ca
+  );
+  
+  console.log('   ✓ Temporary certificates saved\n');
+  
+  return tempCertsDir;
+}
+
+async function requestJoin(publicKey, region, capabilities, contact, tempCertsDir) {
+  console.log('📡 Requesting to join network (using temp mTLS cert)...');
+  
+  // Load temp certificates
+  const cert = await fs.readFile(path.join(tempCertsDir, 'temp.crt'));
+  const key = await fs.readFile(path.join(tempCertsDir, 'temp.key'));
+  const ca = await fs.readFile(path.join(tempCertsDir, 'ca.crt'));
+  
+  // Create HTTPS agent with temp mTLS cert
+  const agent = new https.Agent({
+    cert,
+    key,
+    ca,
+    rejectUnauthorized: true
+  });
   
   const response = await fetch(`${GATEWAY_URL}/node/join`, {
     method: 'POST',
@@ -81,7 +144,8 @@ async function requestJoin(publicKey, region, capabilities, contact) {
       region,
       capabilities,
       contact
-    })
+    }),
+    agent
   });
   
   if (!response.ok) {
@@ -116,8 +180,21 @@ async function signChallenge(nonce, privateKey) {
   return signature;
 }
 
-async function verifyAndRegister(joinId, signature, ipv6, ipv4, port, region, capabilities, contact, testEndpoint) {
-  console.log('🔐 Submitting verification...');
+async function verifyAndRegister(joinId, signature, ipv6, ipv4, port, region, capabilities, contact, testEndpoint, tempCertsDir) {
+  console.log('🔐 Submitting verification (using temp mTLS cert)...');
+  
+  // Load temp certificates
+  const cert = await fs.readFile(path.join(tempCertsDir, 'temp.crt'));
+  const key = await fs.readFile(path.join(tempCertsDir, 'temp.key'));
+  const ca = await fs.readFile(path.join(tempCertsDir, 'ca.crt'));
+  
+  // Create HTTPS agent with temp mTLS cert
+  const agent = new https.Agent({
+    cert,
+    key,
+    ca,
+    rejectUnauthorized: true
+  });
   
   const response = await fetch(`${GATEWAY_URL}/node/verify/${joinId}`, {
     method: 'POST',
@@ -131,7 +208,8 @@ async function verifyAndRegister(joinId, signature, ipv6, ipv4, port, region, ca
       capabilities,
       contact,
       test_endpoint: testEndpoint
-    })
+    }),
+    agent
   });
   
   if (!response.ok) {
@@ -164,7 +242,8 @@ async function saveConfig(nodeData, ipv6, ipv4, port, region) {
   
   console.log('💾 Configuration saved\n');
 }
-async function saveCertificates(nodeData) {
+
+async function savePermanentCertificates(nodeData) {
   const certsDir = path.join(root, 'certs');
   await fs.mkdir(certsDir, { recursive: true });
   
@@ -183,13 +262,26 @@ async function saveCertificates(nodeData) {
     nodeData.certificates.ca
   );
   
-  console.log('🔐 mTLS certificates saved\n');
+  console.log('🔐 Permanent mTLS certificates saved\n');
+}
+
+async function cleanupTempCertificates(tempCertsDir) {
+  console.log('🧹 Cleaning up temporary certificates...');
+  
+  try {
+    await fs.rm(tempCertsDir, { recursive: true, force: true });
+    console.log('   ✓ Temporary certificates removed\n');
+  } catch (error) {
+    console.warn('   ⚠️  Failed to remove temp certificates:', error.message);
+  }
 }
 
 async function register() {
   console.log('🌐 Consensus Node Registration\n');
   console.log('='.repeat(60));
   console.log('\n');
+  
+  let tempCertsDir = null;
   
   try {
     // Step 1: Check for existing config
@@ -288,8 +380,14 @@ async function register() {
       privateKey = keys.privateKey;
     }
     
-    // Step 6: Request to join
-    console.log('5️⃣  Network registration\n');
+    // Step 6: Request temporary certificate
+    console.log('5️⃣  Temporary certificate issuance\n');
+    
+    const tempCertData = await requestTempCert(publicKey);
+    tempCertsDir = await saveTempCertificates(tempCertData);
+    
+    // Step 7: Request to join (with temp cert)
+    console.log('6️⃣  Network registration\n');
     
     const capabilities = {
       http_proxy: true,
@@ -302,16 +400,17 @@ async function register() {
       publicKey,
       answers.region,
       capabilities,
-      answers.contact
+      answers.contact,
+      tempCertsDir
     );
     
-    // Step 7: Sign challenge
-    console.log('6️⃣  Cryptographic verification\n');
+    // Step 8: Sign challenge
+    console.log('7️⃣  Cryptographic verification\n');
     
     const signature = await signChallenge(joinData.challenge_nonce, privateKey);
     
-    // Step 8: Submit verification
-    console.log('7️⃣  Submitting to network\n');
+    // Step 9: Submit verification (with temp cert)
+    console.log('8️⃣  Submitting to network\n');
     
     const nodeData = await verifyAndRegister(
       joinData.join_id,
@@ -322,14 +421,17 @@ async function register() {
       answers.region,
       capabilities,
       answers.contact,
-      testEndpoint
+      testEndpoint,
+      tempCertsDir
     );
     
-    // Step 9: Save configuration
-    console.log('8️⃣  Finalizing registration\n');
+    // Step 10: Save configuration and permanent certificates
+    console.log('9️⃣  Finalizing registration\n');
     
     await saveConfig(nodeData, ipv6, ipv4, port, answers.region);
-    await saveCertificates(nodeData);
+    await savePermanentCertificates(nodeData);
+    await cleanupTempCertificates(tempCertsDir);
+    
     // Success!
     console.log('='.repeat(60));
     console.log('\n✅ NODE REGISTRATION SUCCESSFUL!\n');
@@ -354,6 +456,13 @@ async function register() {
     
   } catch (error) {
     console.error('\n❌ Registration failed:', error.message);
+
+    if (tempCertsDir) {
+      try {
+        await fs.rm(tempCertsDir, { recursive: true, force: true });
+      } catch {}
+    }
+    
     console.error('\n');
     process.exit(1);
   }
