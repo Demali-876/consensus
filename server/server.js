@@ -13,6 +13,7 @@ import ConsensusProxy from './proxy.js';
 import { createPaymentRequirements, verifyPayment, settle, x402Version, facilitatorUrl, payTo } from './utils/helper.js';
 import { benchmarkNode } from './utils/benchmark.js';
 import { provisionNodeDNS, updateNodeDNS } from './utils/dns.js';
+import { issueNodeCertificate } from './utils/certs.js';
 import NodeStore from './data/node_store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
