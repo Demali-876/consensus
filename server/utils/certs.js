@@ -2,23 +2,26 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(__dirname, '../..');
 
 const execAsync = promisify(exec);
 
-export async function issueNodeCertificate(nodeId, domain, opts = { }) {
+export async function issueNodeCertificate(nodeId, domain, opts = {}) {
   const days = opts.validDays ?? 365;
-
   if (!Number.isFinite(days) || !Number.isInteger(days) || days < 1) {
     throw new Error(`validDays must be an integer >= 1. Got: ${days}`);
   }
-
+  
   console.log(`🔐 Issuing mTLS certificate for node ${nodeId} valid ${days} day(s)...`);
-  
-  const certDir = path.resolve(`./node-certs/${nodeId}`);
+
+  const certDir = path.resolve(__dirname, '..', 'node-certs', nodeId);
   await fs.mkdir(certDir, { recursive: true });
-  
-  const caKey = './scripts/mtls-certs/ca.key';
-  const caCert = './scripts/mtls-certs/ca.crt';
+
+  const caKey = path.resolve(root, 'scripts/mtls-certs/ca.key');
+  const caCert = path.resolve(root, 'scripts/mtls-certs/ca.crt');
   
   try {
     // Generate node private key
@@ -30,6 +33,7 @@ export async function issueNodeCertificate(nodeId, domain, opts = { }) {
     await execAsync(
       `openssl req -new -key ${certDir}/node.key -out ${certDir}/node.csr -subj "/CN=${domain}/O=Consensus Network/OU=Node"`
     );
+    
     // Sign certificate with CA
     console.log('   Signing certificate with CA...');
     await execAsync(
@@ -54,7 +58,7 @@ export async function issueNodeCertificate(nodeId, domain, opts = { }) {
 export async function revokeNodeCertificate(nodeId) {
   console.log(`🗑️  Revoking certificate for node ${nodeId}...`);
   
-  const certDir = path.resolve(`./node-certs/${nodeId}`);
+  const certDir = path.resolve(__dirname, '..', 'node-certs', nodeId);
   
   try {
     await fs.rm(certDir, { recursive: true, force: true });
