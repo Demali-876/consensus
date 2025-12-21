@@ -6,3 +6,4 @@
 /scripts/certs/*
 /scripts/mtls-certs/*
 /logs
+verifier/target

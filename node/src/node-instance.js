@@ -282,8 +282,6 @@ app.post('/proxy', async (req, res) => {
   }
 });
 
-// Start server
-import https from 'https';
 
 // Start server
 async function startServer() {

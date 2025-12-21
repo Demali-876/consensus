@@ -5,8 +5,14 @@ import path from 'path';
 
 const execAsync = promisify(exec);
 
-export async function issueNodeCertificate(nodeId, domain) {
-  console.log(`🔐 Issuing mTLS certificate for node ${nodeId}...`);
+export async function issueNodeCertificate(nodeId, domain, opts = { }) {
+  const days = opts.validDays ?? 365;
+
+  if (!Number.isFinite(days) || !Number.isInteger(days) || days < 1) {
+    throw new Error(`validDays must be an integer >= 1. Got: ${days}`);
+  }
+
+  console.log(`🔐 Issuing mTLS certificate for node ${nodeId} valid ${days} day(s)...`);
   
   const certDir = path.resolve(`./node-certs/${nodeId}`);
   await fs.mkdir(certDir, { recursive: true });
@@ -24,11 +30,10 @@ export async function issueNodeCertificate(nodeId, domain) {
     await execAsync(
       `openssl req -new -key ${certDir}/node.key -out ${certDir}/node.csr -subj "/CN=${domain}/O=Consensus Network/OU=Node"`
     );
-    
     // Sign certificate with CA
     console.log('   Signing certificate with CA...');
     await execAsync(
-      `openssl x509 -req -in ${certDir}/node.csr -CA ${caCert} -CAkey ${caKey} -CAcreateserial -out ${certDir}/node.crt -days 365 -sha256`
+      `openssl x509 -req -in ${certDir}/node.csr -CA ${caCert} -CAkey ${caKey} -CAcreateserial -out ${certDir}/node.crt -days ${days} -sha256`
     );
     
     // Read certificates

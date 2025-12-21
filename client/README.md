@@ -1,21 +1,31 @@
-
- <p align="center">
-  <img src="../assets/setup.gif" alt="Consensus Client Setup Demo" width="800">
-</p>
-<h1 align="center">Consensus Client</h1>
-
 <p align="center">
-  CLI tool for setting up and managing access credentials for the Consensus protocol.<br>
-  Creates a wallet, registers it, and generates your local configuration.<br>
+  <picture>
+    <source srcset="./assets/logo-dark.svg" media="(prefers-color-scheme: dark)">
+    <source srcset="./assets/logo-light.svg" media="(prefers-color-scheme: light)">
+    <img src="./assets/logo-light.svg" alt="Consensus logo" width="220" />
+  </picture>
 </p>
 
+<h1 align="center">Consensus CLI</h1>
+
 <p align="center">
-  <a href="#"><img alt="Version" src="https://img.shields.io/badge/version-alpha-orange"></a>
+  Command-line interface for the <strong>Consensus Network</strong>.<br>
+  Setup, configure, and manage your <strong>x402-proxy delegations</strong> with ease.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@canister-software/consensus-cli"><img alt="npm version" src="https://img.shields.io/npm/v/@canister-software/consensus-cli.svg"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-BUSL--1.1-blue"></a>
-  <a href="https://github.com/Demali-876/consensus/stargazers">
-    <img alt="GitHub stars" src="https://img.shields.io/github/stars/Demali-876/consensus?style=social">
-  </a>
-  <a href="#"><img alt="Status" src="https://img.shields.io/badge/status-experimental-yellow"></a>
+  <a href="https://github.com/Demali-876/consensus/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Demali-876/consensus?style=social"></a>
+  <a href="#"><img alt="Status" src="https://img.shields.io/badge/status-beta-orange"></a>
+</p>
+
+<p align="center">
+  • <a href="#installation">Installation</a>
+  • <a href="#commands">Commands</a>
+  • <a href="#setup-process">Setup Process</a>
+  • <a href="#configuration">Configuration</a>
+  • <a href="#keywords">Keywords</a>
 </p>
 
 ## Setup Guide

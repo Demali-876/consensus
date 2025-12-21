@@ -9,11 +9,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'https://consensus.canister.software:8080';
+const PROXY_URL = process.env.PROXU_URL || 'https://consensus.proxy.canister.software:3001';
 
 async function getPublicIPv6() {
   try {
     const services = [
-      'https://api64.ipify.org',
+      'https://api6 4.ipify.org',
       'https://v6.ident.me',
       'https://ipv6.icanhazip.com'
     ];
@@ -21,7 +22,7 @@ async function getPublicIPv6() {
     for (const service of services) {
       try {
         const response = await fetch(service, { 
-          signal: AbortSignal.timeout(5000)
+          signal: AbortSignal.timeout(50000)
         });
         const ip = (await response.text()).trim();
         
@@ -42,7 +43,7 @@ async function getPublicIPv6() {
 async function getPublicIPv4() {
   try {
     const response = await fetch('https://api.ipify.org', {
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(50000)
     });
     return (await response.text()).trim();
   } catch {

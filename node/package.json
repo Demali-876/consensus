@@ -1,6 +1,6 @@
 {
   "name": "@canister-software/consensus-node",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "description": "Consensus Network Node - Join the decentralized proxy network (BETA)",
   "main": "src/node-instance.js",
   "type": "module",
@@ -42,6 +42,7 @@
     "src/",
     "bin/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "assets/"
   ]
 }

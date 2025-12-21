@@ -47,7 +47,7 @@ async function showBanner() {
 class ConsensusSDK {
   constructor() {
     this.configPath = path.join(process.cwd(), ".consensus-config.json");
-    this.x402ProxyUrl = process.env.X402_PROXY_URL || "http://localhost:3001";
+    this.x402ProxyUrl = process.env.X402_PROXY_URL || "https://consensus.proxy.canister.software:3001";
   }
 
   generateWalletName() {
@@ -106,7 +106,7 @@ class ConsensusSDK {
       console.log("CDP_API_KEY_ID=your-api-key-id");
       console.log("CDP_API_KEY_SECRET=your-api-key-secret");
       console.log("CDP_WALLET_SECRET=your-wallet-secret");
-      console.log("X402_PROXY_URL=http://localhost:3001  # (optional)");
+      console.log("X402_PROXY_URL=https://consensus.proxy.canister.software:3001  # (optional)");
       console.log(
         chalk.blue("\nGet CDP credentials: https://portal.cdp.coinbase.com/")
       );
@@ -332,7 +332,7 @@ class ConsensusSDK {
     console.log("\nEnvironment variables required:");
     console.log("  CDP_API_KEY_ID, CDP_API_KEY_SECRET, CDP_WALLET_SECRET");
     console.log(
-      "  X402_PROXY_URL (optional, defaults to http://localhost:3001)"
+      "  X402_PROXY_URL (optional, defaults to https://consensus.proxy.canister.software:3001/)"
     );
     console.log(
       "\nAfter setup, use the API key from .consensus-config.json for requests"
