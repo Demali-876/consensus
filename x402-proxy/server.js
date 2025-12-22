@@ -426,39 +426,35 @@ app.get('/stats', (req, res) => {
   });
 });
 
-app.post('/node/request-temp-cert', async (req, res) => {
+app.post('/node/join', async (req, res) => {
   try {
-    const { pubkey_pem } = req.body;
-
-    if (!pubkey_pem) {
-      return res.status(400).json({ error: 'Missing pubkey_pem' });
-    }
-    console.log('\n📡 Forwarding temp cert request to gateway...');
-
-    const response = await hybridFetch(`${consensusServerUrl}/node/issue-temp-cert`, {
+    const response = await hybridFetch(`${consensusServerUrl}/node/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pubkey_pem })
+      body: JSON.stringify(req.body)
     });
-
-    if (!response.ok) {
-      const error = await response.json();
-      console.error('   ✗ Gateway rejected request:', error.error);
-      return res.status(response.status).json(error);
-    }
-
+    
     const data = await response.json();
-    console.log(`   ✓ Temp cert received: ${data.temp_id}`);
-    console.log('   ✓ Forwarding to client\n');
-
-    res.json(data);
-
+    res.status(response.status).json(data);
   } catch (error) {
-    console.error('Proxy error:', error);
-    res.status(500).json({
-      error: 'Failed to request temporary certificate',
-      message: error.message
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/node/verify/:join_id', async (req, res) => {
+  try {
+    const { join_id } = req.params;
+    
+    const response = await hybridFetch(`${consensusServerUrl}/node/verify/${join_id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
     });
+    
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
