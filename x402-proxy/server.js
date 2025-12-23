@@ -373,9 +373,13 @@ app.post('/proxy', validateApiKey, async (req, res) => {
     })();
 
     processingRequests.set(idempotencyKey, requestPromise);
-    const cleanup = () => processingRequests.delete(idempotencyKey);
+    let timeoutId;
+    const cleanup = () => {
+      processingRequests.delete(idempotencyKey);
+      if (timeoutId) clearTimeout(timeoutId);
+    };
     requestPromise.finally(cleanup);
-    setTimeout(cleanup, 5 * 60 * 1000);
+    timeoutId = setTimeout(cleanup, 5 * 60 * 1000);
     
     const finalResponse = await requestPromise;
     
