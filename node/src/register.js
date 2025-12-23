@@ -249,7 +249,7 @@ async function register() {
     ]);
     
     const port = parseInt(answers.port);
-    const testEndpoint = `http://localhost:${port}`;
+    const testEndpoint = `http://[${ipv6}]:${port}`; // Public IPv6 endpoint for benchmark
     
     console.log('\n');
     
@@ -257,7 +257,7 @@ async function register() {
     console.log('3️⃣  Checking if node server is running...\n');
     
     try {
-      const healthCheck = await fetch(`${testEndpoint}/health`, {
+      const healthCheck = await fetch(`http://localhost:${port}/health`, {
         signal: AbortSignal.timeout(5000)
       });
       
@@ -265,7 +265,8 @@ async function register() {
         throw new Error('Health check failed');
       }
       
-      console.log(`   ✓ Node server is running on port ${port}\n`);
+      console.log(`   ✓ Node server is running on port ${port}`);
+      console.log(`   Public endpoint: ${testEndpoint}\n`);
     } catch {
       console.error(`❌ Node server is not running on port ${port}`);
       console.error(`   Please start the node server first:`);

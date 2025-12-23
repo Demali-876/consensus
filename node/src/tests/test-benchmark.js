@@ -39,8 +39,6 @@ async function runTest() {
       console.log(`   Score: ${result.details.cpu.score}/100`);
       console.log(`   Hashes/Second: ${result.details.cpu.hashes_per_second.toLocaleString()}`);
       console.log(`   Duration: ${result.details.cpu.duration_ms}ms`);
-      
-      // In the memory section, replace with:
 
 console.log('\n💾 Memory:');
 console.log(`   Grade: ${result.details.memory.grade}`);

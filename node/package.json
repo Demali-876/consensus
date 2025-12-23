@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/node-instance.js",
     "register": "node src/register.js",
-    "test": "node src/test-benchmark.js"
+    "test": "node src/tests/test-benchmark.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",

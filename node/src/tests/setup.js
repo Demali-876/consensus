@@ -55,8 +55,6 @@ export async function setupDDNS(nodeId, ipv6, ipv4 = null) {
   console.log(`   Domain: ${subdomain}`);
   console.log(`   IPv6: ${ipv6}`);
   if (ipv4) console.log(`   IPv4: ${ipv4}`);
-  // This will be called by the main server after node registration
-  // For now, return the config that will be sent to main server
   return {
     subdomain,
     ipv6,
