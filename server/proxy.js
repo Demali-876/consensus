@@ -1,6 +1,7 @@
 const NodeCache = require('node-cache');
 const axios = require('axios');
 const zlib = require('zlib');
+const { promisify } = require('util');
 
 class ConsensusProxy {
   constructor() {
@@ -122,16 +123,16 @@ class ConsensusProxy {
 
     try {
       const response = await axios(config);
-      
+
       let rawData = response.data;
       let contentEncoding = (response.headers['content-encoding'] || '').toLowerCase();
-      
+
       if (contentEncoding === 'gzip') {
-        rawData = zlib.gunzipSync(rawData);
+        rawData = await promisify(zlib.gunzip)(rawData);
       } else if (contentEncoding === 'deflate') {
-        rawData = zlib.inflateSync(rawData);
+        rawData = await promisify(zlib.inflate)(rawData);
       } else if (contentEncoding === 'br') {
-        rawData = zlib.brotliDecompressSync(rawData);
+        rawData = await promisify(zlib.brotliDecompress)(rawData);
       }
 
       const textData = Buffer.from(rawData).toString('utf8');
