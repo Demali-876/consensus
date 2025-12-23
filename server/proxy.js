@@ -3,6 +3,11 @@ const axios = require('axios');
 const zlib = require('zlib');
 const { promisify } = require('util');
 
+// Cache promisified decompression functions to avoid repeated function creation
+const gunzipAsync = promisify(zlib.gunzip);
+const inflateAsync = promisify(zlib.inflate);
+const brotliDecompressAsync = promisify(zlib.brotliDecompress);
+
 class ConsensusProxy {
   constructor() {
     this.cache = new NodeCache({ stdTTL: 300 });
@@ -128,11 +133,11 @@ class ConsensusProxy {
       let contentEncoding = (response.headers['content-encoding'] || '').toLowerCase();
 
       if (contentEncoding === 'gzip') {
-        rawData = await promisify(zlib.gunzip)(rawData);
+        rawData = await gunzipAsync(rawData);
       } else if (contentEncoding === 'deflate') {
-        rawData = await promisify(zlib.inflate)(rawData);
+        rawData = await inflateAsync(rawData);
       } else if (contentEncoding === 'br') {
-        rawData = await promisify(zlib.brotliDecompress)(rawData);
+        rawData = await brotliDecompressAsync(rawData);
       }
 
       const textData = Buffer.from(rawData).toString('utf8');
