@@ -1,6 +1,11 @@
 import NodeCache from 'node-cache';
 import axios from 'axios';
 import zlib from 'zlib';
+import { promisify } from 'util';
+
+const gunzipAsync = promisify(zlib.gunzip);
+const inflateAsync = promisify(zlib.inflate);
+const brotliDecompressAsync = promisify(zlib.brotliDecompress);
 
 export default class ConsensusProxy {
   constructor() {
@@ -127,11 +132,11 @@ export default class ConsensusProxy {
       let contentEncoding = (response.headers['content-encoding'] || '').toLowerCase();
       
       if (contentEncoding === 'gzip') {
-        rawData = zlib.gunzipSync(rawData);
+        rawData = await gunzipAsync(rawData);
       } else if (contentEncoding === 'deflate') {
-        rawData = zlib.inflateSync(rawData);
+        rawData = await inflateAsync(rawData);
       } else if (contentEncoding === 'br') {
-        rawData = zlib.brotliDecompressSync(rawData);
+        rawData = await brotliDecompressAsync(rawData);
       }
 
       const textData = Buffer.from(rawData).toString('utf8');
