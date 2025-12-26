@@ -13,7 +13,7 @@ const args = process.argv.slice(3);
 const commands = {
   start: '../src/node-instance.js',
   register: '../src/register.js',
-  test: '../src/test-benchmark.js',
+  test: '../src/tests/test-benchmark.js',
   help: null
 };
 
