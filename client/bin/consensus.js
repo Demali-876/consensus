@@ -16,32 +16,22 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function showBanner() {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-
-  const pkg = await readFile(path.join(__dirname, "../package.json"), "utf8");
-  const version = JSON.parse(pkg).version;
-
-  const ascii = figlet.textSync("CONSENSUS\nClient", {
-    font: "ANSI Shadow",
-    horizontalLayout: "default",
-    verticalLayout: "default",
-  });
-
-  console.log(chalk.black(ascii));
-  console.log(chalk.dim(`v${version}\n`));
-
-  console.log(
-    chalk.gray(
-      "• Stable IPs • HTTP Deduplication • Built for Blockchains \nPowered by x402 Payments\n"
-    )
-  );
-
-  const spinner = ora("Launching Consensus Client...").start();
-
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  spinner.succeed("Client CLI READY");
+function displayBanner() {
+  console.log('\n');
+  console.log('     ██████╗ ██████╗ ███╗   ██╗███████╗███████╗███╗   ██╗███████╗██╗   ██╗███████╗');
+  console.log('    ██╔════╝██╔═══██╗████╗  ██║██╔════╝██╔════╝████╗  ██║██╔════╝██║   ██║██╔════╝');
+  console.log('    ██║     ██║   ██║██╔██╗ ██║███████╗█████╗  ██╔██╗ ██║███████╗██║   ██║███████╗');
+  console.log('    ██║     ██║   ██║██║╚██╗██║╚════██║██╔══╝  ██║╚██╗██║╚════██║██║   ██║╚════██║');
+  console.log('    ╚██████╗╚██████╔╝██║ ╚████║███████║███████╗██║ ╚████║███████║╚██████╔╝███████║');
+  console.log('     ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝╚══════╝╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚══════╝');
+  console.log('\n');
+  console.log('                           i am, you are, we are');
+  console.log('                                 Consensus');
+  console.log('\n');
+  console.log('                          🌐 Node Registration');
+  console.log('\n');
+  console.log('='.repeat(88));
+  console.log('\n');
 }
 
 class ConsensusSDK {
@@ -206,7 +196,7 @@ class ConsensusSDK {
     }
   }
 
-  async registerWithProxy(walletName, accountAddress, cdpAccount) {
+  async registerWithProxy(walletName, accountAddress, cdpAccount, name, email) {
     const spinner = ora("Registering with x402 proxy...").start();
 
     try {
@@ -235,6 +225,8 @@ class ConsensusSDK {
           wallet_name: walletName,
           account_address: accountAddress,
           private_key: privateKey,
+          name: name,
+          email: email,
         }),
       });
 
@@ -264,9 +256,49 @@ class ConsensusSDK {
     }
   }
 
+  async collectUserInfo() {
+    const questions = [
+      {
+        type: "input",
+        name: "name",
+        message: "Enter your name:",
+        validate: (input) => {
+          if (!input || input.trim().length === 0) {
+            return "Name is required";
+          }
+          if (input.trim().length < 2) {
+            return "Name must be at least 2 characters";
+          }
+          return true;
+        },
+      },
+      {
+        type: "input",
+        name: "email",
+        message: "Enter your email:",
+        validate: (input) => {
+          if (!input || input.trim().length === 0) {
+            return "Email is required";
+          }
+          const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+          if (!emailRegex.test(input.trim())) {
+            return "Please enter a valid email address";
+          }
+          return true;
+        },
+      },
+    ];
+
+    const answers = await inquirer.prompt(questions);
+    return {
+      name: answers.name.trim(),
+      email: answers.email.trim(),
+    };
+  }
+
   async setup() {
     try {
-      console.log(chalk.blue.bold("Consensus SDK Setup\n"));
+      console.log(chalk.blue.bold("Let's get you set up!\n"));
 
       if (!this.validateEnvironment()) {
         process.exit(1);
@@ -279,15 +311,21 @@ class ConsensusSDK {
         return;
       }
 
+      const { name, email } = await this.collectUserInfo();
+
       const { wallet_name, account_address, cdpAccount } =
         await this.createWallet();
       const api_key = await this.registerWithProxy(
         wallet_name,
         account_address,
-        cdpAccount
+        cdpAccount,
+        name,
+        email
       );
 
       const config = {
+        name,
+        email,
         wallet_name,
         account_address,
         api_key,
@@ -299,6 +337,8 @@ class ConsensusSDK {
       this.saveConfig(config);
 
       console.log(chalk.green.bold("\n✅ Setup Complete!\n"));
+      console.log(chalk.cyan("Name:"), name);
+      console.log(chalk.cyan("Email:"), email);
       console.log(chalk.cyan("Wallet Name:"), wallet_name);
       console.log(chalk.cyan("Account Address:"), account_address);
       console.log(chalk.cyan("API Key:"), api_key);
@@ -341,7 +381,7 @@ class ConsensusSDK {
 }
 
 async function main() {
-  await showBanner();
+  displayBanner();
   const sdk = new ConsensusSDK();
   const command = process.argv[2];
 
