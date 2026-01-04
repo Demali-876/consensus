@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.25.0",
+    "@scure/base": "^2.0.0",
+    "@solana/kit": "^5.1.0",
     "chalk": "^5.4.1",
     "chalk-animation": "^2.0.3",
     "dotenv": "^16.4.5",
