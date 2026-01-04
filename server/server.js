@@ -8,9 +8,8 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import crypto from 'crypto';
-import { settleResponseHeader } from 'x402/types';
 import ConsensusProxy from './proxy.js';
-import { createPaymentRequirements, verifyPayment, settle, x402Version, facilitatorUrl, payTo } from './utils/helper.js';
+import { createPaymentRequirements, verifyPayment, settle, x402Version, facilitatorUrl, evmPayTo, solanaPayTo } from './utils/helper.js';
 import { benchmarkNode } from './utils/benchmark.js';
 import { provisionNodeDNS, updateNodeDNS } from './utils/dns.js';
 import NodeStore from './data/node_store.js';
@@ -51,12 +50,16 @@ app.get('/', (req, res) => {
   res.json({ 
     name: 'Consensus', 
     status: 'running',
-    version: '1.0.1',
-    description: 'HTTPS API Deduplication Service with x402 Payments',
+    version: '2.0.0',
+    description: 'HTTPS API Deduplication Service with x402 Multi-Chain Payments',
     pricing: '$0.001 per unique API call (cached responses are free)',
-    payment_network: 'Base Sepolia',
-    payment_address: payTo,
+    payment_networks: ['Base Sepolia (EVM)', 'Solana Devnet (SVM)'],
+    payment_addresses: {
+      evm: evmPayTo,
+      solana: solanaPayTo
+    },
     facilitator_url: facilitatorUrl,
+    x402_version: x402Version,
     endpoints: {
       proxy: 'POST /proxy - Make deduplicated API calls',
       health: 'GET /health - Service health check',
@@ -66,8 +69,8 @@ app.get('/', (req, res) => {
       nodes: 'GET /nodes - List all nodes'
     },
     usage: {
-      note: 'Use x402-enabled client for automatic payments',
-      x402_proxy: 'Required for payment handling'
+      note: 'Use x402-enabled client for automatic multi-chain payments',
+      supported_chains: ['eip155:84532 (Base Sepolia)', 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1 (Solana Devnet)']
     }
   });
 });
@@ -90,7 +93,10 @@ app.get('/health', (req, res) => {
     cache_size: stats.cache_size,
     total_requests: stats.total_requests,
     cache_hits: stats.cache_hits,
-    payment_address: payTo,
+    payment_addresses: {
+      evm: evmPayTo,
+      solana: solanaPayTo
+    },
     facilitator_url: facilitatorUrl,
     x402_version: x402Version,
     network: {
@@ -107,10 +113,13 @@ app.get('/stats', (req, res) => {
   res.json({
     ...stats,
     pricing: '$0.001 per unique API call',
-    payment_method: 'x402 automatic payments',
-    payment_address: payTo,
+    payment_method: 'x402 automatic multi-chain payments',
+    payment_addresses: {
+      evm: evmPayTo,
+      solana: solanaPayTo
+    },
     facilitator_url: facilitatorUrl,
-    network: 'base-sepolia',
+    networks: ['base-sepolia', 'solana-devnet'],
     cache_hit_rate: stats.total_requests > 0 ? 
       ((stats.cache_hits / stats.total_requests) * 100).toFixed(2) + '%' : '0%',
     uptime: process.uptime(),
@@ -163,7 +172,7 @@ app.all('/proxy', async (req, res) => {
       });
     }
 
-    console.log(`Processing ${method} With key: [${idempotencyKey}]`);
+    console.log(`Processing ${method} with key: [${idempotencyKey}]`);
 
     if (processingRequests.has(idempotencyKey)) {
       console.log(`Request already in progress, waiting: ${idempotencyKey}`);
@@ -191,12 +200,17 @@ app.all('/proxy', async (req, res) => {
       console.log(`Payment required for: ${idempotencyKey}`);
 
       const resource = `${req.protocol}://${req.headers.host}/proxy`;
-      const paymentRequirements = createPaymentRequirements("$0.001", resource, `Consensus Deduplication: ${target_url}`);
+      const paymentRequirements = createPaymentRequirements(
+        "$0.001", 
+        resource, 
+        `Consensus API Deduplication: ${target_url}`
+      );
 
       const paymentResult = await verifyPayment(req, res, paymentRequirements);
       if (!paymentResult || !paymentResult.isValid) {
         return;
       }
+      
       if (processingRequests.has(idempotencyKey)) {
         console.log(`Another request started processing during payment verification: ${idempotencyKey}`);
         try {
@@ -221,14 +235,13 @@ app.all('/proxy', async (req, res) => {
       console.log(`Payment verified for: ${idempotencyKey}`);
 
       try {
-        const settleResponse = await settle(paymentResult.decodedPayment, paymentRequirements);
-        const responseHeader = settleResponseHeader(settleResponse);
-        res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
+        const settleResponse = await settle(paymentResult.paymentResult);
         console.log(`Payment settled for: ${idempotencyKey}`);
       } catch (settleError) {
         console.error('Payment settlement failed:', settleError.message);
       }
     }
+    
     const requestPromise = (async () => {
       try {
         const response = await proxy.handleRequest(target_url, method, headers, body);
@@ -238,6 +251,7 @@ app.all('/proxy', async (req, res) => {
         throw error;
       }
     })();
+    
     processingRequests.set(idempotencyKey, requestPromise);
 
     try {
@@ -263,7 +277,8 @@ app.all('/proxy', async (req, res) => {
           },
           meta: {
             timestamp: new Date().toISOString(),
-            server_version: '1.0.1'
+            server_version: '2.0.0',
+            x402_version: x402Version
           }
         });
       }
@@ -303,11 +318,11 @@ app.all('/proxy', async (req, res) => {
     });
   }
 });
+
 app.post('/node/join', async (req, res) => {
   try {
     const { pubkey_pem, alg, region, capabilities, contact } = req.body;
     
-    // Validate inputs
     if (!pubkey_pem || !alg) {
       return res.status(400).json({ error: 'Missing pubkey or alg' });
     }
@@ -316,17 +331,15 @@ app.post('/node/join', async (req, res) => {
     console.log(`   Region: ${region || 'unspecified'}`);
     console.log(`   Algorithm: ${alg}`);
     
-    // Convert PEM to buffer
     const pubkey = crypto.createPublicKey(pubkey_pem).export({ 
       format: 'der', 
       type: 'spki' 
     });
     
-    // Create join request with challenge nonce
     const joinReq = NodeStore.createJoinRequest({
       pubkey,
       alg,
-      ttlSeconds: 300 // 5 minutes to complete
+      ttlSeconds: 300
     });
     
     console.log(`   ✓ Challenge nonce generated`);
@@ -335,7 +348,7 @@ app.post('/node/join', async (req, res) => {
     
     res.json({
       join_id: joinReq.id,
-      challenge_nonce: joinReq.nonce, // base64url encoded
+      challenge_nonce: joinReq.nonce,
       expires_at: joinReq.expires_at,
       next_step: `Sign the nonce and POST to /node/verify/${joinReq.id} with signature, ipv6, port, and test_endpoint`
     });
@@ -346,7 +359,6 @@ app.post('/node/join', async (req, res) => {
   }
 });
 
-// Step 2: Verify signature and register node
 app.post('/node/verify/:join_id', async (req, res) => {
   const startTime = Date.now();
   
@@ -365,25 +377,21 @@ app.post('/node/verify/:join_id', async (req, res) => {
     
     console.log(`\n🔐 Verifying join request: ${join_id}`);
     
-    // Get join request
     const joinReq = NodeStore.getJoin(join_id);
     if (!joinReq) {
       return res.status(404).json({ error: 'Join request not found' });
     }
     
-    // Check expiration
     if (Date.now() / 1000 > joinReq.expires_at) {
       console.log(`   ❌ Join request expired\n`);
       return res.status(410).json({ error: 'Join request expired' });
     }
     
-    // Check if already consumed
     if (joinReq.consumed_at) {
       console.log(`   ❌ Join request already used\n`);
       return res.status(409).json({ error: 'Join request already used' });
     }
     
-    // Validate required fields
     if (!signature || !ipv6 || !port || !test_endpoint) {
       return res.status(400).json({ 
         error: 'Missing required fields',
@@ -391,7 +399,6 @@ app.post('/node/verify/:join_id', async (req, res) => {
       });
     }
     
-    // Validate IPv6 format
     if (!ipv6.includes(':')) {
       return res.status(400).json({
         error: 'Invalid IPv6 address format'
@@ -401,7 +408,6 @@ app.post('/node/verify/:join_id', async (req, res) => {
     console.log(`   IPv6: ${ipv6}:${port}`);
     console.log(`   Test endpoint: ${test_endpoint}`);
     
-    // Verify signature
     console.log(`\n🔑 Verifying cryptographic signature...`);
     const publicKey = crypto.createPublicKey({
       key: joinReq.node_pubkey,
@@ -423,7 +429,6 @@ app.post('/node/verify/:join_id', async (req, res) => {
     
     console.log(`   ✅ Signature verified`);
     
-    // Run benchmark test
     console.log(`\n🧪 Running benchmark tests...`);
     const benchmarkResult = await benchmarkNode(test_endpoint);
     
@@ -441,14 +446,12 @@ app.post('/node/verify/:join_id', async (req, res) => {
     
     console.log(`   ✅ Benchmark passed with score: ${benchmarkResult.score}/100`);
     
-    // Generate unique node ID
     const nodeId = crypto.randomBytes(6).toString('hex');
     const subdomain = `${nodeId}.consensus.canister.software`;
     
     console.log(`\n🆔 Generated node ID: ${nodeId}`);
     console.log(`   Subdomain: ${subdomain}`);
     
-    // Provision DNS via Namecheap
     console.log(`\n🌍 Provisioning DNS...`);
     try {
       await provisionNodeDNS(subdomain, ipv6, ipv4);
@@ -460,7 +463,6 @@ app.post('/node/verify/:join_id', async (req, res) => {
       });
     }
     
-    // Save node to database
     console.log(`\n💾 Storing node in database...`);
     const node = NodeStore.upsertNode({
       id: nodeId,
@@ -521,7 +523,6 @@ app.post('/node/verify/:join_id', async (req, res) => {
   }
 });
 
-// Node status endpoint
 app.get('/node/status/:node_id', (req, res) => {
   const { node_id } = req.params;
   
@@ -545,7 +546,6 @@ app.get('/node/status/:node_id', (req, res) => {
   });
 });
 
-// List all nodes
 app.get('/nodes', (req, res) => {
   const nodes = NodeStore.listNodes();
   
@@ -566,7 +566,6 @@ app.get('/nodes', (req, res) => {
   });
 });
 
-// IP update endpoint (for nodes to update their IP)
 app.post('/node/update-ip/:node_id', async (req, res) => {
   try {
     const { node_id } = req.params;
@@ -581,10 +580,8 @@ app.post('/node/update-ip/:node_id', async (req, res) => {
     console.log(`   New IPv6: ${ipv6}`);
     if (ipv4) console.log(`   New IPv4: ${ipv4}`);
     
-    // Update DNS
     await updateNodeDNS(node.domain, ipv6, ipv4);
     
-    // Update capabilities in database
     const updatedCapabilities = {
       ...node.capabilities,
       ipv6,
@@ -650,6 +647,7 @@ const server = https.createServer(
 );
 
 server.listen(port, '0.0.0.0', () => {
-  console.log(`Consensus Server (mTLS) on https://consensus.canister.software:${port}`);
+  console.log(`Consensus Server v2.0.0 (Multi-Chain x402) on https://consensus.canister.software:${port}`);
+  console.log(`Payment networks: Base Sepolia (EVM), Solana Devnet (SVM)`);
   console.log(`Node network endpoints ready`);
 });

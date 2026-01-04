@@ -1,11 +1,10 @@
-#!/usr/bin/env node
-
 import 'dotenv/config';
 import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { URL } from 'url';
+import crypto from 'crypto';
 import { Agent as UndiciAgent } from 'undici';
 import express from 'express';
 import helmet from 'helmet';
@@ -13,10 +12,12 @@ import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import { WalletStore } from './data/store.js';
 import { privateKeyToAccount } from 'viem/accounts';
-import { createWalletClient, http } from 'viem';
-import { baseSepolia } from 'viem/chains';
-import { wrapFetchWithPayment } from 'x402-fetch';
-import crypto from 'crypto';
+import { wrapFetchWithPayment } from '@x402/fetch';
+import { x402Client } from '@x402/core/client';
+import { registerExactEvmScheme } from '@x402/evm/exact/client';
+import { registerExactSvmScheme } from '@x402/svm/exact/client';
+import { createKeyPairSignerFromBytes } from '@solana/kit';
+import { base58 } from '@scure/base';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -39,7 +40,7 @@ function createHybridFetch() {
     rejectUnauthorized: true,
     keepAlive: true,
     keepAliveMsecs: 10000
-});
+  });
 
   const nativeRequest = (url, options, agent) => new Promise((resolve, reject) => {
     const urlObj = new URL(url);
@@ -91,102 +92,40 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, message: { error: 'Too 
 app.use(express.json({ limit: '10mb' }));
 
 setInterval(() => {
-  const fiveMinsAgo = Date.now() - (5 * 60 * 1000);
-  let cleaned = 0;
+  const cutoff = Date.now() - (5 * 60 * 1000);
+  const toDelete = [];
+  
   for (const [key, data] of requestTracker.entries()) {
-    if (new Date(data.timestamp).getTime() < fiveMinsAgo) {
-      requestTracker.delete(key);
-      cleaned++;
+    if (new Date(data.timestamp).getTime() < cutoff) {
+      toDelete.push(key);
     }
   }
-  if (cleaned > 0) console.log(`Cleaned ${cleaned} old entries`);
+  
+  toDelete.forEach(key => requestTracker.delete(key));
+  
+  if (toDelete.length > 0) {
+    console.log(`Cleaned ${toDelete.length} old entries`);
+  }
 }, 5 * 60 * 1000);
 
 function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'Missing API key' });
+  
   const walletData = walletStore.getWalletByApiKey(apiKey);
   if (!walletData) return res.status(401).json({ error: 'Invalid API key' });
+  
   req.walletName = walletData.walletName;
+  req.walletData = {
+    evm_address: walletData.evmAddress,
+    solana_address: walletData.solanaAddress
+  };
+  
   next();
 }
 
-function createWallet(privateKey, address) {
-  const formattedKey = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
-  const account = privateKeyToAccount(formattedKey);
-  
-  if (account.address.toLowerCase() !== address.toLowerCase()) {
-    throw new Error('Address mismatch');
-  }
-  
-  const walletClient = createWalletClient({
-    account,
-    chain: baseSepolia,
-    transport: http()
-  });
-  
-  return { account, fetchWithPayment: wrapFetchWithPayment(hybridFetch, walletClient) };
-}
-
-async function restoreWallets() {
-  console.log('Restoring wallets...');
-  const wallets = walletStore.getAllWallets();
-  let loaded = 0;
-  
-  for (const wallet of wallets) {
-    try {
-      const { account, fetchWithPayment } = createWallet(wallet.privateKey, wallet.accountAddress);
-      registeredWallets.set(wallet.walletName, wallet.accountAddress);
-      walletClients.set(wallet.walletName, fetchWithPayment);
-      loaded++;
-    } catch (error) {
-      console.error(`Failed to load wallet ${wallet.walletName}:`, error.message);
-    }
-  }
-  
-  console.log(`Loaded ${loaded} wallet(s)`);
-  return loaded;
-}
-
-app.post('/register-wallet', async (req, res) => {
-  try {
-    const { wallet_name, account_address, private_key } = req.body;
-    
-    if (!wallet_name || !account_address || !private_key) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
-    if (private_key.length < 64) {
-      return res.status(400).json({ error: 'Invalid private key' });
-    }
-
-    if (walletStore.walletExists(wallet_name)) {
-      return res.status(409).json({ error: 'Wallet already registered' });
-    }
-
-    const { account, fetchWithPayment } = createWallet(private_key, account_address);
-    const storeResult = walletStore.storeWallet(wallet_name, account_address, private_key);
-    
-    registeredWallets.set(wallet_name, account_address);
-    walletClients.set(wallet_name, fetchWithPayment);
-    
-    console.log(`✓ Registered wallet: ${account_address}`);
-    res.json({
-      success: true,
-      wallet_name,
-      account_address,
-      api_key: storeResult.apiKey
-    });
-    
-  } catch (error) {
-    console.error('Registration error:', error.message);
-    res.status(400).json({ error: error.message });
-  }
-});
-
-function buildErrorResponse(error, walletName, startTime) {
+function buildErrorResponse(error, walletName, walletData, startTime) {
   const msg = error.message.toLowerCase();
-  const address = registeredWallets.get(walletName);
   
   let status = 500;
   let errorType = 'Request failed';
@@ -196,14 +135,22 @@ function buildErrorResponse(error, walletName, startTime) {
     status = 402;
     errorType = 'Insufficient funds';
     details = { 
-      wallet: walletName, 
-      address,
-      faucet: 'https://faucet.circle.com/' 
+      wallet: walletName,
+      evm_address: walletData?.evm_address,
+      solana_address: walletData?.solana_address,
+      faucets: {
+        evm: 'https://faucet.circle.com/',
+        solana: 'https://faucet.solana.com/'
+      }
     };
   } else if (msg.includes('payment failed') || msg.includes('transaction failed')) {
     status = 402;
     errorType = 'Payment failed';
-    details = { wallet: walletName, address };
+    details = { 
+      wallet: walletName,
+      evm_address: walletData?.evm_address,
+      solana_address: walletData?.solana_address
+    };
   } else if (msg.includes('wallet') || msg.includes('account')) {
     status = 400;
     errorType = 'Wallet error';
@@ -221,12 +168,126 @@ function buildErrorResponse(error, walletName, startTime) {
     details,
     meta: {
       wallet: walletName,
-      address,
+      evm_address: walletData?.evm_address,
+      solana_address: walletData?.solana_address,
       processing_ms: Date.now() - startTime,
       timestamp: new Date().toISOString()
     }
   };
 }
+
+async function createWallet(evmPrivateKey, evmAddress, solanaPrivateKey, solanaAddress) {
+  const formattedEvmKey = evmPrivateKey.startsWith('0x') ? evmPrivateKey : `0x${evmPrivateKey}`;
+  const evmSigner = privateKeyToAccount(formattedEvmKey);
+  
+  if (evmSigner.address.toLowerCase() !== evmAddress.toLowerCase()) {
+    throw new Error('EVM address mismatch');
+  }
+
+  const solanaKeypair = base58.decode(solanaPrivateKey);
+  const svmSigner = await createKeyPairSignerFromBytes(solanaKeypair);
+  
+  if (svmSigner.address !== solanaAddress) {
+    throw new Error('Solana address mismatch');
+  }
+
+  const client = new x402Client();
+  registerExactEvmScheme(client, { signer: evmSigner });
+  registerExactSvmScheme(client, { signer: svmSigner });
+
+  return wrapFetchWithPayment(hybridFetch, client);
+}
+
+async function restoreWallets() {
+  console.log('Restoring wallets...');
+  const wallets = walletStore.getAllWallets();
+
+  const results = await Promise.allSettled(
+    wallets.map(async (wallet) => {
+      const fetchWithPayment = await createWallet(
+        wallet.evmPrivateKey,
+        wallet.evmAddress,
+        wallet.solanaPrivateKey,
+        wallet.solanaAddress
+      );
+      
+      registeredWallets.set(wallet.walletName, {
+        evm_address: wallet.evmAddress,
+        solana_address: wallet.solanaAddress
+      });
+      
+      walletClients.set(wallet.walletName, fetchWithPayment);
+      
+      return wallet.walletName;
+    })
+  );
+  
+  const loaded = results.filter(r => r.status === 'fulfilled').length;
+  const failed = results.filter(r => r.status === 'rejected');
+  
+  failed.forEach(f => {
+    console.error(`Failed to load wallet:`, f.reason?.message);
+  });
+  
+  console.log(`Loaded ${loaded}/${wallets.length} wallet(s)`);
+  return loaded;
+}
+
+app.post('/register-wallet', async (req, res) => {
+  try {
+    const { wallet_name, evm, solana } = req.body;
+    
+    if (!wallet_name) {
+      return res.status(400).json({ error: 'Missing wallet_name' });
+    }
+
+    if (!evm || !solana) {
+      return res.status(400).json({ error: 'Missing evm or solana wallet details' });
+    }
+
+    if (!evm.address || !evm.private_key || !solana.address || !solana.private_key) {
+      return res.status(400).json({ error: 'Missing required wallet fields' });
+    }
+
+    if (walletStore.walletExists(wallet_name)) {
+      return res.status(409).json({ error: 'Wallet already registered' });
+    }
+
+    const fetchWithPayment = await createWallet(
+      evm.private_key,
+      evm.address,
+      solana.private_key,
+      solana.address
+    );
+    
+    const storeResult = walletStore.storeMultiChainWallet(
+      wallet_name,
+      evm.address,
+      evm.private_key,
+      solana.address,
+      solana.private_key
+    );
+    
+    registeredWallets.set(wallet_name, {
+      evm_address: evm.address,
+      solana_address: solana.address
+    });
+    walletClients.set(wallet_name, fetchWithPayment);
+    
+    console.log(`✓ Registered multi-chain wallet: ${wallet_name}`);
+    res.json({
+      success: true,
+      wallet_name,
+      evm_address: evm.address,
+      solana_address: solana.address,
+      api_key: storeResult.apiKey
+    });
+    
+  } catch (error) {
+    console.error('Registration error:', error.message);
+    res.status(400).json({ error: error.message });
+  }
+});
 
 app.post('/proxy', validateApiKey, async (req, res) => {
   const startTime = Date.now();
@@ -234,6 +295,7 @@ app.post('/proxy', validateApiKey, async (req, res) => {
   try {
     const { target_url, method = 'GET', headers = {}, body, idempotency_key } = req.body;
     const walletName = req.walletName;
+    const walletData = req.walletData;
     const isVerbose = ['true', 'True', 'TRUE'].includes(headers['x-verbose']);
     
     if (!target_url) {
@@ -313,7 +375,7 @@ app.post('/proxy', validateApiKey, async (req, res) => {
           }),
         });
       } catch (fetchError) {
-        errorResponse = buildErrorResponse(fetchError, walletName, startTime);
+        errorResponse = buildErrorResponse(fetchError, walletName, walletData, startTime);
         requestTracker.set(idempotencyKey, {
           response: errorResponse,
           timestamp: new Date().toISOString(),
@@ -336,7 +398,7 @@ app.post('/proxy', validateApiKey, async (req, res) => {
           message: errorDetails.message || response.statusText,
           meta: {
             wallet: walletName,
-            address: registeredWallets.get(walletName),
+            ...walletData,
             processing_ms: Date.now() - startTime,
             timestamp: new Date().toISOString()
           }
@@ -357,7 +419,7 @@ app.post('/proxy', validateApiKey, async (req, res) => {
         meta: {
           ...(responseData.meta || {}),
           wallet: walletName,
-          address: registeredWallets.get(walletName),
+          ...walletData,
           idempotency_key: idempotencyKey,
           processing_ms: Date.now() - startTime,
           timestamp: new Date().toISOString()
@@ -399,7 +461,7 @@ app.post('/proxy', validateApiKey, async (req, res) => {
 
   } catch (error) {
     console.error('Proxy error:', error.message);
-    const errorResp = buildErrorResponse(error, req.walletName, startTime);
+    const errorResp = buildErrorResponse(error, req.walletName, req.walletData, startTime);
     res.status(errorResp.status).json({
       error: errorResp.error,
       message: errorResp.message,
@@ -416,7 +478,8 @@ app.get('/health', (req, res) => {
     tracked: requestTracker.size,
     processing: processingRequests.size,
     database: dbInfo?.walletCount || 0,
-    server: consensusServerUrl
+    server: consensusServerUrl,
+    chains: ['evm', 'solana']
   });
 });
 
@@ -484,7 +547,6 @@ app.get('/network', async (req, res) => {
   }
 });
 
-
 app.use((error, req, res, next) => {
   console.error('Unhandled:', error);
   res.status(500).json({ error: 'Internal server error' });
@@ -540,16 +602,18 @@ async function boot() {
   try {
     await restoreWallets();
     await testConsensusConnection();
+    
     const server = https.createServer({
-    key: fs.readFileSync(PROXY_TLS_KEY),
-    cert: fs.readFileSync(PROXY_TLS_CERT),
-    handshakeTimeout: 30000,
-    requestTimeout: 30000,
-    headersTimeout: 30000,
-    keepAliveTimeout: 5000
-}, app);
+      key: fs.readFileSync(PROXY_TLS_KEY),
+      cert: fs.readFileSync(PROXY_TLS_CERT),
+      handshakeTimeout: 30000,
+      requestTimeout: 30000,
+      headersTimeout: 30000,
+      keepAliveTimeout: 5000
+    }, app);
+    
     server.listen(port, '0.0.0.0', () => {
-      console.log(`x402-Proxy Server (mTLS) on https://consensus.proxy.canister.software:${port}`);
+      console.log(`x402 Proxy (EVM + Solana) on https://consensus.proxy.canister.software:${port}`);
     });
   } catch (error) {
     console.error('Boot failed:', error.message);
