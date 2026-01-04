@@ -41,24 +41,33 @@ export class WalletStore {
    * Create database schema
    */
   createSchema() {
-    try {
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS wallets (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          wallet_name TEXT UNIQUE NOT NULL,
-          account_address TEXT NOT NULL,
-          encrypted_private_key TEXT NOT NULL,
-          nonce TEXT NOT NULL,
-          auth_tag TEXT NOT NULL,
-          api_key_hash TEXT UNIQUE NOT NULL,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_wallet_name ON wallets(wallet_name);
-        CREATE INDEX IF NOT EXISTS idx_api_key_hash ON wallets(api_key_hash);
-        CREATE INDEX IF NOT EXISTS idx_account_address ON wallets(account_address);
-      `);
-
+  try {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS wallets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        wallet_name TEXT UNIQUE NOT NULL,
+        
+        -- EVM fields
+        evm_address TEXT NOT NULL,
+        encrypted_evm_private_key TEXT NOT NULL,
+        evm_nonce TEXT NOT NULL,
+        evm_auth_tag TEXT NOT NULL,
+        
+        -- Solana fields
+        solana_address TEXT NOT NULL,
+        encrypted_solana_private_key TEXT NOT NULL,
+        solana_nonce TEXT NOT NULL,
+        solana_auth_tag TEXT NOT NULL,
+        
+        api_key_hash TEXT UNIQUE NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_wallet_name ON wallets(wallet_name);
+      CREATE INDEX IF NOT EXISTS idx_api_key_hash ON wallets(api_key_hash);
+      CREATE INDEX IF NOT EXISTS idx_evm_address ON wallets(evm_address);
+      CREATE INDEX IF NOT EXISTS idx_solana_address ON wallets(solana_address);
+    `);
       console.log("Database schema created/verified");
     } catch (error) {
       console.error("Failed to create schema:", error.message);
@@ -68,35 +77,54 @@ export class WalletStore {
   /**
    * Store wallet with encrypted private key
    */
-  storeWallet(walletName, accountAddress, privateKey) {
-    try {
-      const apiKey = this.cipher.generateApiKey();
-      const apiKeyHash = this.cipher.hashAPIKey(apiKey);
-      const encrypted = this.cipher.encrypt(privateKey);
-      const stmt = this.db.prepare(`
-        INSERT INTO wallets (wallet_name, account_address, encrypted_private_key, nonce, auth_tag, api_key_hash)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
+  storeMultiChainWallet(walletName, evmAddress, evmPrivateKey, solanaAddress, solanaPrivateKey) {
+  try {
+    const apiKey = this.cipher.generateApiKey();
+    const apiKeyHash = this.cipher.hashAPIKey(apiKey);
+    
+    // Encrypt both private keys
+    const encryptedEvm = this.cipher.encrypt(evmPrivateKey);
+    const encryptedSolana = this.cipher.encrypt(solanaPrivateKey);
+    
+    const stmt = this.db.prepare(`
+      INSERT INTO wallets (
+        wallet_name,
+        evm_address,
+        encrypted_evm_private_key,
+        evm_nonce,
+        evm_auth_tag,
+        solana_address,
+        encrypted_solana_private_key,
+        solana_nonce,
+        solana_auth_tag,
+        api_key_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
-      const result = stmt.run(
-        walletName,
-        accountAddress,
-        encrypted.ciphertext,
-        encrypted.nonce,
-        encrypted.tag,
-        apiKeyHash
-      );
-      return {
-        success: true,
-        apiKey: apiKey,
-      };
-    } catch (error) {
-      if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
-        throw new Error(`Wallet '${walletName}' already exists`);
-      }
-      throw error;
+    stmt.run(
+      walletName,
+      evmAddress,
+      encryptedEvm.ciphertext,
+      encryptedEvm.nonce,
+      encryptedEvm.tag,
+      solanaAddress,
+      encryptedSolana.ciphertext,
+      encryptedSolana.nonce,
+      encryptedSolana.tag,
+      apiKeyHash
+    );
+    
+    return {
+      success: true,
+      apiKey: apiKey,
+    };
+  } catch (error) {
+    if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      throw new Error(`Wallet '${walletName}' already exists`);
     }
+    throw error;
   }
+}
   /**
    * Get wallet by name and decrypt private key
    */
