@@ -38,46 +38,53 @@ export function createPaymentRequirements(price, resource, description) {
       bazaar: {
         discoverable: true,
         category: "api-proxy",
-        tags: ["deduplication", "caching", "https-proxy", "ipv4", "ipv6"],
+        tags: ["deduplication", "caching", "https-proxy","privacy", "ipv4", "ipv6"],
       },
     },
   };
 }
 
 export async function verifyPayment(req, res, routeConfig) {
-  try {
-    const result = await resourceServer.verifyPayment(req, routeConfig);
-    
-    if (!result.isValid) {
-      return res.status(402)
-        .set(result.headers || {})
-        .json({
-          error: "Payment required",
-          message: result.message || "Valid payment is required",
-          ...routeConfig
-        });
-    }
-    
-    console.log(`✅ Payment verified: ${result.network}`);
-    return { isValid: true, paymentResult: result };
-    
-  } catch (error) {
-    console.error('Payment verification error:', error);
+  try {const paymentHeader = req.headers['x-payment'] || req.headers['X-PAYMENT'];
+  
+  if (!paymentHeader) {
     return res.status(402).json({
-      error: "Payment verification failed",
-      message: error.message,
+      error: "Payment required",
+      message: "X-PAYMENT header is required for new API calls",
+      x402Version,
       ...routeConfig
     });
+  }
+
+  const result = await resourceServer.verifyPayment(req, routeConfig);
+  
+  if (!result.isValid) {
+    console.log(`Payment verification failed: ${result.message}`);
+    return res.status(402)
+      .set(result.headers || {})
+      .json({
+        error: "Payment required",
+        message: result.message,
+        x402Version,
+        ...routeConfig
+      });
+  }
+  
+  console.log(`✅ Payment verified on network: ${result.network}`);
+  return { isValid: true, paymentResult: result };
+  } catch (error) {
+  console.error('Payment verification error:', error);
+    throw error
   }
 }
 
 export async function settle(paymentData) {
   try {
     const result = await resourceServer.settlePayment(paymentData);
-    console.log('✅ Payment settled');
-    return result;
+  console.log('✅ Payment settled');
+  return result;
   } catch (error) {
-    console.error('Payment settlement error:', error);
+    console.error(`❌ Payment settlement failed: ${error.message}`);
     throw error;
   }
 }
