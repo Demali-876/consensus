@@ -5,3 +5,4 @@
 yarn.lock
 main.key
 main.csr
+/node-certs

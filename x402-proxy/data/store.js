@@ -126,94 +126,120 @@ export class WalletStore {
   }
 }
   /**
-   * Get wallet by name and decrypt private key
-   */
-  getWallet(walletName) {
-    try {
-      const stmt = this.db.prepare(
-        "SELECT * FROM wallets WHERE wallet_name = ?"
-      );
-      const row = stmt.get(walletName);
-      if (!row) return null;
+ * Get wallet by name and decrypt private keys
+ */
+getWallet(walletName) {
+  try {
+    const stmt = this.db.prepare(
+      "SELECT * FROM wallets WHERE wallet_name = ?"
+    );
+    const row = stmt.get(walletName);
+    if (!row) return null;
 
-      const privateKey = this.cipher.decrypt({
-        ciphertext: row.encrypted_private_key,
-        nonce: row.nonce,
-        tag: row.auth_tag,
-      });
-      return {
-        walletName: row.wallet_name,
-        accountAddress: row.account_address,
-        privateKey: privateKey,
-      };
-    } catch (error) {
-      console.error(`Failed to get wallet ${walletName}:`, error.message);
-      return null;
-    }
+    const evmPrivateKey = this.cipher.decrypt({
+      ciphertext: row.encrypted_evm_private_key,
+      nonce: row.evm_nonce,
+      tag: row.evm_auth_tag,
+    });
+
+    const solanaPrivateKey = this.cipher.decrypt({
+      ciphertext: row.encrypted_solana_private_key,
+      nonce: row.solana_nonce,
+      tag: row.solana_auth_tag,
+    });
+
+    return {
+      walletName: row.wallet_name,
+      evmAddress: row.evm_address,
+      evmPrivateKey: evmPrivateKey,
+      solanaAddress: row.solana_address,
+      solanaPrivateKey: solanaPrivateKey,
+    };
+  } catch (error) {
+    console.error(`Failed to get wallet ${walletName}:`, error.message);
+    return null;
   }
+}
   /**
-   * Get wallet by API key and decrypt private key
-   */
-  getWalletByApiKey(apiKey) {
-    try {
-      const apiKeyHash = this.cipher.hashAPIKey(apiKey);
+ * Get wallet by API key and decrypt private keys
+ */
+getWalletByApiKey(apiKey) {
+  try {
+    const apiKeyHash = this.cipher.hashAPIKey(apiKey);
 
-      const stmt = this.db.prepare(
-        "SELECT * FROM wallets WHERE api_key_hash = ?"
-      );
-      const row = stmt.get(apiKeyHash);
+    const stmt = this.db.prepare(
+      "SELECT * FROM wallets WHERE api_key_hash = ?"
+    );
+    const row = stmt.get(apiKeyHash);
 
-      if (!row) return null;
+    if (!row) return null;
 
-      const privateKey = this.cipher.decrypt({
-        ciphertext: row.encrypted_private_key,
-        nonce: row.nonce,
-        tag: row.auth_tag,
-      });
+    const evmPrivateKey = this.cipher.decrypt({
+      ciphertext: row.encrypted_evm_private_key,
+      nonce: row.evm_nonce,
+      tag: row.evm_auth_tag,
+    });
 
-      return {
-        walletName: row.wallet_name,
-        accountAddress: row.account_address,
-        privateKey: privateKey,
-      };
-    } catch (error) {
-      console.error("Failed to get wallet by API key:", error.message);
-      return null;
-    }
+    const solanaPrivateKey = this.cipher.decrypt({
+      ciphertext: row.encrypted_solana_private_key,
+      nonce: row.solana_nonce,
+      tag: row.solana_auth_tag,
+    });
+
+    return {
+      walletName: row.wallet_name,
+      evmAddress: row.evm_address,
+      evmPrivateKey: evmPrivateKey,
+      solanaAddress: row.solana_address,
+      solanaPrivateKey: solanaPrivateKey,
+    };
+  } catch (error) {
+    console.error("Failed to get wallet by API key:", error.message);
+    return null;
   }
-  /**
-   * Get all wallets with decrypted private keys (for server startup)
-   */
-  getAllWallets() {
-    try {
-      const stmt = this.db.prepare("SELECT * FROM wallets");
-      const rows = stmt.all();
+}
 
-      return rows
-        .map((row) => {
-          try {
-            const privateKey = this.cipher.decrypt({
-              ciphertext: row.encrypted_private_key,
-              nonce: row.nonce,
-              tag: row.auth_tag,
-            });
+/**
+ * Get all wallets with decrypted private keys (for server startup)
+ */
+getAllWallets() {
+  try {
+    const stmt = this.db.prepare("SELECT * FROM wallets");
+    const rows = stmt.all();
 
-            return {
-              walletName: row.wallet_name,
-              accountAddress: row.account_address,
-              privateKey: privateKey,
-            };
-          } catch (error) {
-            console.error(`Failed to decrypt wallet ${row.wallet_name}`);
-            return null;
-          }
-        })
-        .filter((wallet) => wallet !== null);
-    } catch (error) {
-      console.error("Failed to get all wallets:", error.message);
-      return [];
-    }
+    return rows
+      .map((row) => {
+        try {
+          const evmPrivateKey = this.cipher.decrypt({
+            ciphertext: row.encrypted_evm_private_key,
+            nonce: row.evm_nonce,
+            tag: row.evm_auth_tag,
+          });
+
+          const solanaPrivateKey = this.cipher.decrypt({
+            ciphertext: row.encrypted_solana_private_key,
+            nonce: row.solana_nonce,
+            tag: row.solana_auth_tag,
+          });
+
+          return {
+            walletName: row.wallet_name,
+            evmAddress: row.evm_address,
+            evmPrivateKey: evmPrivateKey,
+            solanaAddress: row.solana_address,
+            solanaPrivateKey: solanaPrivateKey,
+          };
+        } catch (error) {
+          console.error(`Failed to decrypt wallet ${row.wallet_name}`);
+          return null;
+        }
+      })
+      .filter((wallet) => wallet !== null);
+  } catch (error) {
+    console.error("Failed to get all wallets:", error.message);
+    return [];
   }
+}
   /**
    * Check if wallet exists
    */
