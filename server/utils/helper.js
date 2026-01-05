@@ -19,11 +19,10 @@ export const x402Version = 2;
 export function createPaymentRequirements(price, resource, description) {
   return {
     accepts: [
-      // EVM (Base Sepolia) option
       {
         scheme: "exact",
         price: price,
-        network: "eip155:84532", // Base Sepolia (CAIP-2 format)
+        network: "eip155:84532",
         payTo: evmPayTo,
       },
       {

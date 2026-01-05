@@ -242,13 +242,12 @@ async createWallets() {
   }
 }
 
-  async registerWithProxy(walletName, evmAddress, solanaAddress) {
+async registerWithProxy(walletName, evmAddress, solanaAddress) {
   const spinner = ora("Registering with x402 proxy...").start();
 
   try {
     const cdp = new CdpClient();
-    
-    // PARALLEL key exports (this is the real performance gain!)
+
     const [evmPrivateKeyData, solanaPrivateKeyData] = await Promise.all([
       cdp.evm.exportAccount({ name: `${walletName}-evm` }),
       cdp.solana.exportAccount({ name: `${walletName}-solana` })
@@ -268,18 +267,23 @@ async createWallets() {
     });
 
     if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ error: "Unknown error" }));
-      throw new Error(
-        error.error || `Registration failed: ${response.status}`
-      );
+      const raw = await response.text();
+
+      let message = raw;
+      try {
+        const parsed = JSON.parse(raw);
+        message = parsed.error || parsed.message || raw;
+      } catch {
+      }
+
+      throw new Error(`HTTP ${response.status}: ${message}`);
     }
 
     const data = await response.json();
     spinner.succeed("Registered with x402 proxy");
 
     return data.api_key;
+
   } catch (error) {
     spinner.fail("Failed to register with x402 proxy");
     if (error.message.includes("ECONNREFUSED")) {
@@ -289,9 +293,11 @@ async createWallets() {
           "?"
       );
     }
-    throw new Error(`Proxy registration failed: ${error.message}`);
+
+    throw error;
   }
 }
+
 
   async setup() {
   try {
