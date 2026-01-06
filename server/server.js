@@ -172,11 +172,8 @@ app.all('/proxy', async (req, res) => {
       });
     }
 
-    console.log(`Processing ${methodUpper} with key: [${idempotencyKey}]`);
-
     const inFlight = processingRequests.get(idempotencyKey);
     if (inFlight) {
-      console.log(`Request already in progress, waiting: ${idempotencyKey}`);
       try {
         const existingResponse = await inFlight;
         return res.status(existingResponse.status).json({
@@ -184,13 +181,9 @@ app.all('/proxy', async (req, res) => {
           statusText: existingResponse.statusText || 'OK',
           headers: existingResponse.headers,
           data: existingResponse.data,
-          meta: {
-            cached_concurrent_request: true,
-            timestamp: new Date().toISOString(),
-          },
+          meta: { cached_concurrent_request: true, timestamp: new Date().toISOString() },
         });
-      } catch (waitError) {
-        console.error(`Error waiting for existing request: ${waitError.message}`);
+      } catch (e) {
         processingRequests.delete(idempotencyKey);
       }
     }
@@ -198,8 +191,6 @@ app.all('/proxy', async (req, res) => {
     const requiresPayment = proxy.requiresPayment(idempotencyKey);
 
     if (requiresPayment) {
-      console.log(`Payment required for: ${idempotencyKey}`);
-
       const paymentRequirements = createPaymentRequirements(
         '$0.001',
         PROTECTED_RESOURCE,
@@ -211,7 +202,6 @@ app.all('/proxy', async (req, res) => {
 
       const inFlightAfterPay = processingRequests.get(idempotencyKey);
       if (inFlightAfterPay) {
-        console.log(`Another request started during payment verification: ${idempotencyKey}`);
         try {
           const existingResponse = await inFlightAfterPay;
           return res.status(existingResponse.status).json({
@@ -219,13 +209,9 @@ app.all('/proxy', async (req, res) => {
             statusText: existingResponse.statusText || 'OK',
             headers: existingResponse.headers,
             data: existingResponse.data,
-            meta: {
-              cached_concurrent_request: true,
-              timestamp: new Date().toISOString(),
-            },
+            meta: { cached_concurrent_request: true, timestamp: new Date().toISOString() },
           });
-        } catch (waitError) {
-          console.error(`Error waiting for existing request: ${waitError.message}`);
+        } catch (e) {
           processingRequests.delete(idempotencyKey);
         }
       }
@@ -234,8 +220,8 @@ app.all('/proxy', async (req, res) => {
 
       try {
         await settle(paymentResult.paymentResult);
-      } catch (settleError) {
-        console.error(`Payment settlement failed: ${settleError.message}`);
+      } catch (e) {
+        console.error(`Payment settlement failed: ${e.message}`);
       }
     }
 
@@ -251,7 +237,6 @@ app.all('/proxy', async (req, res) => {
 
     const response = await requestPromise;
     const processingTime = Date.now() - startTime;
-
     const isVerbose = String(req.get('x-verbose') || '').toLowerCase() === 'true';
 
     if (isVerbose) {
@@ -281,8 +266,6 @@ app.all('/proxy', async (req, res) => {
       data: response.data,
     });
   } catch (error) {
-    console.error('Proxy request error:', error);
-
     const msg = error?.message || String(error);
 
     if (msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {

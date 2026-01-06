@@ -16,12 +16,12 @@ export const x402Version = 2;
 const facilitatorClient = new HTTPFacilitatorClient({ url: facilitatorUrl });
 
 export const resourceServer = new x402ResourceServer(facilitatorClient);
-
 registerExactEvmScheme(resourceServer);
 registerExactSvmScheme(resourceServer);
 
 export function createPaymentRequirements(price, resource, description) {
   return {
+    resource,
     accepts: [
       {
         scheme: 'exact',
@@ -48,50 +48,62 @@ export function createPaymentRequirements(price, resource, description) {
   };
 }
 
+function encodePaymentRequired(paymentRequirements) {
+  return Buffer.from(JSON.stringify(paymentRequirements), 'utf8').toString('base64');
+}
+
+function getPaymentHeader(req) {
+  const h = req.headers || {};
+  return (
+    h['x-payment'] ||
+    h['payment-signature'] ||
+    h['x-payment-signature'] ||
+    h['payment_signature'] ||
+    h['PAYMENT-SIGNATURE']
+  );
+}
+
 export async function verifyPayment(req, res, paymentRequirements) {
-  try {
-    const paymentHeader = req.get('x-payment');
+  const paymentHeader = getPaymentHeader(req);
 
-    if (!paymentHeader) {
-      res.status(402).json({
-        x402Version,
-        ...paymentRequirements,
-      });
-      return null;
-    }
-
-    const cleanReq = {
-      method: req.method,
-      url: req.originalUrl || req.url,
-      headers: { 'x-payment': paymentHeader },
-    };
-
-    const result = await resourceServer.verifyPayment(cleanReq, paymentRequirements);
-
-    if (!result?.isValid) {
-      res
-        .status(402)
-        .set(result?.headers || {})
-        .json({
-          x402Version,
-          ...paymentRequirements,
-        });
-      return null;
-    }
-
-    return { isValid: true, paymentResult: result };
-  } catch (err) {
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: 'Payment verification failed',
-        message: err?.message || String(err),
-      });
-    }
-    return null;
+  if (!paymentHeader) {
+    const encoded = encodePaymentRequired(paymentRequirements);
+    res.set('PAYMENT-REQUIRED', encoded);
+    return res.status(402).json({
+      error: 'Payment required',
+      message: 'PAYMENT-REQUIRED header contains payment instructions',
+      x402Version,
+      ...paymentRequirements,
+    });
   }
+
+  const cleanReq = {
+    method: req.method,
+    url: req.originalUrl || req.url,
+    headers: {
+      'x-payment': paymentHeader,
+      'payment-signature': paymentHeader,
+    },
+  };
+
+  const result = await resourceServer.verifyPayment(cleanReq, paymentRequirements);
+
+  if (!result?.isValid) {
+    const encoded = encodePaymentRequired(paymentRequirements);
+    res.set(result?.headers || {});
+    if (!res.get('PAYMENT-REQUIRED')) res.set('PAYMENT-REQUIRED', encoded);
+
+    return res.status(402).json({
+      error: 'Payment required',
+      message: result?.message || 'Payment verification failed',
+      x402Version,
+      ...paymentRequirements,
+    });
+  }
+
+  return { isValid: true, paymentResult: result };
 }
 
 export async function settle(paymentData) {
-  const result = await resourceServer.settlePayment(paymentData);
-  return result;
+  return await resourceServer.settlePayment(paymentData);
 }
