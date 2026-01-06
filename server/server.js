@@ -26,6 +26,7 @@ const MTLS_SERVER_CERT = path.join(root, 'scripts/mtls-certs', 'server.crt');
 const MTLS_CA_CERT     = path.join(root, 'scripts/mtls-certs', 'ca.crt');
 
 const app = express();
+const PROTECTED_RESOURCE = 'https://consensus.canister.software:8080/proxy';
 const port = process.env.CONSENSUS_SERVER_PORT || 8080;
 const proxy = new ConsensusProxy();
 const processingRequests = new Map();
@@ -129,12 +130,12 @@ app.get('/stats', (req, res) => {
 
 app.all('/proxy', async (req, res) => {
   const startTime = Date.now();
-  
+
   try {
-    const { target_url, method = 'GET', headers = {}, body } = req.body;
-    
+    const { target_url, method = 'GET', headers = {}, body } = req.body || {};
+
     if (!target_url) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing target_url',
         message: 'target_url is required in request body',
       });
@@ -142,42 +143,42 @@ app.all('/proxy', async (req, res) => {
 
     try {
       new URL(target_url);
-    } catch (urlError) {
-      return res.status(400).json({
-        error: 'Invalid target_url'
-      });
+    } catch {
+      return res.status(400).json({ error: 'Invalid target_url' });
     }
 
-    const methodUpper = method.toUpperCase();
+    const methodUpper = String(method).toUpperCase();
     const allowedMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
     if (!allowedMethods.includes(methodUpper)) {
       return res.status(400).json({
         error: 'Unsupported HTTPS method',
         message: `Method "${method}" is not supported`,
-        allowed_methods: allowedMethods
+        allowed_methods: allowedMethods,
       });
     }
 
-    const idempotencyKey = headers['x-idempotency-key'] ||
-                          headers['idempotency-key'] ||
-                          headers['Idempotency-key'] ||
-                          headers['Idempotency-Key'] ||
-                          headers['X-Idempotency-Key'];
-    
+    const idempotencyKey =
+      headers['x-idempotency-key'] ||
+      headers['idempotency-key'] ||
+      headers['Idempotency-key'] ||
+      headers['Idempotency-Key'] ||
+      headers['X-Idempotency-Key'];
+
     if (!idempotencyKey) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing idempotency key',
         message: 'x-idempotency-key is required in headers',
-        required: 'Include x-idempotency-key in headers object for deduplication'
+        required: 'Include x-idempotency-key in headers object for deduplication',
       });
     }
 
-    console.log(`Processing ${method} with key: [${idempotencyKey}]`);
+    console.log(`Processing ${methodUpper} with key: [${idempotencyKey}]`);
 
-    if (processingRequests.has(idempotencyKey)) {
+    const inFlight = processingRequests.get(idempotencyKey);
+    if (inFlight) {
       console.log(`Request already in progress, waiting: ${idempotencyKey}`);
       try {
-        const existingResponse = await processingRequests.get(idempotencyKey);
+        const existingResponse = await inFlight;
         return res.status(existingResponse.status).json({
           status: existingResponse.status,
           statusText: existingResponse.statusText || 'OK',
@@ -185,8 +186,8 @@ app.all('/proxy', async (req, res) => {
           data: existingResponse.data,
           meta: {
             cached_concurrent_request: true,
-            timestamp: new Date().toISOString()
-          }
+            timestamp: new Date().toISOString(),
+          },
         });
       } catch (waitError) {
         console.error(`Error waiting for existing request: ${waitError.message}`);
@@ -195,26 +196,24 @@ app.all('/proxy', async (req, res) => {
     }
 
     const requiresPayment = proxy.requiresPayment(idempotencyKey);
-    
+
     if (requiresPayment) {
       console.log(`Payment required for: ${idempotencyKey}`);
 
-      const resource = `${req.protocol}://${req.headers.host}/proxy`;
       const paymentRequirements = createPaymentRequirements(
-        "$0.001", 
-        resource, 
+        '$0.001',
+        PROTECTED_RESOURCE,
         `Consensus API Deduplication: ${target_url}`
       );
 
       const paymentResult = await verifyPayment(req, res, paymentRequirements);
-      if (!paymentResult || !paymentResult.isValid) {
-        return;
-      }
-      
-      if (processingRequests.has(idempotencyKey)) {
-        console.log(`Another request started processing during payment verification: ${idempotencyKey}`);
+      if (!paymentResult) return;
+
+      const inFlightAfterPay = processingRequests.get(idempotencyKey);
+      if (inFlightAfterPay) {
+        console.log(`Another request started during payment verification: ${idempotencyKey}`);
         try {
-          const existingResponse = await processingRequests.get(idempotencyKey);
+          const existingResponse = await inFlightAfterPay;
           return res.status(existingResponse.status).json({
             status: existingResponse.status,
             statusText: existingResponse.statusText || 'OK',
@@ -222,8 +221,8 @@ app.all('/proxy', async (req, res) => {
             data: existingResponse.data,
             meta: {
               cached_concurrent_request: true,
-              timestamp: new Date().toISOString()
-            }
+              timestamp: new Date().toISOString(),
+            },
           });
         } catch (waitError) {
           console.error(`Error waiting for existing request: ${waitError.message}`);
@@ -232,92 +231,84 @@ app.all('/proxy', async (req, res) => {
       }
 
       proxy.markAsPaid(idempotencyKey);
-      console.log(`Payment verified for: ${idempotencyKey}`);
 
       try {
-        const settleResponse = await settle(paymentResult.paymentResult);
-        console.log(`Payment settled for: ${idempotencyKey}`);
+        await settle(paymentResult.paymentResult);
       } catch (settleError) {
-        console.error('Payment settlement failed:', settleError.message);
+        console.error(`Payment settlement failed: ${settleError.message}`);
       }
     }
-    
+
     const requestPromise = (async () => {
       try {
-        const response = await proxy.handleRequest(target_url, method, headers, body);
-        return response;
-      } catch (error) {
+        return await proxy.handleRequest(target_url, methodUpper, headers, body);
+      } finally {
         processingRequests.delete(idempotencyKey);
-        throw error;
       }
     })();
-    
+
     processingRequests.set(idempotencyKey, requestPromise);
 
-    try {
-      const response = await requestPromise;
-      const processingTime = Date.now() - startTime;
+    const response = await requestPromise;
+    const processingTime = Date.now() - startTime;
 
-      const verboseHeader = req.headers['x-verbose'];
-      const isVerbose = typeof verboseHeader === 'string' && verboseHeader.toLowerCase() === 'true';
+    const isVerbose = String(req.get('x-verbose') || '').toLowerCase() === 'true';
 
-      processingRequests.delete(idempotencyKey);
-
-      if (isVerbose) {
-        return res.status(response.status).json({
-          status: response.status,
-          statusText: response.statusText || 'OK',
-          headers: response.headers,
-          data: response.data,
-          billing: {
-            cost: requiresPayment ? '$0.001' : '$0.000',
-            reason: response.cached ? 'cache_hit' : 'payment_processed',
-            idempotency_key: idempotencyKey,
-            processing_time_ms: processingTime
-          },
-          meta: {
-            timestamp: new Date().toISOString(),
-            server_version: '2.0.0',
-            x402_version: x402Version
-          }
-        });
-      }
-
+    if (isVerbose) {
       return res.status(response.status).json({
         status: response.status,
         statusText: response.statusText || 'OK',
         headers: response.headers,
-        data: response.data
+        data: response.data,
+        billing: {
+          cost: requiresPayment ? '$0.001' : '$0.000',
+          reason: response.cached ? 'cache_hit' : 'payment_processed',
+          idempotency_key: idempotencyKey,
+          processing_time_ms: processingTime,
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          server_version: '2.0.0',
+          x402_version: x402Version,
+        },
       });
-    } catch (error) {
-      processingRequests.delete(idempotencyKey);
-      throw error;
     }
+
+    return res.status(response.status).json({
+      status: response.status,
+      statusText: response.statusText || 'OK',
+      headers: response.headers,
+      data: response.data,
+    });
   } catch (error) {
     console.error('Proxy request error:', error);
 
-    if (error.message.includes('ENOTFOUND') || error.message.includes('ECONNREFUSED')) {
+    const msg = error?.message || String(error);
+
+    if (msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
       return res.status(502).json({
         error: 'Target API unreachable',
         message: 'Unable to connect to the target API',
-        target_url: req.body?.target_url
-      });
-    }
-    if (error.message.includes('timeout')) {
-      return res.status(504).json({
-        error: 'Request timeout',
-        message: 'Target API did not respond in time',
-        target_url: req.body?.target_url
+        target_url: req.body?.target_url,
       });
     }
 
-    res.status(500).json({ 
+    if (msg.toLowerCase().includes('timeout')) {
+      return res.status(504).json({
+        error: 'Request timeout',
+        message: 'Target API did not respond in time',
+        target_url: req.body?.target_url,
+      });
+    }
+
+    return res.status(500).json({
       error: 'Internal server error',
       message: 'An unexpected error occurred processing your request',
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   }
 });
+
 
 app.post('/node/join', async (req, res) => {
   try {
