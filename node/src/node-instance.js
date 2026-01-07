@@ -14,7 +14,7 @@ const root = path.resolve(__dirname, '..');
 
 const app = express();
 const port = process.env.NODE_PORT || 9090;
-const gatewayUrl = process.env.GATEWAY_URL || 'https://consensus.canister.software:8080';
+const gatewayUrl = process.env.GATEWAY_URL || 'https://consensus.canister.software:8888';
 
 // Load node configuration if exists
 let nodeConfig = null;

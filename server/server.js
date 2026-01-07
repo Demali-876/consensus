@@ -26,8 +26,8 @@ const MTLS_SERVER_CERT = path.join(root, 'scripts/mtls-certs', 'server.crt');
 const MTLS_CA_CERT     = path.join(root, 'scripts/mtls-certs', 'ca.crt');
 
 const app = express();
-const PROTECTED_RESOURCE = 'https://consensus.canister.software:8080/proxy';
-const port = process.env.CONSENSUS_SERVER_PORT || 8080;
+const PROTECTED_RESOURCE = 'https://consensus.canister.software:8888/proxy';
+const port = process.env.CONSENSUS_SERVER_PORT || 8888;
 const proxy = new ConsensusProxy();
 const processingRequests = new Map();
 const limiter = rateLimit({
@@ -477,7 +477,7 @@ app.post('/node/verify/:join_id', async (req, res) => {
       status: 'active',
       benchmark_score: benchmarkResult.score,
       benchmark_details: benchmarkResult.details,
-      gateway_url: 'https://consensus.canister.software:8080',
+      gateway_url: 'https://consensus.canister.software:8888',
       processing_time_ms: processingTime,
       message: 'Node registered successfully',
       next_steps: [

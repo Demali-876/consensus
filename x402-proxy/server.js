@@ -79,7 +79,7 @@ function createHybridFetch() {
 const hybridFetch = createHybridFetch();
 const app = express();
 const port = process.env.X402_PROXY_PORT || 3001;
-const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software:8080';
+const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software:8888';
 const walletStore = new WalletStore();
 const registeredWallets = new Map();
 const walletClients = new Map();

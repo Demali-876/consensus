@@ -13,7 +13,7 @@ const httpsAgent = new https.Agent({
 
 const options = {
   hostname: 'consensus.canister.software',
-  port: 8080,
+  port: 8888,
   path: '/',
   method: 'GET',
   agent: httpsAgent
