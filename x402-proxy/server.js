@@ -25,58 +25,16 @@ const root = path.resolve(__dirname, '..');
 const PROXY_TLS_KEY = process.env.PROXY_TLS_KEY_PATH || path.join(root, 'scripts/certs', 'proxy.key');
 const PROXY_TLS_CERT = process.env.PROXY_TLS_CERT_PATH || path.join(root, 'scripts/certs', 'proxy.crt');
 
-// mTLS client certs for connecting to main server
-const MTLS_CLIENT_KEY  = path.join(root, 'scripts/mtls-certs', 'client.key');
-const MTLS_CLIENT_CERT = path.join(root, 'scripts/mtls-certs', 'client.crt');
-const MTLS_CA_CERT     = path.join(root, 'scripts/mtls-certs', 'ca.crt');
+const undiciAgent = new UndiciAgent({ 
+  keepAliveTimeout: 10000, 
+  connections: 10, 
+  pipelining: 1 
+});
 
-// Hybrid fetch: Native HTTPS for mTLS, Undici for everything else
-function createHybridFetch() {
-  const undiciAgent = new UndiciAgent({ keepAliveTimeout: 10000, connections: 10, pipelining: 1 });
-  const httpsAgent = new https.Agent({
-    key: fs.readFileSync(MTLS_CLIENT_KEY),
-    cert: fs.readFileSync(MTLS_CLIENT_CERT),
-    ca: fs.readFileSync(MTLS_CA_CERT),
-    rejectUnauthorized: true,
-    keepAlive: true,
-    keepAliveMsecs: 10000
-  });
+const enhancedFetch = (url, options = {}) => {
+  return fetch(url, { ...options, dispatcher: undiciAgent });
+};
 
-  const nativeRequest = (url, options, agent) => new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const req = https.request({
-      hostname: urlObj.hostname,
-      port: urlObj.port || 443,
-      path: urlObj.pathname + urlObj.search,
-      method: options.method || 'GET',
-      headers: options.headers || {},
-      agent
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({
-        ok: res.statusCode >= 200 && res.statusCode < 300,
-        status: res.statusCode,
-        statusText: res.statusMessage,
-        headers: new Headers(res.headers),
-        json: async () => JSON.parse(data),
-        text: async () => data
-      }));
-    });
-    req.on('error', reject);
-    if (options.body) req.write(options.body);
-    req.end();
-  });
-
-  return async (url, options = {}) => {
-    if (url.includes('consensus.canister.software')) {
-      return nativeRequest(url, options, httpsAgent);
-    }
-    return fetch(url, { ...options, dispatcher: undiciAgent });
-  };
-}
-
-const hybridFetch = createHybridFetch();
 const app = express();
 const port = process.env.X402_PROXY_PORT || 3001;
 const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software:8888';
@@ -195,7 +153,7 @@ async function createWallet(evmPrivateKey, evmAddress, solanaPrivateKey, solanaA
   registerExactEvmScheme(client, { signer: evmSigner });
   registerExactSvmScheme(client, { signer: svmSigner });
 
-  return wrapFetchWithPayment(hybridFetch, client);
+  return wrapFetchWithPayment(enhancedFetch, client);
 }
 
 async function restoreWallets() {
@@ -357,7 +315,6 @@ app.post('/proxy', validateApiKey, async (req, res) => {
 
       const consensusHeaders = { 
         'Content-Type': 'application/json',
-        'Connection': 'close'
       };
       if (isVerbose) consensusHeaders['X-Verbose'] = 'true';
 
@@ -493,60 +450,6 @@ app.get('/stats', (req, res) => {
   });
 });
 
-app.post('/node/join', async (req, res) => {
-  try {
-    const response = await hybridFetch(`${consensusServerUrl}/node/join`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/node/verify/:join_id', async (req, res) => {
-  try {
-    const { join_id } = req.params;
-    
-    const response = await hybridFetch(`${consensusServerUrl}/node/verify/${join_id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/network', async (req, res) => {
-  try {
-    console.log('Fetching from:', consensusServerUrl + '/health');
-    const response = await hybridFetch(consensusServerUrl + '/health');
-    console.log('Response status:', response.status);
-    const data = await response.json();
-    
-    res.json({
-      status: data.status,
-      total_nodes: data.network?.total_nodes || 0,
-      active_nodes: data.network?.active_nodes || 0,
-      timestamp: data.timestamp
-    });
-  } catch (error) {
-    console.error('Network fetch error:', error.message);
-    res.status(503).json({
-      error: 'Failed to fetch network stats',
-      details: error.message
-    });
-  }
-});
-
 app.use((error, req, res, next) => {
   console.error('Unhandled:', error);
   res.status(500).json({ error: 'Internal server error' });
@@ -562,7 +465,7 @@ app.use((error, req, res, next) => {
 
 async function testConsensusConnection() {
   try {
-    const response = await hybridFetch(consensusServerUrl + "/");
+    const response = await enhancedFetch(consensusServerUrl + "/");
     if (!response.ok) {
       console.error(`Status: ${response.status}`);
       return false;
@@ -570,27 +473,6 @@ async function testConsensusConnection() {
 
     const data = await response.json();
     console.log(`✅ Connected: ${data.name} v${data.version}`);
-
-    const healthResponse = await hybridFetch(consensusServerUrl + "/health");
-    if (!healthResponse.ok) {
-      console.error(`Health check failed with status: ${healthResponse.status}`);
-      return true;
-    }
-
-    const health = await healthResponse.json();
-
-    const totalNodes =
-      health.network?.total_nodes ??
-      health.total_nodes ??
-      0;
-
-    const totalHeartbeats =
-      health.network?.nodes_with_recent_heartbeat ??
-      health.nodes_with_recent_heartbeat ??
-      0;
-
-    console.log(`Network: ${totalNodes} total nodes, ${totalHeartbeats} with recent heartbeat`);
-
     return true;
   } catch (error) {
     console.error(`Connection failed: ${error.message}`);
@@ -606,14 +488,11 @@ async function boot() {
     const server = https.createServer({
       key: fs.readFileSync(PROXY_TLS_KEY),
       cert: fs.readFileSync(PROXY_TLS_CERT),
-      handshakeTimeout: 30000,
-      requestTimeout: 30000,
-      headersTimeout: 30000,
-      keepAliveTimeout: 5000
     }, app);
     
     server.listen(port, '0.0.0.0', () => {
       console.log(`x402 Proxy (EVM + Solana) on https://consensus.proxy.canister.software:${port}`);
+      console.log(`Main server: ${consensusServerUrl}`);
     });
   } catch (error) {
     console.error('Boot failed:', error.message);

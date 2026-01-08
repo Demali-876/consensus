@@ -20,11 +20,6 @@ const root = path.resolve(__dirname, '..');
 const MAIN_TLS_KEY  = process.env.MAIN_TLS_KEY_PATH  || path.join(root, 'scripts/certs', 'main.key');
 const MAIN_TLS_CERT = process.env.MAIN_TLS_CERT_PATH || path.join(root, 'scripts/certs', 'main.crt');
 
-// mTLS certs
-const MTLS_SERVER_KEY  = path.join(root, 'scripts/mtls-certs', 'server.key');
-const MTLS_SERVER_CERT = path.join(root, 'scripts/mtls-certs', 'server.crt');
-const MTLS_CA_CERT     = path.join(root, 'scripts/mtls-certs', 'ca.crt');
-
 const app = express();
 const PROTECTED_RESOURCE = 'https://consensus.canister.software:8888/proxy';
 const port = process.env.CONSENSUS_SERVER_PORT || 8888;
@@ -46,7 +41,6 @@ app.use(express.json({
   type: ['application/json', 'text/plain']
 }));
 
-// Basic info endpoint
 app.get('/', (req, res) => {
   res.json({ 
     name: 'Consensus', 
@@ -62,7 +56,7 @@ app.get('/', (req, res) => {
     facilitator_url: facilitatorUrl,
     x402_version: x402Version,
     endpoints: {
-      proxy: 'POST /proxy - Make deduplicated API calls',
+      proxy: 'POST /proxy - Make deduplicated API calls (PAYMENT REQUIRED)',
       health: 'GET /health - Service health check',
       stats: 'GET /stats - Service statistics',
       node_join: 'POST /node/join - Request to join network',
@@ -76,7 +70,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   const stats = proxy.getStats();
   const nodes = NodeStore.listNodes();
@@ -108,7 +101,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Stats endpoint
 app.get('/stats', (req, res) => {
   const stats = proxy.getStats();
   res.json({
@@ -120,7 +112,7 @@ app.get('/stats', (req, res) => {
       solana: solanaPayTo
     },
     facilitator_url: facilitatorUrl,
-    networks: ['base-sepolia', 'solana-devnet'],
+    networks: ['eip155:84532', 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'],
     cache_hit_rate: stats.total_requests > 0 ? 
       ((stats.cache_hits / stats.total_requests) * 100).toFixed(2) + '%' : '0%',
     uptime: process.uptime(),
@@ -172,8 +164,11 @@ app.all('/proxy', async (req, res) => {
       });
     }
 
+    console.log(`Processing ${methodUpper} with key: [${idempotencyKey}]`);
+
     const inFlight = processingRequests.get(idempotencyKey);
     if (inFlight) {
+      console.log(`Request already in progress, waiting: ${idempotencyKey}`);
       try {
         const existingResponse = await inFlight;
         return res.status(existingResponse.status).json({
@@ -181,9 +176,13 @@ app.all('/proxy', async (req, res) => {
           statusText: existingResponse.statusText || 'OK',
           headers: existingResponse.headers,
           data: existingResponse.data,
-          meta: { cached_concurrent_request: true, timestamp: new Date().toISOString() },
+          meta: {
+            cached_concurrent_request: true,
+            timestamp: new Date().toISOString(),
+          },
         });
-      } catch (e) {
+      } catch (waitError) {
+        console.error(`Error waiting for existing request: ${waitError.message}`);
         processingRequests.delete(idempotencyKey);
       }
     }
@@ -191,6 +190,8 @@ app.all('/proxy', async (req, res) => {
     const requiresPayment = proxy.requiresPayment(idempotencyKey);
 
     if (requiresPayment) {
+      console.log(`Payment required for: ${idempotencyKey}`);
+
       const paymentRequirements = createPaymentRequirements(
         '$0.001',
         PROTECTED_RESOURCE,
@@ -202,6 +203,7 @@ app.all('/proxy', async (req, res) => {
 
       const inFlightAfterPay = processingRequests.get(idempotencyKey);
       if (inFlightAfterPay) {
+        console.log(`Another request started during payment verification: ${idempotencyKey}`);
         try {
           const existingResponse = await inFlightAfterPay;
           return res.status(existingResponse.status).json({
@@ -209,19 +211,25 @@ app.all('/proxy', async (req, res) => {
             statusText: existingResponse.statusText || 'OK',
             headers: existingResponse.headers,
             data: existingResponse.data,
-            meta: { cached_concurrent_request: true, timestamp: new Date().toISOString() },
+            meta: {
+              cached_concurrent_request: true,
+              timestamp: new Date().toISOString(),
+            },
           });
-        } catch (e) {
+        } catch (waitError) {
+          console.error(`Error waiting for existing request: ${waitError.message}`);
           processingRequests.delete(idempotencyKey);
         }
       }
 
       proxy.markAsPaid(idempotencyKey);
+      console.log(`Payment verified for: ${idempotencyKey}`);
 
       try {
         await settle(paymentResult.paymentResult);
-      } catch (e) {
-        console.error(`Payment settlement failed: ${e.message}`);
+        console.log(`Payment settled for: ${idempotencyKey}`);
+      } catch (settleError) {
+        console.error('Payment settlement failed:', settleError?.message || settleError);
       }
     }
 
@@ -237,6 +245,7 @@ app.all('/proxy', async (req, res) => {
 
     const response = await requestPromise;
     const processingTime = Date.now() - startTime;
+
     const isVerbose = String(req.get('x-verbose') || '').toLowerCase() === 'true';
 
     if (isVerbose) {
@@ -266,6 +275,10 @@ app.all('/proxy', async (req, res) => {
       data: response.data,
     });
   } catch (error) {
+    console.error('Proxy request error:', error);
+
+    if (res.headersSent) return;
+
     const msg = error?.message || String(error);
 
     if (msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
@@ -291,7 +304,6 @@ app.all('/proxy', async (req, res) => {
     });
   }
 });
-
 
 app.post('/node/join', async (req, res) => {
   try {
@@ -607,21 +619,13 @@ app.use((error, req, res, next) => {
 
 const server = https.createServer(
   {
-    key:  fs.readFileSync(MTLS_SERVER_KEY),
-    cert: fs.readFileSync(MTLS_SERVER_CERT),
-    ca:   fs.readFileSync(MTLS_CA_CERT),
-    requestCert: true,
-    rejectUnauthorized: true,
-    handshakeTimeout: 30000,
-    requestTimeout: 30000,
-    headersTimeout: 30000,
-    keepAliveTimeout: 5000
+    key:  fs.readFileSync(MAIN_TLS_KEY),
+    cert: fs.readFileSync(MAIN_TLS_CERT),
   },
   app
 );
 
-server.listen(port, '0.0.0.0', () => {
+server.listen(port, '::', () => {
   console.log(`Consensus Server v2.0.0 (Multi-Chain x402) on https://consensus.canister.software:${port}`);
   console.log(`Payment networks: Base Sepolia (EVM), Solana Devnet (SVM)`);
-  console.log(`Node network endpoints ready`);
 });
