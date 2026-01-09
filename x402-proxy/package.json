@@ -24,8 +24,7 @@
     "express-rate-limit": "^7.5.1",
     "helmet": "^7.2.0",
     "undici": "^7.13.0",
-    "viem": "^2.33.3",
-    "x402-fetch": "^0.4.2"
+    "viem": "^2.33.3"
   },
   "keywords": [
     "x402",

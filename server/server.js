@@ -9,7 +9,7 @@ import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import crypto from 'crypto';
 import ConsensusProxy from './proxy.js';
-import { createPaymentRequirements, verifyPayment, settle, x402Version, facilitatorUrl, evmPayTo, solanaPayTo } from './utils/helper.js';
+import { createPaymentRequirements, verifyPayment, settle, x402Version, facilitatorUrl } from './utils/helper.js';
 import { benchmarkNode } from './utils/benchmark.js';
 import { provisionNodeDNS, updateNodeDNS } from './utils/dns.js';
 import NodeStore from './data/node_store.js';
@@ -22,7 +22,7 @@ const MAIN_TLS_CERT = process.env.MAIN_TLS_CERT_PATH || path.join(root, 'scripts
 
 const app = express();
 const PROTECTED_RESOURCE = 'https://consensus.canister.software:8888/proxy';
-const port = process.env.CONSENSUS_SERVER_PORT || 8888;
+const port = process.env.CONSENSUS_SERVER_PORT || 8080;
 const proxy = new ConsensusProxy();
 const processingRequests = new Map();
 const limiter = rateLimit({
@@ -50,8 +50,8 @@ app.get('/', (req, res) => {
     pricing: '$0.001 per unique API call (cached responses are free)',
     payment_networks: ['Base Sepolia (EVM)', 'Solana Devnet (SVM)'],
     payment_addresses: {
-      evm: evmPayTo,
-      solana: solanaPayTo
+      evm: "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f",
+      solana: "58rV8fbThkHw33g7fLobo89cdt2ufF4Et3su7N7BLzLe"
     },
     facilitator_url: facilitatorUrl,
     x402_version: x402Version,
@@ -88,8 +88,8 @@ app.get('/health', (req, res) => {
     total_requests: stats.total_requests,
     cache_hits: stats.cache_hits,
     payment_addresses: {
-      evm: evmPayTo,
-      solana: solanaPayTo
+      evm: "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f",
+      solana: "58rV8fbThkHw33g7fLobo89cdt2ufF4Et3su7N7BLzLe"
     },
     facilitator_url: facilitatorUrl,
     x402_version: x402Version,
@@ -108,8 +108,8 @@ app.get('/stats', (req, res) => {
     pricing: '$0.001 per unique API call',
     payment_method: 'x402 automatic multi-chain payments',
     payment_addresses: {
-      evm: evmPayTo,
-      solana: solanaPayTo
+      evm: "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f",
+      solana: "58rV8fbThkHw33g7fLobo89cdt2ufF4Et3su7N7BLzLe"
     },
     facilitator_url: facilitatorUrl,
     networks: ['eip155:84532', 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'],
@@ -166,25 +166,12 @@ app.all('/proxy', async (req, res) => {
 
     console.log(`Processing ${methodUpper} with key: [${idempotencyKey}]`);
 
+    // If another identical request is already running, wait for it.
     const inFlight = processingRequests.get(idempotencyKey);
     if (inFlight) {
       console.log(`Request already in progress, waiting: ${idempotencyKey}`);
-      try {
-        const existingResponse = await inFlight;
-        return res.status(existingResponse.status).json({
-          status: existingResponse.status,
-          statusText: existingResponse.statusText || 'OK',
-          headers: existingResponse.headers,
-          data: existingResponse.data,
-          meta: {
-            cached_concurrent_request: true,
-            timestamp: new Date().toISOString(),
-          },
-        });
-      } catch (waitError) {
-        console.error(`Error waiting for existing request: ${waitError.message}`);
-        processingRequests.delete(idempotencyKey);
-      }
+      const existingResponse = await inFlight;
+      return res.status(existingResponse.status).json(existingResponse);
     }
 
     const requiresPayment = proxy.requiresPayment(idempotencyKey);
@@ -193,49 +180,66 @@ app.all('/proxy', async (req, res) => {
       console.log(`Payment required for: ${idempotencyKey}`);
 
       const paymentRequirements = createPaymentRequirements(
-        '$0.001',
         PROTECTED_RESOURCE,
-        `Consensus API Deduplication: ${target_url}`
+        `Consensus API Deduplication: ${target_url}`,
       );
 
-      const paymentResult = await verifyPayment(req, res, paymentRequirements);
-      if (!paymentResult) return;
+      const verified = await verifyPayment(req, res, paymentRequirements);
+      if (!verified) return;
+      if (res.headersSent) return;
 
+      // Another request may have completed while we were verifying payment.
       const inFlightAfterPay = processingRequests.get(idempotencyKey);
       if (inFlightAfterPay) {
-        console.log(`Another request started during payment verification: ${idempotencyKey}`);
-        try {
-          const existingResponse = await inFlightAfterPay;
-          return res.status(existingResponse.status).json({
-            status: existingResponse.status,
-            statusText: existingResponse.statusText || 'OK',
-            headers: existingResponse.headers,
-            data: existingResponse.data,
-            meta: {
-              cached_concurrent_request: true,
-              timestamp: new Date().toISOString(),
-            },
-          });
-        } catch (waitError) {
-          console.error(`Error waiting for existing request: ${waitError.message}`);
-          processingRequests.delete(idempotencyKey);
-        }
+        const existingResponse = await inFlightAfterPay;
+        return res.status(existingResponse.status).json(existingResponse);
       }
 
       proxy.markAsPaid(idempotencyKey);
       console.log(`Payment verified for: ${idempotencyKey}`);
 
       try {
-        await settle(paymentResult.paymentResult);
-        console.log(`Payment settled for: ${idempotencyKey}`);
-      } catch (settleError) {
-        console.error('Payment settlement failed:', settleError?.message || settleError);
+        const settlement = await settle(verified);
+        console.log(`Payment settled for: ${idempotencyKey}`, settlement);
+      } catch (e) {
+        console.log('Payment settlement failed:', e?.message || e);
       }
     }
 
+    // Execute the actual proxy work (dedup happens inside proxy.handleRequest)
     const requestPromise = (async () => {
       try {
-        return await proxy.handleRequest(target_url, methodUpper, headers, body);
+        const response = await proxy.handleRequest(target_url, methodUpper, headers, body);
+
+        const processingTime = Date.now() - startTime;
+        const isVerbose = String(req.get('x-verbose') || '').toLowerCase() === 'true';
+
+        const payload = isVerbose
+          ? {
+              status: response.status,
+              statusText: response.statusText || 'OK',
+              headers: response.headers,
+              data: response.data,
+              billing: {
+                cost: requiresPayment ? '$0.001' : '$0.000',
+                reason: response.cached ? 'cache_hit' : 'payment_processed',
+                idempotency_key: idempotencyKey,
+                processing_time_ms: processingTime,
+              },
+              meta: {
+                timestamp: new Date().toISOString(),
+                server_version: '2.0.0',
+                x402_version: x402Version,
+              },
+            }
+          : {
+              status: response.status,
+              statusText: response.statusText || 'OK',
+              headers: response.headers,
+              data: response.data,
+            };
+
+        return payload;
       } finally {
         processingRequests.delete(idempotencyKey);
       }
@@ -243,37 +247,8 @@ app.all('/proxy', async (req, res) => {
 
     processingRequests.set(idempotencyKey, requestPromise);
 
-    const response = await requestPromise;
-    const processingTime = Date.now() - startTime;
-
-    const isVerbose = String(req.get('x-verbose') || '').toLowerCase() === 'true';
-
-    if (isVerbose) {
-      return res.status(response.status).json({
-        status: response.status,
-        statusText: response.statusText || 'OK',
-        headers: response.headers,
-        data: response.data,
-        billing: {
-          cost: requiresPayment ? '$0.001' : '$0.000',
-          reason: response.cached ? 'cache_hit' : 'payment_processed',
-          idempotency_key: idempotencyKey,
-          processing_time_ms: processingTime,
-        },
-        meta: {
-          timestamp: new Date().toISOString(),
-          server_version: '2.0.0',
-          x402_version: x402Version,
-        },
-      });
-    }
-
-    return res.status(response.status).json({
-      status: response.status,
-      statusText: response.statusText || 'OK',
-      headers: response.headers,
-      data: response.data,
-    });
+    const finalPayload = await requestPromise;
+    return res.status(finalPayload.status).json(finalPayload);
   } catch (error) {
     console.error('Proxy request error:', error);
 
@@ -304,6 +279,7 @@ app.all('/proxy', async (req, res) => {
     });
   }
 });
+
 
 app.post('/node/join', async (req, res) => {
   try {

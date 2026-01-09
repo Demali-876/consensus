@@ -1,54 +1,46 @@
-import { x402ResourceServer } from '@x402/core/server';
-import { HTTPFacilitatorClient } from '@x402/core/server';
+import { x402ResourceServer, HTTPFacilitatorClient } from '@x402/core/server';
 import { ExactEvmScheme } from '@x402/evm/exact/server';
 import { ExactSvmScheme } from '@x402/svm/exact/server';
 
-export const evmPayTo =
-  process.env.EVM_WALLET_ADDRESS || '0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f';
-export const solanaPayTo =
-  process.env.SOLANA_WALLET_ADDRESS || '58rV8fbThkHw33g7fLobo89cdt2ufF4Et3su7N7BLzLe';
-export const facilitatorUrl =
-  process.env.FACILITATOR_URL || 'https://x402.org/facilitator';
+export const evmPayTo = '0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f';
+export const solanaPayTo = '58rV8fbThkHw33g7fLobo89cdt2ufF4Et3su7N7BLzLe';
+export const facilitatorUrl = 'https://facilitator.x402.rs';
 export const x402Version = 2;
+
+const BASE_SEPOLIA_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: facilitatorUrl });
 export const resourceServer = new x402ResourceServer(facilitatorClient);
 
-
 resourceServer.register('eip155:84532', new ExactEvmScheme());
 resourceServer.register('solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', new ExactSvmScheme());
 
-export function createPaymentRequirements(price, resource, description) {
+export function createPaymentRequirements(resourceUrl, description) {
   return {
-    resource,
+    resource: resourceUrl,  // ✅ Just the URL string
     accepts: [
       {
         scheme: 'exact',
-        price,
-        network: 'eip155:84532', // Base Sepolia
+        network: 'eip155:84532',
+        amount: '1000',  // 0.001 USDC (6 decimals)
+        asset: BASE_SEPOLIA_USDC,
         payTo: evmPayTo,
-      },
-      {
-        scheme: 'exact',
-        price,
-        network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', // Solana Devnet
-        payTo: solanaPayTo,
+        maxTimeoutSeconds: 300,
+        extra: {
+          name: "USDC",
+          version: "2",
+          resourceUrl,
+        },
       },
     ],
     description,
     mimeType: 'application/json',
-    extensions: {
-      bazaar: {
-        discoverable: true,
-        category: 'api-proxy',
-        tags: ['deduplication', 'caching', 'http-proxy', 'privacy', 'ipv4', 'ipv6'],
-      },
-    },
   };
 }
 
 function encodePaymentRequired(paymentRequirements) {
-  return Buffer.from(JSON.stringify(paymentRequirements), 'utf8').toString('base64');
+  const payload = { x402Version, ...paymentRequirements };
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
 }
 
 function getPaymentHeader(req) {
@@ -58,7 +50,7 @@ function getPaymentHeader(req) {
 
 export async function verifyPayment(req, res, paymentRequirements) {
   const paymentHeader = getPaymentHeader(req);
-  
+
   if (!paymentHeader) {
     const encoded = encodePaymentRequired(paymentRequirements);
     res.set('PAYMENT-REQUIRED', encoded);
@@ -70,7 +62,11 @@ export async function verifyPayment(req, res, paymentRequirements) {
     });
   }
 
-  const cleanReq = {
+  // ✅ Add logging to see what we're verifying
+  console.log('📋 Payment header received:', paymentHeader.substring(0, 100) + '...');
+  console.log('📋 Payment requirements:', JSON.stringify(paymentRequirements, null, 2));
+
+  const verificationReq = {
     method: req.method,
     url: req.originalUrl || req.url,
     headers: {
@@ -78,24 +74,47 @@ export async function verifyPayment(req, res, paymentRequirements) {
     },
   };
 
-  const result = await resourceServer.verifyPayment(cleanReq, paymentRequirements);
+  console.log('📋 Verification request:', JSON.stringify(verificationReq, null, 2));
+  console.log('🔍 Verifying payment with facilitator...');
   
-  if (!result?.isValid) {
-    const encoded = encodePaymentRequired(paymentRequirements);
-    res.set(result?.headers || {});
-    if (!res.get('PAYMENT-REQUIRED')) res.set('PAYMENT-REQUIRED', encoded);
-    
-    return res.status(402).json({
-      error: 'Payment required',
-      message: result?.message || 'Payment verification failed',
-      x402Version,
-      ...paymentRequirements,
-    });
-  }
+  try {
+    const verifyResult = await resourceServer.verifyPayment(verificationReq, paymentRequirements);
 
-  return { isValid: true, paymentResult: result };
+    if (!verifyResult?.isValid) {
+      console.log('❌ Payment verification failed:', verifyResult);
+      const encoded = encodePaymentRequired(paymentRequirements);
+      res.set(verifyResult?.headers || {});
+      if (!res.get('PAYMENT-REQUIRED')) res.set('PAYMENT-REQUIRED', encoded);
+
+      return res.status(402).json({
+        error: 'Payment verification failed',
+        message: verifyResult?.message || 'Invalid payment',
+        x402Version,
+        ...paymentRequirements,
+      });
+    }
+
+    console.log('✅ Payment verified successfully');
+    return verifyResult;
+  } catch (error) {
+    console.error('❌ Verification error details:', {
+      message: error.message,
+      statusCode: error.statusCode,
+      invalidReason: error.invalidReason,
+      payer: error.payer,
+    });
+    throw error;
+  }
 }
 
-export async function settle(paymentData) {
-  return await resourceServer.settlePayment(paymentData);
+export async function settle(verifyResult) {
+  try {
+    console.log('💰 Settling payment...');
+    const result = await resourceServer.settlePayment(verifyResult);
+    console.log('✅ Payment settled');
+    return result;
+  } catch (error) {
+    console.error('⚠️  Settlement failed:', error.message);
+    throw error;
+  }
 }
