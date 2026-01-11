@@ -5,99 +5,60 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import cors from 'cors';
-import crypto from 'crypto';
+import cors from 'express-rate-limit';
+import { paymentMiddleware, x402ResourceServer } from '@x402/express';
+import { ExactEvmScheme } from '@x402/evm/exact/server';
+import { HTTPFacilitatorClient } from '@x402/core/server';
 import ConsensusProxy from './proxy.js';
-import { createPaymentRequirements, verifyPayment, settle, x402Version, facilitatorUrl } from './utils/helper.js';
-import { benchmarkNode } from './utils/benchmark.js';
-import { provisionNodeDNS, updateNodeDNS } from './utils/dns.js';
-import NodeStore from './data/node_store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
-const MAIN_TLS_KEY  = process.env.MAIN_TLS_KEY_PATH  || path.join(root, 'scripts/certs', 'main.key');
+
+const PORT = 8080;
+const FACILITATOR_URL = 'https://facilitator.payai.network';
+const EVM_PAY_TO = '0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f';
+
+const MAIN_TLS_KEY = process.env.MAIN_TLS_KEY_PATH || path.join(root, 'scripts/certs', 'main.key');
 const MAIN_TLS_CERT = process.env.MAIN_TLS_CERT_PATH || path.join(root, 'scripts/certs', 'main.crt');
 
-const app = express();
-const PROTECTED_RESOURCE = 'https://consensus.canister.software:8888/proxy';
-const port = process.env.CONSENSUS_SERVER_PORT || 8080;
+
+const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
+const x402Server = new x402ResourceServer(facilitatorClient)
+  .register('eip155:84532', new ExactEvmScheme());
+
 const proxy = new ConsensusProxy();
 const processingRequests = new Map();
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5000,
-  message: { error: 'Too many requests, please try again later' }
-});
 
-app.use(limiter);
+const app = express();
 app.use(helmet());
 app.use(cors());
-
-app.use(express.json({ 
-  limit: '10mb',
-  strict: false,
-  type: ['application/json', 'text/plain']
-}));
+app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => {
-  res.json({ 
-    name: 'Consensus', 
-    status: 'running',
+  res.json({
+    name: 'Consensus x402 Server',
     version: '2.0.0',
-    description: 'HTTPS API Deduplication Service with x402 Multi-Chain Payments',
-    pricing: '$0.001 per unique API call (cached responses are free)',
-    payment_networks: ['Base Sepolia (EVM)', 'Solana Devnet (SVM)'],
-    payment_addresses: {
-      evm: "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f",
-      solana: "58rV8fbThkHw33g7fLobo89cdt2ufF4Et3su7N7BLzLe"
-    },
-    facilitator_url: facilitatorUrl,
-    x402_version: x402Version,
+    status: 'running',
+    payment_network: 'Base Sepolia',
+    payment_address: EVM_PAY_TO,
+    facilitator: FACILITATOR_URL,
     endpoints: {
-      proxy: 'POST /proxy - Make deduplicated API calls (PAYMENT REQUIRED)',
-      health: 'GET /health - Service health check',
-      stats: 'GET /stats - Service statistics',
-      node_join: 'POST /node/join - Request to join network',
-      node_verify: 'POST /node/verify/:join_id - Verify and register node',
-      nodes: 'GET /nodes - List all nodes'
+      proxy: 'POST /proxy - Deduplicated API calls with x402 payments',
+      health: 'GET /health - Health check',
+      stats: 'GET /stats - Cache statistics',
     },
-    usage: {
-      note: 'Use x402-enabled client for automatic multi-chain payments',
-      supported_chains: ['eip155:84532 (Base Sepolia)', 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1 (Solana Devnet)']
-    }
   });
 });
 
 app.get('/health', (req, res) => {
   const stats = proxy.getStats();
-  const nodes = NodeStore.listNodes();
-
-  const nodeStats = {
-    total: nodes.length,
-    active: nodes.filter(n => n.status === 'active').length,
-    inactive: nodes.filter(n => n.status !== 'active').length,
-    with_heartbeat: nodes.filter(n => n.heartbeat).length
-  };
-  
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     cache_size: stats.cache_size,
     total_requests: stats.total_requests,
     cache_hits: stats.cache_hits,
-    payment_addresses: {
-      evm: "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f",
-      solana: "58rV8fbThkHw33g7fLobo89cdt2ufF4Et3su7N7BLzLe"
-    },
-    facilitator_url: facilitatorUrl,
-    x402_version: x402Version,
-    network: {
-      total_nodes: nodeStats.total,
-      active_nodes: nodeStats.active,
-      nodes_with_recent_heartbeat: nodeStats.with_heartbeat
-    }
   });
 });
 
@@ -105,141 +66,77 @@ app.get('/stats', (req, res) => {
   const stats = proxy.getStats();
   res.json({
     ...stats,
-    pricing: '$0.001 per unique API call',
-    payment_method: 'x402 automatic multi-chain payments',
-    payment_addresses: {
-      evm: "0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f",
-      solana: "58rV8fbThkHw33g7fLobo89cdt2ufF4Et3su7N7BLzLe"
-    },
-    facilitator_url: facilitatorUrl,
-    networks: ['eip155:84532', 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'],
     cache_hit_rate: stats.total_requests > 0 ? 
       ((stats.cache_hits / stats.total_requests) * 100).toFixed(2) + '%' : '0%',
     uptime: process.uptime(),
-    timestamp: new Date().toISOString()
   });
 });
 
-app.all('/proxy', async (req, res) => {
+app.use(
+  paymentMiddleware(
+    {
+      'POST /proxy': {
+        accepts: [
+          {
+            scheme: 'exact',
+            price: '$0.001',
+            network: 'eip155:84532',
+            payTo: EVM_PAY_TO,
+          },
+        ],
+        description: 'API Deduplication Service',
+        mimeType: 'application/json',
+      },
+    },
+    x402Server,
+  ),
+);
+
+app.post('/proxy', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { target_url, method = 'GET', headers = {}, body } = req.body || {};
+    const { target_url, method = 'GET', headers = {} } = req.body;
 
     if (!target_url) {
-      return res.status(400).json({
-        error: 'Missing target_url',
-        message: 'target_url is required in request body',
-      });
-    }
-
-    try {
-      new URL(target_url);
-    } catch {
-      return res.status(400).json({ error: 'Invalid target_url' });
+      return res.status(400).json({ error: 'Missing target_url' });
     }
 
     const methodUpper = String(method).toUpperCase();
-    const allowedMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
-    if (!allowedMethods.includes(methodUpper)) {
-      return res.status(400).json({
-        error: 'Unsupported HTTPS method',
-        message: `Method "${method}" is not supported`,
-        allowed_methods: allowedMethods,
-      });
-    }
-
-    const idempotencyKey =
-      headers['x-idempotency-key'] ||
-      headers['idempotency-key'] ||
-      headers['Idempotency-key'] ||
-      headers['Idempotency-Key'] ||
-      headers['X-Idempotency-Key'];
+    const idempotencyKey = headers['x-idempotency-key'];
 
     if (!idempotencyKey) {
-      return res.status(400).json({
-        error: 'Missing idempotency key',
-        message: 'x-idempotency-key is required in headers',
-        required: 'Include x-idempotency-key in headers object for deduplication',
+      return res.status(400).json({ 
+        error: 'Missing x-idempotency-key in headers' 
       });
     }
 
     console.log(`Processing ${methodUpper} with key: [${idempotencyKey}]`);
 
-    // If another identical request is already running, wait for it.
     const inFlight = processingRequests.get(idempotencyKey);
     if (inFlight) {
-      console.log(`Request already in progress, waiting: ${idempotencyKey}`);
+      console.log(`Waiting for existing request: ${idempotencyKey}`);
       const existingResponse = await inFlight;
       return res.status(existingResponse.status).json(existingResponse);
     }
 
-    const requiresPayment = proxy.requiresPayment(idempotencyKey);
-
-    if (requiresPayment) {
-      console.log(`Payment required for: ${idempotencyKey}`);
-
-      const paymentRequirements = createPaymentRequirements(
-        PROTECTED_RESOURCE,
-        `Consensus API Deduplication: ${target_url}`,
-      );
-
-      const verified = await verifyPayment(req, res, paymentRequirements);
-      if (!verified) return;
-      if (res.headersSent) return;
-
-      // Another request may have completed while we were verifying payment.
-      const inFlightAfterPay = processingRequests.get(idempotencyKey);
-      if (inFlightAfterPay) {
-        const existingResponse = await inFlightAfterPay;
-        return res.status(existingResponse.status).json(existingResponse);
-      }
-
-      proxy.markAsPaid(idempotencyKey);
-      console.log(`Payment verified for: ${idempotencyKey}`);
-
-      try {
-        const settlement = await settle(verified);
-        console.log(`Payment settled for: ${idempotencyKey}`, settlement);
-      } catch (e) {
-        console.log('Payment settlement failed:', e?.message || e);
-      }
-    }
-
-    // Execute the actual proxy work (dedup happens inside proxy.handleRequest)
     const requestPromise = (async () => {
       try {
-        const response = await proxy.handleRequest(target_url, methodUpper, headers, body);
+        const response = await proxy.handleRequest(target_url, methodUpper, headers, {});
 
         const processingTime = Date.now() - startTime;
-        const isVerbose = String(req.get('x-verbose') || '').toLowerCase() === 'true';
 
-        const payload = isVerbose
-          ? {
-              status: response.status,
-              statusText: response.statusText || 'OK',
-              headers: response.headers,
-              data: response.data,
-              billing: {
-                cost: requiresPayment ? '$0.001' : '$0.000',
-                reason: response.cached ? 'cache_hit' : 'payment_processed',
-                idempotency_key: idempotencyKey,
-                processing_time_ms: processingTime,
-              },
-              meta: {
-                timestamp: new Date().toISOString(),
-                server_version: '2.0.0',
-                x402_version: x402Version,
-              },
-            }
-          : {
-              status: response.status,
-              statusText: response.statusText || 'OK',
-              headers: response.headers,
-              data: response.data,
-            };
-
-        return payload;
+        return {
+          status: response.status,
+          statusText: response.statusText || 'OK',
+          headers: response.headers,
+          data: response.data,
+          meta: {
+            cached: response.cached,
+            processing_ms: processingTime,
+            timestamp: new Date().toISOString(),
+          },
+        };
       } finally {
         processingRequests.delete(idempotencyKey);
       }
@@ -248,360 +145,39 @@ app.all('/proxy', async (req, res) => {
     processingRequests.set(idempotencyKey, requestPromise);
 
     const finalPayload = await requestPromise;
+    console.log(`✅ Request completed (${finalPayload.meta.cached ? 'cached' : 'fresh'})`);
+    
     return res.status(finalPayload.status).json(finalPayload);
-  } catch (error) {
-    console.error('Proxy request error:', error);
 
+  } catch (error) {
+    console.error('Proxy error:', error);
+    
     if (res.headersSent) return;
 
-    const msg = error?.message || String(error);
-
-    if (msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
-      return res.status(502).json({
-        error: 'Target API unreachable',
-        message: 'Unable to connect to the target API',
-        target_url: req.body?.target_url,
-      });
-    }
-
-    if (msg.toLowerCase().includes('timeout')) {
-      return res.status(504).json({
-        error: 'Request timeout',
-        message: 'Target API did not respond in time',
-        target_url: req.body?.target_url,
-      });
-    }
-
-    return res.status(500).json({
-      error: 'Internal server error',
-      message: 'An unexpected error occurred processing your request',
+    res.status(500).json({ 
+      error: 'Proxy request failed',
+      message: error.message,
       timestamp: new Date().toISOString(),
     });
   }
 });
 
-
-app.post('/node/join', async (req, res) => {
-  try {
-    const { pubkey_pem, alg, region, capabilities, contact } = req.body;
-    
-    if (!pubkey_pem || !alg) {
-      return res.status(400).json({ error: 'Missing pubkey or alg' });
-    }
-    
-    console.log(`\n📝 Join request received`);
-    console.log(`   Region: ${region || 'unspecified'}`);
-    console.log(`   Algorithm: ${alg}`);
-    
-    const pubkey = crypto.createPublicKey(pubkey_pem).export({ 
-      format: 'der', 
-      type: 'spki' 
-    });
-    
-    const joinReq = NodeStore.createJoinRequest({
-      pubkey,
-      alg,
-      ttlSeconds: 300
-    });
-    
-    console.log(`   ✓ Challenge nonce generated`);
-    console.log(`   Join ID: ${joinReq.id}`);
-    console.log(`   Expires: ${new Date(joinReq.expires_at * 1000).toISOString()}\n`);
-    
-    res.json({
-      join_id: joinReq.id,
-      challenge_nonce: joinReq.nonce,
-      expires_at: joinReq.expires_at,
-      next_step: `Sign the nonce and POST to /node/verify/${joinReq.id} with signature, ipv6, port, and test_endpoint`
-    });
-    
-  } catch (error) {
-    console.error('Join error:', error);
-    res.status(500).json({ error: 'Failed to create join request' });
-  }
-});
-
-app.post('/node/verify/:join_id', async (req, res) => {
-  const startTime = Date.now();
-  
-  try {
-    const { join_id } = req.params;
-    const { 
-      signature, 
-      ipv6, 
-      ipv4, 
-      port, 
-      region, 
-      capabilities, 
-      contact,
-      test_endpoint 
-    } = req.body;
-    
-    console.log(`\n🔐 Verifying join request: ${join_id}`);
-    
-    const joinReq = NodeStore.getJoin(join_id);
-    if (!joinReq) {
-      return res.status(404).json({ error: 'Join request not found' });
-    }
-    
-    if (Date.now() / 1000 > joinReq.expires_at) {
-      console.log(`   ❌ Join request expired\n`);
-      return res.status(410).json({ error: 'Join request expired' });
-    }
-    
-    if (joinReq.consumed_at) {
-      console.log(`   ❌ Join request already used\n`);
-      return res.status(409).json({ error: 'Join request already used' });
-    }
-    
-    if (!signature || !ipv6 || !port || !test_endpoint) {
-      return res.status(400).json({ 
-        error: 'Missing required fields',
-        required: ['signature', 'ipv6', 'port', 'test_endpoint']
-      });
-    }
-    
-    if (!ipv6.includes(':')) {
-      return res.status(400).json({
-        error: 'Invalid IPv6 address format'
-      });
-    }
-    
-    console.log(`   IPv6: ${ipv6}:${port}`);
-    console.log(`   Test endpoint: ${test_endpoint}`);
-    
-    console.log(`\n🔑 Verifying cryptographic signature...`);
-    const publicKey = crypto.createPublicKey({
-      key: joinReq.node_pubkey,
-      format: 'der',
-      type: 'spki'
-    });
-    
-    const isValid = crypto.verify(
-      joinReq.alg,
-      joinReq.nonce,
-      publicKey,
-      Buffer.from(signature, 'base64')
-    );
-    
-    if (!isValid) {
-      console.log(`   ❌ Invalid signature\n`);
-      return res.status(401).json({ error: 'Invalid signature' });
-    }
-    
-    console.log(`   ✅ Signature verified`);
-    
-    console.log(`\n🧪 Running benchmark tests...`);
-    const benchmarkResult = await benchmarkNode(test_endpoint);
-    
-    if (!benchmarkResult.passed) {
-      console.log(`   ❌ Benchmark failed with score: ${benchmarkResult.score}/100\n`);
-      
-      return res.status(400).json({
-        error: 'Node performance below minimum requirements',
-        score: benchmarkResult.score,
-        required_score: 60,
-        details: benchmarkResult.details,
-        message: 'Please ensure your node meets minimum hardware requirements'
-      });
-    }
-    
-    console.log(`   ✅ Benchmark passed with score: ${benchmarkResult.score}/100`);
-    
-    const nodeId = crypto.randomBytes(6).toString('hex');
-    const subdomain = `${nodeId}.consensus.canister.software`;
-    
-    console.log(`\n🆔 Generated node ID: ${nodeId}`);
-    console.log(`   Subdomain: ${subdomain}`);
-    
-    console.log(`\n🌍 Provisioning DNS...`);
-    try {
-      await provisionNodeDNS(subdomain, ipv6, ipv4);
-    } catch (dnsError) {
-      console.error(`   ❌ DNS provisioning failed: ${dnsError.message}\n`);
-      return res.status(500).json({
-        error: 'DNS provisioning failed',
-        message: dnsError.message
-      });
-    }
-    
-    console.log(`\n💾 Storing node in database...`);
-    const node = NodeStore.upsertNode({
-      id: nodeId,
-      pubkey: joinReq.node_pubkey,
-      alg: joinReq.alg,
-      region: region || null,
-      capabilities: {
-        ...capabilities,
-        benchmark_score: benchmarkResult.score,
-        fetch_latency: benchmarkResult.details.fetch.avg_latency_ms,
-        cpu_performance: benchmarkResult.details.cpu.hashes_per_second,
-        ipv6,
-        ipv4: ipv4 || null,
-        port
-      },
-      contact: contact || null,
-      status: 'active'
-    });
-    
-    NodeStore.setDomain(nodeId, subdomain, 'ipv6');
-    NodeStore.consumeJoin(join_id);
-    
-    console.log(`   ✅ Node stored successfully`);
-    
-    const processingTime = Date.now() - startTime;
-    
-    console.log(`\n✅ Node registration complete in ${processingTime}ms\n`);
-    console.log('='.repeat(60));
-    console.log('\n');
-    
-    res.json({
-      success: true,
-      node_id: nodeId,
-      domain: subdomain,
-      ipv6,
-      ipv4: ipv4 || null,
-      port,
-      status: 'active',
-      benchmark_score: benchmarkResult.score,
-      benchmark_details: benchmarkResult.details,
-      gateway_url: 'https://consensus.canister.software:8888',
-      processing_time_ms: processingTime,
-      message: 'Node registered successfully',
-      next_steps: [
-        'DNS propagation may take up to 5 minutes',
-        'Your node is now part of the Consensus network',
-        'Start sending heartbeats to maintain active status',
-        'Monitor your node at /node/status/' + nodeId
-      ]
-    });
-    
-  } catch (error) {
-    console.error('❌ Verification error:', error);
-    res.status(500).json({
-      error: 'Verification failed',
-      message: error.message
-    });
-  }
-});
-
-app.get('/node/status/:node_id', (req, res) => {
-  const { node_id } = req.params;
-  
-  const node = NodeStore.getNode(node_id);
-  
-  if (!node) {
-    return res.status(404).json({
-      error: 'Node not found'
-    });
-  }
-  
-  res.json({
-    node_id: node.id,
-    domain: node.domain,
-    status: node.status,
-    region: node.region,
-    capabilities: node.capabilities,
-    created_at: node.created_at,
-    updated_at: node.updated_at,
-    heartbeat: node.heartbeat
-  });
-});
-
-app.get('/nodes', (req, res) => {
-  const nodes = NodeStore.listNodes();
-  
-  res.json({
-    total: nodes.length,
-    nodes: nodes.map(node => ({
-      node_id: node.id,
-      domain: node.domain,
-      status: node.status,
-      region: node.region,
-      benchmark_score: node.capabilities?.benchmark_score,
-      ipv6: node.capabilities?.ipv6,
-      ipv4: node.capabilities?.ipv4,
-      port: node.capabilities?.port,
-      created_at: node.created_at,
-      heartbeat: node.heartbeat
-    }))
-  });
-});
-
-app.post('/node/update-ip/:node_id', async (req, res) => {
-  try {
-    const { node_id } = req.params;
-    const { ipv6, ipv4 } = req.body;
-    
-    const node = NodeStore.getNode(node_id);
-    if (!node) {
-      return res.status(404).json({ error: 'Node not found' });
-    }
-    
-    console.log(`\n🔄 Updating IP for node ${node_id}`);
-    console.log(`   New IPv6: ${ipv6}`);
-    if (ipv4) console.log(`   New IPv4: ${ipv4}`);
-    
-    await updateNodeDNS(node.domain, ipv6, ipv4);
-    
-    const updatedCapabilities = {
-      ...node.capabilities,
-      ipv6,
-      ipv4: ipv4 || null
-    };
-    
-    NodeStore.upsertNode({
-      id: node_id,
-      pubkey: node.pubkey,
-      alg: node.alg,
-      region: node.region,
-      capabilities: updatedCapabilities,
-      contact: node.contact,
-      status: node.status
-    });
-    
-    console.log(`   ✅ IP updated successfully\n`);
-    
-    res.json({
-      success: true,
-      message: 'IP updated successfully',
-      node_id,
-      ipv6,
-      ipv4: ipv4 || null
-    });
-    
-  } catch (error) {
-    console.error('IP update error:', error);
-    res.status(500).json({
-      error: 'IP update failed',
-      message: error.message
-    });
-  }
-});
-
-app.use((error, req, res, next) => {
-  console.error('Unhandled error:', error);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: 'An unexpected error occurred',
-    timestamp: new Date().toISOString()
-  });
-});
-
-['SIGTERM', 'SIGINT'].forEach(signal => process.on(signal, () => { 
-  console.log(`\n${signal} received, shutting down gracefully...`);
-  process.exit(0); 
-}));
-
 const server = https.createServer(
   {
-    key:  fs.readFileSync(MAIN_TLS_KEY),
+    key: fs.readFileSync(MAIN_TLS_KEY),
     cert: fs.readFileSync(MAIN_TLS_CERT),
   },
   app
 );
 
-server.listen(port, '::', () => {
-  console.log(`Consensus Server v2.0.0 (Multi-Chain x402) on https://consensus.canister.software:${port}`);
-  console.log(`Payment networks: Base Sepolia (EVM), Solana Devnet (SVM)`);
+server.listen(PORT, '::', () => {
+  console.log(`\n🚀 Consensus x402 Deduplication Server`);
+  console.log(`   URL: https://consensus.canister.software:${PORT}`);
+});
+
+['SIGTERM', 'SIGINT'].forEach(signal => {
+  process.on(signal, () => {
+    console.log(`\n${signal} received, shutting down...`);
+    server.close(() => process.exit(0));
+  });
 });
