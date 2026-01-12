@@ -12,6 +12,7 @@
     "@coinbase/cdp-sdk": "^1.25.0",
     "@scure/base": "^2.0.0",
     "@solana/kit": "^2.3.0",
+    "@solana/signers": "^5.3.0",
     "@x402/core": "^2.1.0",
     "@x402/evm": "^2.1.0",
     "@x402/fetch": "^2.1.0",

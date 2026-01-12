@@ -14,6 +14,8 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { x402Client } from '@x402/core/client';
 import { registerExactEvmScheme } from '@x402/evm/exact/client';
+import { registerExactSvmScheme } from '@x402/svm/exact/client';
+import { createKeyPairSignerFromBytes } from '@solana/signers';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -53,21 +55,29 @@ function validateApiKey(req, res, next) {
   req.walletName = walletData.walletName;
   req.walletData = {
     evm_address: walletData.evmAddress,
+    solana_address: walletData.solanaAddress
   };
   
   next();
 }
 
-async function createWallet(evmPrivateKey, evmAddress) {
+async function createWallet(evmPrivateKey, evmAddress, solanaPrivateKey, solanaAddress) {
   const formattedEvmKey = evmPrivateKey.startsWith('0x') ? evmPrivateKey : `0x${evmPrivateKey}`;
   const evmSigner = privateKeyToAccount(formattedEvmKey);
   
   if (evmSigner.address.toLowerCase() !== evmAddress.toLowerCase()) {
     throw new Error('EVM address mismatch');
   }
+  const solanaKeypair = base58.decode(solanaPrivateKey);
+  const svmSigner = await createKeyPairSignerFromBytes(solanaKeypair);
+  
+  if (svmSigner.address !== solanaAddress) {
+    throw new Error('Solana address mismatch');
+  }
 
   const client = new x402Client();
   registerExactEvmScheme(client, { signer: evmSigner });
+  registerExactSvmScheme(client, { signer: svmSigner });
 
   return wrapFetchWithPayment(enhancedFetch, client);
 }
@@ -80,11 +90,14 @@ async function restoreWallets() {
     wallets.map(async (wallet) => {
       const fetchWithPayment = await createWallet(
         wallet.evmPrivateKey,
-        wallet.evmAddress
+        wallet.evmAddress,
+        wallet.solanaPrivateKey,
+        wallet.solanaAddress
       );
       
       registeredWallets.set(wallet.walletName, {
         evm_address: wallet.evmAddress,
+        solana_address: wallet.solanaAddress
       });
       
       walletClients.set(wallet.walletName, fetchWithPayment);
@@ -100,9 +113,10 @@ async function restoreWallets() {
 
 app.post('/register-wallet', async (req, res) => {
   try {
-    const { wallet_name, evm } = req.body;
+    const { wallet_name, evm, solana } = req.body;
     
-    if (!wallet_name || !evm?.address || !evm?.private_key) {
+    if (!wallet_name || !evm?.address || !evm?.private_key || 
+        !solana?.address || !solana?.private_key) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
@@ -110,17 +124,24 @@ app.post('/register-wallet', async (req, res) => {
       return res.status(409).json({ error: 'Wallet already registered' });
     }
 
-    const fetchWithPayment = await createWallet(evm.private_key, evm.address);
-    
+    const fetchWithPayment = await createWallet(
+      evm.private_key,
+      evm.address,
+      solana.private_key,
+      solana.address
+    );
     const storeResult = walletStore.storeMultiChainWallet(
       wallet_name,
       evm.address,
       evm.private_key,
-      null, // No Solana
-      null
+      solana.address,
+      solana.private_key
     );
     
-    registeredWallets.set(wallet_name, { evm_address: evm.address });
+    registeredWallets.set(wallet_name, {
+      evm_address: evm.address,
+      solana_address: solana.address
+    });
     walletClients.set(wallet_name, fetchWithPayment);
     
     console.log(`✓ Registered wallet: ${wallet_name}`);
@@ -128,6 +149,7 @@ app.post('/register-wallet', async (req, res) => {
       success: true,
       wallet_name,
       evm_address: evm.address,
+      solana_address: solana.address,
       api_key: storeResult.apiKey
     });
     
@@ -208,6 +230,7 @@ app.get('/health', (req, res) => {
     wallets: registeredWallets.size,
     database: dbInfo?.walletCount || 0,
     server: consensusServerUrl,
+    chains: ['evm', 'solana']
   });
 });
 
