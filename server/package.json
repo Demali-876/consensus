@@ -2,6 +2,7 @@
   "name": "server",
   "version": "1.0.0",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js"
@@ -12,16 +13,22 @@
   "description": "",
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.25.0",
+    "@x402/core": "^2.1.0",
+    "@x402/evm": "^2.1.0",
+    "@x402/express": "^2.1.0",
+    "@x402/next": "^2.1.0",
+    "@x402/svm": "^2.1.0",
     "axios": "^1.11.0",
+    "better-sqlite3": "^12.2.0",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.0",
-    "express": "^4.18.2",
-    "express-rate-limit": "^7.1.5",
-    "helmet": "^7.1.0",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.1",
+    "fast-xml-parser": "^5.3.2",
+    "helmet": "^7.2.0",
     "node-cache": "^5.1.2",
     "viem": "^2.31.7",
-    "x402": "^0.4.1",
-    "x402-express": "^0.4.2",
+    "x402": "^0.4.3",
     "x402-fetch": "^0.4.1"
   }
 }

@@ -5,4 +5,5 @@
 yarn.lock
 main.key
 main.csr
-/node-certs
+.consensus-node.key
+.consensus-node.pub

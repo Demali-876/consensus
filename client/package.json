@@ -1,7 +1,7 @@
 {
-  "name": "consensus",
-  "version": "1.0.0",
-  "description": "Consensus SDK for HTTP API deduplication with x402 payments",
+  "name": "@canister-software/consensus-cli",
+  "version": "0.1.0-beta.3",
+  "description": "Consensus SDK for interacting with the Consensus protocol",
   "type": "module",
   "bin": {
     "consensus": "./bin/consensus.js"
@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.25.0",
+    "@scure/base": "^2.0.0",
+    "@solana/kit": "^5.1.0",
     "chalk": "^5.4.1",
     "chalk-animation": "^2.0.3",
     "dotenv": "^16.4.5",
@@ -27,11 +29,19 @@
     "api",
     "deduplication",
     "x402",
-    "payments"
+    "payments",
+    "HTTPS",
+    "cli"
   ],
   "author": "Demali Gregg",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE",
+    "assets/"
+  ]
 }

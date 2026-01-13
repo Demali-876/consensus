@@ -1,4 +1,6 @@
 .consensus.config
-
-# Ignore consensus config
 .consensus-config.json
+/certs
+/scripts/certs/*
+/scripts/mtls-certs/*
+/logs

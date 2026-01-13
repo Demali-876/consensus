@@ -1,0 +1,48 @@
+{
+  "name": "@canister-software/consensus-node",
+  "version": "0.1.0-beta.5",
+  "description": "Consensus Network Node - Join the decentralized proxy network (BETA)",
+  "main": "src/node-instance.js",
+  "type": "module",
+  "bin": {
+    "consensus-node": "bin/consensus-node.js"
+  },
+  "scripts": {
+    "start": "node src/node-instance.js",
+    "register": "node src/register.js",
+    "test": "node src/tests/test-benchmark.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.1",
+    "fast-xml-parser": "^5.3.2",
+    "helmet": "^7.2.0",
+    "inquirer": "^13.0.2",
+    "node-cache": "^5.1.2",
+    "undici": "^7.13.0"
+  },
+  "keywords": [
+    "consensus",
+    "proxy",
+    "node",
+    "distributed",
+    "network",
+    "ipv6",
+    "decentralized"
+  ],
+  "author": "Demali Gregg",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    "README.md",
+    "LICENSE",
+    "assets/"
+  ]
+}
