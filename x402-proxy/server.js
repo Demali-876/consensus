@@ -13,6 +13,7 @@ import { WalletStore } from './data/store.js';
 import { privateKeyToAccount } from 'viem/accounts';
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { x402Client } from '@x402/core/client';
+import { base58 } from '@scure/base';
 import { registerExactEvmScheme } from '@x402/evm/exact/client';
 import { registerExactSvmScheme } from '@x402/svm/exact/client';
 import { createKeyPairSignerFromBytes } from '@solana/signers';
@@ -35,7 +36,7 @@ const enhancedFetch = (url, options = {}) => {
 
 const app = express();
 const port = process.env.X402_PROXY_PORT || 3001;
-const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software:8888';
+const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software:8080';
 const walletStore = new WalletStore();
 const registeredWallets = new Map();
 const walletClients = new Map();
@@ -159,38 +160,30 @@ app.post('/register-wallet', async (req, res) => {
   }
 });
 
-// Renamed from /proxy to /fetch
-app.post('/fetch', validateApiKey, async (req, res) => {
+app.post("/fetch", validateApiKey, async (req, res) => {
   const startTime = Date.now();
-  
+
   try {
-    const { target_url, method = 'GET', headers = {} } = req.body;
+    const { target_url, method = "GET", headers = {}, body } = req.body;
     const walletName = req.walletName;
-    
+
     if (!target_url) {
-      return res.status(400).json({ error: 'Missing target_url' });
+      return res.status(400).json({ error: "Missing target_url" });
     }
-
-    const idempotencyKey = headers['x-idempotency-key'] || 
-                          `${Date.now()}-${crypto.randomBytes(16).toString('hex')}`;
-
-    console.log(`${method} request with key: ${idempotencyKey}`);
 
     const fetchWithPayment = walletClients.get(walletName);
     if (!fetchWithPayment) {
-      throw new Error('Wallet not registered');
+      throw new Error("Wallet not registered");
     }
 
-    // Call main server's /proxy endpoint (which handles payment + deduplication)
-    const response = await fetchWithPayment(consensusServerUrl + '/proxy', {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-      },
+    const response = await fetchWithPayment(consensusServerUrl + "/proxy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         target_url,
         method,
-        headers: { 'x-idempotency-key': idempotencyKey, ...headers },
+        headers,
+        body,
       }),
     });
 
@@ -200,28 +193,22 @@ app.post('/fetch', validateApiKey, async (req, res) => {
     }
 
     const responseData = await response.json();
-    
-    const fullResponse = {
+
+    res.json({
       ...responseData,
       meta: {
         ...(responseData.meta || {}),
         wallet: walletName,
         evm_address: req.walletData.evm_address,
-        idempotency_key: idempotencyKey,
         processing_ms: Date.now() - startTime,
-      }
-    };
-
-    res.json(fullResponse);
-
-  } catch (error) {
-    console.error('Fetch error:', error.message);
-    res.status(500).json({
-      error: 'Request failed',
-      message: error.message
+      },
     });
+  } catch (error) {
+    console.error("Fetch error:", error.message);
+    res.status(500).json({ error: "Request failed", message: error.message });
   }
 });
+
 
 app.get('/health', (req, res) => {
   const dbInfo = walletStore.getDatabaseInfo();
