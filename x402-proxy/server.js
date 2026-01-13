@@ -259,10 +259,8 @@ async function boot() {
     }, app);
     
     server.listen(port, '0.0.0.0', () => {
-      console.log(`\n🔐 x402 Proxy Service`);
-      console.log(`   URL: https://consensus.proxy.canister.software:${port}`);
-      console.log(`   Endpoint: POST /fetch`);
-      console.log(`   Main server: ${consensusServerUrl}\n`);
+      console.log(`x402 Proxy Service`);
+      console.log(`https://consensus.proxy.canister.software:8888`);
     });
   } catch (error) {
     console.error('Boot failed:', error.message);

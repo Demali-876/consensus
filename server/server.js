@@ -158,8 +158,8 @@ const server = https.createServer(
 );
 
 server.listen(PORT, "::", () => {
-  console.log(`\n Consensus x402 Deduplication Server`);
-  console.log(`   URL: https://consensus.canister.software:${PORT}`);
+  console.log(`Consensus x402 Proxy Service`);
+  console.log(`URL: https://consensus.canister.software:8888`);
 });
 
 ["SIGTERM", "SIGINT"].forEach((signal) => {
