@@ -6,7 +6,7 @@ import {
   calculateSessionLimits,
   bytesToMB,
   msToMinutes,
-} from ".utils/types.js";
+} from "./utils/types.js";
 
 const sessions = new Map();
 const pendingSessions = new Map();
