@@ -1,8 +1,8 @@
 import NodeCache from "node-cache";
 import axios from "axios";
 import zlib from "zlib";
-import { promisify } from "util";
 import crypto from "crypto";
+import { promisify } from "util";
 import { URL } from "url";
 
 const gunzipAsync = promisify(zlib.gunzip);
@@ -104,15 +104,26 @@ function generateDedupeKey({ target_url, method, headers = {}, body }) {
     body_hash: computeBodyHash(body, contentType),
   };
 
-  return sha256Hex(stableStringify(canonical));
+  const key = sha256Hex(stableStringify(canonical));
+
+  console.log(`[Dedupe] ${key.substring(0, 12)}... | ${method} ${target_url}`);
+
+  return key;
 }
 
 export default class ConsensusProxy {
   constructor() {
-    this.cache = new NodeCache({ stdTTL: 300 });
+    this.cache = new NodeCache({
+      stdTTL: 300,
+      checkperiod: 60,
+      useClones: false,
+      maxKeys: 10000
+    });
+
     this.pendingRequests = new Map();
     this.paidKeys = new Map();
     this.stats = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
+    
     setInterval(() => this.cleanupExpiredKeys(), 60000);
   }
 
@@ -128,14 +139,21 @@ export default class ConsensusProxy {
     this.paidKeys.delete(dedupeKey);
   }
 
-  async handleRequest(target_url, method, headers = {}, body) {
+  async handleRequest(target_url, method, headers = {}, body, cacheTTL) {
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
+
+    const requestedTTL = cacheTTL || 
+                         parseInt(headers['cache-ttl'] || headers['x-cache-ttl'] || headers['X-Cache-TTL']) || 
+                         300;
+
+    const ttl = Math.max(1, requestedTTL);
 
     this.stats.total_requests++;
 
     const cached = this.cache.get(dedupeKey);
     if (cached) {
       this.stats.cache_hits++;
+      console.log(`[Cache HIT] ${dedupeKey.substring(0, 12)}...`);
       return { ...cached, cached: true, payment_required: false, dedupe_key: dedupeKey };
     }
 
@@ -143,6 +161,7 @@ export default class ConsensusProxy {
       try {
         const response = await this.pendingRequests.get(dedupeKey);
         this.stats.cache_hits++;
+        console.log(`[Cache HIT - Pending] ${dedupeKey.substring(0, 12)}...`);
         return { ...response, cached: true, payment_required: false, dedupe_key: dedupeKey };
       } catch (error) {
         this.pendingRequests.delete(dedupeKey);
@@ -150,10 +169,12 @@ export default class ConsensusProxy {
     }
 
     this.stats.cache_misses++;
+    console.log(`[Cache MISS] ${dedupeKey.substring(0, 12)}... | TTL: ${ttl}s`);
 
     const requestPromise = this.makeRequest(target_url, method, headers, body)
       .then((response) => {
-        this.cache.set(dedupeKey, response);
+        this.cache.set(dedupeKey, response, ttl);
+        console.log(`[Cache STORED] ${dedupeKey.substring(0, 12)}... | TTL: ${ttl}s`);
         this.pendingRequests.delete(dedupeKey);
         return response;
       })
@@ -186,6 +207,8 @@ export default class ConsensusProxy {
     delete cleanHeaders["X-Verbose"];
     delete cleanHeaders["x-api-key"];
     delete cleanHeaders["X-Api-Key"];
+    delete cleanHeaders["x-cache-ttl"];
+    delete cleanHeaders["X-Cache-TTL"];
 
     const config = {
       method: String(method).toLowerCase(),
@@ -257,6 +280,9 @@ export default class ConsensusProxy {
       total_requests: this.stats.total_requests,
       cache_hits: this.stats.cache_hits,
       cache_misses: this.stats.cache_misses,
+      hit_rate: this.stats.total_requests > 0 
+        ? ((this.stats.cache_hits / this.stats.total_requests) * 100).toFixed(2) + '%'
+        : '0%',
       cache_stats: this.cache.getStats(),
     };
   }
