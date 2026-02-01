@@ -14,6 +14,7 @@ import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { registerWhitepaperSignup } from "./data/whitepaperSignup.js";
 import { registerWebSocket } from "./wss.js";
+import { registerNodes } from "./orchestrator.js";
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +55,11 @@ const wsStats = registerWebSocket(app, server, x402Server, {
   SOLANA_PAY_TO,
 });
 
+const nodeStats = registerNodes(app, server, x402Server, {
+  EVM_PAY_TO,
+  SOLANA_PAY_TO,
+});
+
 app.get("/", (req, res) => {
   res.json({
     name: "Consensus x402 Server",
@@ -70,6 +76,7 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   const stats = proxy.getStats();
   const ws = wsStats.getStats();
+  const nodes = nodeStats.getStats();
   res.json({
     status: "healthy",
     timestamp: new Date().toISOString(),
@@ -78,7 +85,8 @@ app.get("/health", (req, res) => {
     total_requests: stats.total_requests,
     cache_hits: stats.cache_hits
   },
-    websocket: ws
+    websocket: ws,
+    nodes: nodes
   });
 });
 

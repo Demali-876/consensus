@@ -1,4 +1,3 @@
-// data/node_store.js
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import path from 'path';
@@ -17,14 +16,19 @@ CREATE TABLE IF NOT EXISTS nodes (
   pubkey BLOB NOT NULL,
   alg TEXT NOT NULL,
   region TEXT,
-  capabilities TEXT,            -- JSON
+  capabilities TEXT,
   contact TEXT,
+  evm_address TEXT,
+  solana_address TEXT,
   status TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   domain TEXT,
   tls_mode TEXT
 );
+
+CREATE INDEX IF NOT EXISTS nodes_evm_address_idx ON nodes(evm_address);
+CREATE INDEX IF NOT EXISTS nodes_solana_address_idx ON nodes(solana_address);
 
 CREATE TABLE IF NOT EXISTS heartbeats (
   node_id TEXT NOT NULL,
@@ -34,8 +38,8 @@ CREATE TABLE IF NOT EXISTS heartbeats (
   created_at INTEGER NOT NULL,
   FOREIGN KEY (node_id) REFERENCES nodes(id)
 );
-CREATE INDEX IF NOT EXISTS heartbeats_node_created_idx
-  ON heartbeats(node_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS heartbeats_node_created_idx ON heartbeats(node_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS join_requests (
   id TEXT PRIMARY KEY,
@@ -49,50 +53,46 @@ CREATE TABLE IF NOT EXISTS join_requests (
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
-// --- Helpers ---
 function toJson(value) {
   return value == null ? null : JSON.stringify(value);
 }
+
 function fromJson(value, fallback) {
   if (!value) return fallback ?? null;
   try { return JSON.parse(value); } catch { return fallback ?? null; }
 }
+
 function b64url(buffer) {
   return Buffer.from(buffer).toString('base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-// --- Prepared statements ---
 const upsertNodeInsertStmt = db.prepare(`
-  INSERT INTO nodes (id, pubkey, alg, region, capabilities, contact, status, created_at, updated_at, domain, tls_mode)
-  VALUES (@id, @pubkey, @alg, @region, @capabilities, @contact, @status, @created_at, @updated_at, NULL, NULL)
+  INSERT INTO nodes (id, pubkey, alg, region, capabilities, contact, evm_address, solana_address, status, created_at, updated_at, domain, tls_mode)
+  VALUES (@id, @pubkey, @alg, @region, @capabilities, @contact, @evm_address, @solana_address, @status, @created_at, @updated_at, NULL, NULL)
   ON CONFLICT(id) DO UPDATE SET
     pubkey=excluded.pubkey,
     alg=excluded.alg,
     region=excluded.region,
     capabilities=excluded.capabilities,
     contact=excluded.contact,
+    evm_address=excluded.evm_address,
+    solana_address=excluded.solana_address,
     status=excluded.status,
     updated_at=excluded.updated_at
 `);
 
 const updateDomainStmt = db.prepare(`
-  UPDATE nodes
-  SET domain = ?, tls_mode = ?, updated_at = ?
-  WHERE id = ?
+  UPDATE nodes SET domain = ?, tls_mode = ?, updated_at = ? WHERE id = ?
 `);
 
 const getNodeStmt = db.prepare(`
-  SELECT
-    n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.status,
-    n.created_at, n.updated_at, n.domain, n.tls_mode
-  FROM nodes n
-  WHERE n.id = ?
+  SELECT n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.evm_address, n.solana_address, n.status, n.created_at, n.updated_at, n.domain, n.tls_mode
+  FROM nodes n WHERE n.id = ?
 `);
 
 const insertHeartbeatStmt = db.prepare(`
-  INSERT INTO heartbeats (node_id, rps, p95_ms, version, created_at)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT INTO heartbeats (node_id, rps, p95_ms, version, created_at) VALUES (?, ?, ?, ?, ?)
 `);
 
 const touchNodeStmt = db.prepare(`
@@ -101,63 +101,51 @@ const touchNodeStmt = db.prepare(`
 
 const listNodesWithLatestHeartbeatStmt = db.prepare(`
   SELECT
-    n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.status,
+    n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.evm_address, n.solana_address, n.status,
     n.created_at, n.updated_at, n.domain, n.tls_mode,
     hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
   FROM nodes n
   LEFT JOIN (
-    SELECT h.*
-    FROM heartbeats h
-    WHERE h.rowid IN (
-      SELECT MAX(rowid) FROM heartbeats GROUP BY node_id
-    )
+    SELECT h.* FROM heartbeats h WHERE h.rowid IN (SELECT MAX(rowid) FROM heartbeats GROUP BY node_id)
   ) hb ON hb.node_id = n.id
   ORDER BY n.created_at DESC
 `);
 
 const getNodeWithLatestHeartbeatStmt = db.prepare(`
   SELECT
-    n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.status,
+    n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.evm_address, n.solana_address, n.status,
     n.created_at, n.updated_at, n.domain, n.tls_mode,
     hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
   FROM nodes n
   LEFT JOIN (
-    SELECT h.*
-    FROM heartbeats h
-    WHERE h.node_id = ?
-    ORDER BY h.rowid DESC
-    LIMIT 1
+    SELECT h.* FROM heartbeats h WHERE h.node_id = ? ORDER BY h.rowid DESC LIMIT 1
   ) hb ON hb.node_id = n.id
   WHERE n.id = ?
 `);
 
-
 const insertJoinStmt = db.prepare(`
-  INSERT INTO join_requests (id, node_pubkey, alg, nonce, expires_at, consumed_at)
-  VALUES (?, ?, ?, ?, ?, NULL)
+  INSERT INTO join_requests (id, node_pubkey, alg, nonce, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, NULL)
 `);
 
 const getJoinStmt = db.prepare(`
-  SELECT id, node_pubkey, alg, nonce, expires_at, consumed_at
-  FROM join_requests
-  WHERE id = ?
+  SELECT id, node_pubkey, alg, nonce, expires_at, consumed_at FROM join_requests WHERE id = ?
 `);
 
 const consumeJoinStmt = db.prepare(`
-  UPDATE join_requests
-  SET consumed_at = ?
-  WHERE id = ? AND consumed_at IS NULL
+  UPDATE join_requests SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL
 `);
 
 function rowToNode(row) {
   if (!row) return null;
   return {
     id: row.id,
-    pubkey: row.pubkey,                 // Buffer
+    pubkey: row.pubkey,
     alg: row.alg,
     region: row.region,
     capabilities: fromJson(row.capabilities, {}),
     contact: row.contact,
+    evm_address: row.evm_address,
+    solana_address: row.solana_address,
     status: row.status,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -172,9 +160,7 @@ function rowToNode(row) {
   };
 }
 
-// --- API ---
 export const NodeStore = {
-  // Create or update a node
   upsertNode(input) {
     const ts = nowSec();
     const payload = {
@@ -184,12 +170,14 @@ export const NodeStore = {
       region: input.region ?? null,
       capabilities: toJson(input.capabilities ?? {}),
       contact: input.contact ?? null,
+      evm_address: input.evm_address ?? null,
+      solana_address: input.solana_address ?? null,
       status: input.status ?? 'provisioning',
       created_at: ts,
       updated_at: ts
     };
     upsertNodeInsertStmt.run(payload);
-    return this.getNode(input.id); // return fresh record with latest heartbeat if any
+    return this.getNode(input.id);
   },
 
   getNode(id) {
@@ -216,17 +204,14 @@ export const NodeStore = {
     return this.getNode(id);
   },
 
-  // --- Join flow ---
   createJoinRequest({ pubkey, alg, ttlSeconds = 300 }) {
-    const id = crypto.randomBytes(8).toString('hex'); // e.g., 'cd6842fce6396c48'
+    const id = crypto.randomBytes(8).toString('hex');
     const nonce = crypto.randomBytes(32);
     const expires_at = nowSec() + Math.max(60, ttlSeconds);
-
     insertJoinStmt.run(id, pubkey, alg, nonce, expires_at);
-
     return {
       id,
-      nonce: b64url(nonce), // base64url string for transport
+      nonce: b64url(nonce),
       alg,
       expires_at
     };
@@ -239,7 +224,7 @@ export const NodeStore = {
       id: row.id,
       node_pubkey: row.node_pubkey,
       alg: row.alg,
-      nonce: row.nonce,                 // Buffer
+      nonce: row.nonce,
       expires_at: row.expires_at,
       consumed_at: row.consumed_at ?? null,
       nonce_b64: b64url(row.nonce)
