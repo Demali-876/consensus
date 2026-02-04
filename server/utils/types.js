@@ -37,14 +37,28 @@ export function calculateSessionLimits(pricing, paidMinutes, paidMegabytes) {
   let dataLimit;
   
   if (pricing.model === 'time') {
-    timeLimit = (paidMinutes || 0) * 60 * 1000;
-    dataLimit = (paidMinutes || 0) * 100 * CONVERSIONS.BYTES_PER_MB;
+    const cappedMinutes = Math.min(paidMinutes || 0, 1440);
+    timeLimit = cappedMinutes * 60 * 1000;
+    
+    const timePremium = pricing.pricePerMinute - PRICING_PRESETS.HYBRID.pricePerMinute;
+    const hybridDataPrice = PRICING_PRESETS.HYBRID.pricePerMB;
+    const dataPerMinute = (timePremium / hybridDataPrice) * 0.5;
+    const calculatedCapMB = cappedMinutes * dataPerMinute;
+    
+    const absoluteMaxMB = 500;
+    dataLimit = Math.min(calculatedCapMB, absoluteMaxMB) * CONVERSIONS.BYTES_PER_MB;
+    
   } else if (pricing.model === 'data') {
-    dataLimit = (paidMegabytes || 0) * CONVERSIONS.BYTES_PER_MB;
-    timeLimit = 60 * 60 * 1000;
+    const cappedMegabytes = Math.min(paidMegabytes || 0, 10240);
+    dataLimit = cappedMegabytes * CONVERSIONS.BYTES_PER_MB;
+    timeLimit = 24 * 60 * 60 * 1000;
+    
   } else {
-    timeLimit = (paidMinutes || 0) * 60 * 1000;
-    dataLimit = (paidMegabytes || 0) * CONVERSIONS.BYTES_PER_MB;
+    const cappedMinutes = Math.min(paidMinutes || 0, 1440);
+    timeLimit = cappedMinutes * 60 * 1000;
+    
+    const cappedMegabytes = Math.min(paidMegabytes || 0, 10240);
+    dataLimit = cappedMegabytes * CONVERSIONS.BYTES_PER_MB;
   }
   
   return { timeLimit, dataLimit };
@@ -61,17 +75,21 @@ export function msToMinutes(ms) {
 export const PRICING_PRESETS = {
   TIME: {
     model: 'time',
-    pricePerMinute: 0.0005,
+    pricePerMinute: 0.001,
     pricePerMB: 0,
     minTimeSeconds: 60,
     minDataMB: 0,
+    maxTimeHours: 24,
+    maxDataMB: 500,
   },
   DATA: {
     model: 'data',
     pricePerMinute: 0,
-    pricePerMB: 0.0001,
+    pricePerMB: 0.00012,
     minTimeSeconds: 0,
     minDataMB: 10,
+    maxDataGB: 10,
+    maxTimeHours: 24,
   },
   HYBRID: {
     model: 'hybrid',
@@ -79,5 +97,7 @@ export const PRICING_PRESETS = {
     pricePerMB: 0.0001,
     minTimeSeconds: 60,
     minDataMB: 10,
+    maxTimeHours: 24,
+    maxDataGB: 10,
   }
 };

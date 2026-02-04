@@ -4,6 +4,7 @@ import { paymentMiddleware } from "@x402/express";
 import {
   PRICING_PRESETS,
   calculateSessionLimits,
+  calculateSessionCost,
   bytesToMB,
   msToMinutes,
 } from "./utils/types.js";
@@ -20,7 +21,7 @@ const TOKEN_TTL_MS = 60_000;
  * @param {Object} config - Configuration
  */
 export function registerWebSocket(app, httpsServer, x402Server, config){
-  const  {EVM_PAY_TO, SOLANA_PAY_TO } = config;
+  const { EVM_PAY_TO, SOLANA_PAY_TO } = config;
 
   app.get(
     "/ws",
@@ -35,13 +36,9 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
                 const minutes = parseInt(context.adapter.getQueryParam?.("minutes") ?? "5");
                 const megabytes = parseInt(context.adapter.getQueryParam?.("megabytes") ?? "50");
 
-                let cost = 0;
-                if (model === "time" || model === "hybrid") {
-                  cost += minutes * 0.0005;
-                }
-                if (model === "data" || model === "hybrid") {
-                  cost += megabytes * 0.0001;
-                }
+                const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+                const pricing = PRICING_PRESETS[pricingKey];
+                const cost = calculateSessionCost(pricing, minutes, megabytes);
 
                 return `$${cost.toFixed(4)}`;
               },
@@ -55,13 +52,9 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
                 const minutes = parseInt(context.adapter.getQueryParam?.("minutes") ?? "5");
                 const megabytes = parseInt(context.adapter.getQueryParam?.("megabytes") ?? "50");
 
-                let cost = 0;
-                if (model === "time" || model === "hybrid") {
-                  cost += minutes * 0.0005;
-                }
-                if (model === "data" || model === "hybrid") {
-                  cost += megabytes * 0.0001;
-                }
+                const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+                const pricing = PRICING_PRESETS[pricingKey];
+                const cost = calculateSessionCost(pricing, minutes, megabytes);
 
                 return `$${cost.toFixed(4)}`;
               },
@@ -92,6 +85,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
       });
     }
   );
+
   const wss = new WebSocketServer({noServer: true});
 
   httpsServer.on("upgrade", (req, socket, head) => {
@@ -101,41 +95,37 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
       socket.destroy();
       return;
     }
+
     const token = url.searchParams.get("token");
     const pending = token ? pendingSessions.get(token) : null;
     
     if (!pending){
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
+      return;
     }
+
     if (pending.expires < Date.now()) {
       pendingSessions.delete(token);
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
     }
+
     pendingSessions.delete(token);
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.purchase = pending;
       wss.emit("connection", ws, req);
     });
-  })
+  });
 
   wss.on("connection", (ws, req) => {
     const { model, minutes, megabytes } = ws.purchase;
 
     const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
     const pricing = PRICING_PRESETS[pricingKey];
-
-    let totalCost = 0;
-    if (model === "time" || model === "hybrid") {
-      totalCost += minutes * pricing.pricePerMinute;
-    }
-    if (model === "data" || model === "hybrid") {
-      totalCost += megabytes * pricing.pricePerMB;
-    }
-
+    const totalCost = calculateSessionCost(pricing, minutes, megabytes);
     const limits = calculateSessionLimits(pricing, minutes, megabytes);
 
     const sessionId = crypto.randomUUID();
@@ -253,5 +243,4 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
       pending_tokens: pendingSessions.size,
     }),
   };
-
 }
