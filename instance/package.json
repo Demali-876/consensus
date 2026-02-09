@@ -1,16 +1,17 @@
 {
   "name": "@canister-software/consensus-node",
   "version": "0.1.0-beta.5",
-  "description": "Consensus Network Node - Join the decentralized proxy network (BETA)",
-  "main": "src/node-instance.js",
+  "description": "Consensus Network instance - Join the decentralized network (BETA)",
+  "main": "dist/node-instance.js",
   "type": "module",
   "bin": {
-    "consensus-node": "bin/consensus-node.js"
+    "consensus-instance": "bin/consensus-node.js"
   },
   "scripts": {
-    "start": "node src/node-instance.js",
-    "register": "node src/register.js",
-    "test": "node src/tests/test-benchmark.js"
+    "build": "tsc",
+    "start": "node dist/node-instance.js",
+    "register": "node dist/register.js",
+    "test": "node dist/tests/test-benchmark.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
@@ -24,9 +25,14 @@
     "node-cache": "^5.1.2",
     "undici": "^7.13.0"
   },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
   "keywords": [
     "consensus",
     "proxy",
+    "websockets",
+    "ipv4",
     "node",
     "distributed",
     "network",
@@ -39,7 +45,7 @@
     "node": ">=18.0.0"
   },
   "files": [
-    "src/",
+    "dist/",
     "bin/",
     "README.md",
     "LICENSE",
