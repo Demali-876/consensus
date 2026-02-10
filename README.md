@@ -1,6 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Demali-876/consensus/main/assets/logo-light.svg#gh-light-mode-only" width="200" />
-  <img src="https://raw.githubusercontent.com/Demali-876/consensus/main/assets/logo-dark.svg#gh-dark-mode-only" width="200" />
+<img src="assets/logo-light.svg" alt="Consensus logo" width="200" />
 </p>
 
 
