@@ -3,4 +3,6 @@
 /certs
 /scripts/certs/*
 /scripts/mtls-certs/*
+/scripts
 /logs
+/example

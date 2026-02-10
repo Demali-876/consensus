@@ -2,16 +2,21 @@ import "dotenv/config";
 import https from "https";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import crypto from "crypto";
+import ConsensusProxy from "./proxy.js";
+import Router from "./router.ts";
+import { fileURLToPath } from "url";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
-import ConsensusProxy from "./proxy.js";
+import { registerWhitepaperSignup } from "./data/whitepaperSignup.js";
+import { registerWebSocket } from "./wss.js";
+import { registerNodes } from "./orchestrator.js";
+
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -31,12 +36,31 @@ const x402Server = new x402ResourceServer(facilitatorClient)
   .register("eip155:84532", new ExactEvmScheme())
   .register("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", new ExactSvmScheme());
 
-const proxy = new ConsensusProxy();
+const router = new Router();
+const proxy = new ConsensusProxy({router: router});
 
 const app = express();
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+registerWhitepaperSignup(app);
+
+const server = https.createServer(
+  {
+    key: fs.readFileSync(MAIN_TLS_KEY),
+    cert: fs.readFileSync(MAIN_TLS_CERT),
+  },
+  app
+);
+const wsStats = registerWebSocket(app, server, x402Server, {
+  EVM_PAY_TO,
+  SOLANA_PAY_TO,
+}, router);
+
+const nodeStats = registerNodes(app, server, x402Server, {
+  EVM_PAY_TO,
+  SOLANA_PAY_TO,
+});
 
 app.get("/", (req, res) => {
   res.json({
@@ -53,12 +77,18 @@ app.get("/", (req, res) => {
 
 app.get("/health", (req, res) => {
   const stats = proxy.getStats();
+  const ws = wsStats.getStats();
+  const nodes = nodeStats.getStats();
   res.json({
     status: "healthy",
     timestamp: new Date().toISOString(),
+    proxy:{
     cache_size: stats.cache_size,
     total_requests: stats.total_requests,
-    cache_hits: stats.cache_hits,
+    cache_hits: stats.cache_hits
+  },
+    websocket: ws,
+    nodes: nodes
   });
 });
 
@@ -148,14 +178,6 @@ app.post("/proxy", async (req, res) => {
     });
   }
 });
-
-const server = https.createServer(
-  {
-    key: fs.readFileSync(MAIN_TLS_KEY),
-    cert: fs.readFileSync(MAIN_TLS_CERT),
-  },
-  app
-);
 
 server.listen(PORT, "::", () => {
   console.log(`Consensus x402 Proxy Service`);

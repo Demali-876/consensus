@@ -22,16 +22,16 @@ const BENCHMARK_CONFIG = {
 };
 
 export async function benchmarkNode(nodeTestEndpoint) {
-  console.log('🧪 Running node benchmark tests...\n');
+  console.log('Running node benchmark tests...\n');
   
   try {
     const fetchResults = await testFetchPerformance(nodeTestEndpoint);
     console.log(`📡 Fetch test: ${fetchResults.grade} (${fetchResults.avg_latency_ms}ms avg)`);
 
     const cpuResults = await testCPUPerformance(nodeTestEndpoint);
-    console.log(`⚙️  CPU test: ${cpuResults.grade} (${cpuResults.hashes_per_second} h/s)`);
+    console.log(` CPU test: ${cpuResults.grade} (${cpuResults.hashes_per_second} h/s)`);
     const memResults = await testMemory(nodeTestEndpoint);
-    console.log(`💾 Memory test: ${memResults.grade} (${memResults.free_memory_mb}MB free)`);
+    console.log(` Memory test: ${memResults.grade} (${memResults.free_memory_mb}MB free)`);
 
     const score = calculateScore({ fetch: fetchResults, cpu: cpuResults, memory: memResults });
     const passed = score >= BENCHMARK_CONFIG.min_total_score;
@@ -147,7 +147,7 @@ async function testMemory(nodeEndpoint) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        test_size_mb: 256 // Try to allocate 256MB
+        test_size_mb: 256
       }),
       signal: AbortSignal.timeout(5000)
     });

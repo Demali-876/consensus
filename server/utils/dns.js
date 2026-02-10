@@ -24,7 +24,7 @@ export async function provisionNodeDNS(subdomain, ipv6, ipv4 = null) {
 
   const nodeSubdomain = subdomain.split('.')[0];
   
-  log(`🌍 Provisioning DNS for ${subdomain}`);
+  log(`Provisioning DNS for ${subdomain}`);
   log(`   IPv6: ${ipv6}`);
   if (ipv4) log(`   IPv4: ${ipv4}`);
   
