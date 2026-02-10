@@ -1,8 +1,6 @@
 <p align="center">
-  <picture>
-    <source srcset="assets/logo-dark.svg" media="(prefers-color-scheme: dark)">
-    <img src="assets/logo-light.svg" alt="Consensus logo" width="200" />
-  </picture>
+  <img src="assets/logo-light.svg#gh-light-mode-only" width="200" />
+  <img src="assets/logo-dark.svg#gh-dark-mode-only" width="200" />
 </p>
 
 
