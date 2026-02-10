@@ -7,6 +7,7 @@ import helmet from "helmet";
 import cors from "cors";
 import crypto from "crypto";
 import ConsensusProxy from "./proxy.js";
+import Router from "./router.ts";
 import { fileURLToPath } from "url";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
@@ -35,7 +36,8 @@ const x402Server = new x402ResourceServer(facilitatorClient)
   .register("eip155:84532", new ExactEvmScheme())
   .register("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", new ExactSvmScheme());
 
-const proxy = new ConsensusProxy();
+const router = new Router();
+const proxy = new ConsensusProxy({router: router});
 
 const app = express();
 app.use(helmet());
@@ -53,7 +55,7 @@ const server = https.createServer(
 const wsStats = registerWebSocket(app, server, x402Server, {
   EVM_PAY_TO,
   SOLANA_PAY_TO,
-});
+}, router);
 
 const nodeStats = registerNodes(app, server, x402Server, {
   EVM_PAY_TO,

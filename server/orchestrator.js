@@ -65,7 +65,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
          solana_address
         } = req.body;
 
-        if (!pubkey_pem || !alg || !ipv6 || !port || !test_endpoint ||contact || !evm_address || !solana_address) {
+        if (!pubkey_pem || !alg || !ipv6 || !port || !test_endpoint || !contact || !evm_address || !solana_address) {
         return res.status(400).json({
             error: "Missing required fields",
             required: ["pubkey_pem", "alg", "ipv6", "port", "test_endpoint", "contact", "evm_address", "solana_address"],

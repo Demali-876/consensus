@@ -2,6 +2,7 @@ import NodeCache from "node-cache";
 import axios from "axios";
 import zlib from "zlib";
 import crypto from "crypto";
+import Router from "./router.ts";
 import { promisify } from "util";
 import { URL } from "url";
 
@@ -112,7 +113,7 @@ function generateDedupeKey({ target_url, method, headers = {}, body }) {
 }
 
 export default class ConsensusProxy {
-  constructor() {
+  constructor(config = {}) {
     this.cache = new NodeCache({
       stdTTL: 300,
       checkperiod: 60,
@@ -123,6 +124,7 @@ export default class ConsensusProxy {
     this.pendingRequests = new Map();
     this.paidKeys = new Map();
     this.stats = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
+    this.router = config.router || new Router();
     
     setInterval(() => this.cleanupExpiredKeys(), 60000);
   }
@@ -171,6 +173,58 @@ export default class ConsensusProxy {
     this.stats.cache_misses++;
     console.log(`[Cache MISS] ${dedupeKey.substring(0, 12)}... | TTL: ${ttl}s`);
 
+    const node = this.router.selectNode(dedupeKey, headers);
+
+    if (node) {
+      return await this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl);
+    }
+
+    console.log(`[Self-Fallback] No nodes available, executing directly`);
+    return await this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
+  }
+
+  async executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl) {
+    this.router.incrementRequest(node.id);
+    
+    try {
+      console.log(`[Route to Node] ${node.id} (${node.region})`);
+
+      const response = await axios({
+        method: 'POST',
+        url: `https://${node.domain}/proxy`,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        data: {
+          target_url,
+          method,
+          headers,
+          body,
+        },
+        timeout: 35000,
+      });
+
+      const result = response.data;
+
+      this.cache.set(dedupeKey, result, ttl);
+      return {
+        ...result,
+        cached: false,
+        payment_required: true,
+        dedupe_key: dedupeKey,
+        served_by: node.id,
+      };
+    } catch (error) {
+      console.error(`[Node Error] ${node.id}:`, error.message);
+      console.log(`[Fallback to Self] Executing directly`);
+
+      return await this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
+    } finally {
+      this.router.decrementRequest(node.id);
+    }
+  }
+
+  async executeDirect(target_url, method, headers, body, dedupeKey, ttl) {
     const requestPromise = this.makeRequest(target_url, method, headers, body)
       .then((response) => {
         this.cache.set(dedupeKey, response, ttl);
@@ -187,7 +241,13 @@ export default class ConsensusProxy {
     this.pendingRequests.set(dedupeKey, requestPromise);
 
     const response = await requestPromise;
-    return { ...response, cached: false, payment_required: true, dedupe_key: dedupeKey };
+    return { 
+      ...response, 
+      cached: false, 
+      payment_required: true, 
+      dedupe_key: dedupeKey,
+      served_by: 'proxy-direct',
+    };
   }
 
   async makeRequest(url, method, headers, body) {
@@ -209,6 +269,12 @@ export default class ConsensusProxy {
     delete cleanHeaders["X-Api-Key"];
     delete cleanHeaders["x-cache-ttl"];
     delete cleanHeaders["X-Cache-TTL"];
+    delete cleanHeaders["x-node-region"];
+    delete cleanHeaders["X-Node-Region"];
+    delete cleanHeaders["x-node-domain"];
+    delete cleanHeaders["X-Node-Domain"];
+    delete cleanHeaders["x-node-exclude"];
+    delete cleanHeaders["X-Node-Exclude"];
 
     const config = {
       method: String(method).toLowerCase(),
@@ -284,6 +350,7 @@ export default class ConsensusProxy {
         ? ((this.stats.cache_hits / this.stats.total_requests) * 100).toFixed(2) + '%'
         : '0%',
       cache_stats: this.cache.getStats(),
+      router_stats: this.router.getStats(),
     };
   }
 

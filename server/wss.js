@@ -1,6 +1,8 @@
 import crypto from "crypto";
+import Router from "./router.ts";
 import { WebSocketServer } from "ws";
 import { paymentMiddleware } from "@x402/express";
+import WebSocket from "ws";
 import {
   PRICING_PRESETS,
   calculateSessionLimits,
@@ -19,8 +21,9 @@ const TOKEN_TTL_MS = 60_000;
  * @param {https.Server} httpsServer - HTTPS server instance
  * @param {x402ResourceServer} x402Server - x402 server instance
  * @param {Object} config - Configuration
+ * @param {Router} router - shared router instance
  */
-export function registerWebSocket(app, httpsServer, x402Server, config){
+export function registerWebSocket(app, httpsServer, x402Server, config, router){
   const { EVM_PAY_TO, SOLANA_PAY_TO } = config;
 
   app.get(
@@ -116,21 +119,152 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.purchase = pending;
+      ws.token = token;
       wss.emit("connection", ws, req);
     });
   });
 
   wss.on("connection", (ws, req) => {
     const { model, minutes, megabytes } = ws.purchase;
+    const sessionId = crypto.randomUUID();
 
+    const preferenceHeaders = {
+      'x-node-region': req.headers['x-node-region'],
+      'x-node-domain': req.headers['x-node-domain'],
+      'x-node-exclude': req.headers['x-node-exclude'],
+    };
+    
+    const node = router.selectNode(sessionId, preferenceHeaders);
+
+    if (node) {
+      handleNodeProxiedSession(ws, node, sessionId, model, minutes, megabytes);
+    } else {
+      console.log(`[WebSocket Self-Fallback] No nodes available, handling locally`);
+      handleLocalSession(ws, sessionId, model, minutes, megabytes);
+    }
+  });
+
+  /**
+   * Handle WebSocket session on a remote node (proxy)
+   */
+  function handleNodeProxiedSession(clientWs, node, sessionId, model, minutes, megabytes) {
+    router.incrementSession(node.id);
+    console.log(`[WebSocket Route] ${sessionId} → ${node.id} (${node.region})`);
+
+    const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+    const pricing = PRICING_PRESETS[pricingKey];
+    const limits = calculateSessionLimits(pricing, minutes, megabytes);
+
+    const session = {
+      sessionId,
+      nodeId: node.id,
+      pricing,
+      limits,
+      usage: {
+        bytesReceived: 0,
+        bytesSent: 0,
+        totalBytes: 0,
+        connectedAt: Date.now(),
+      },
+      active: true,
+    };
+
+    sessions.set(sessionId, session);
+
+    const nodeWs = new WebSocket(`wss://${node.domain}/ws-node`, {
+      headers: {
+        'x-session-id': sessionId,
+        'x-model': model,
+        'x-minutes': minutes.toString(),
+        'x-megabytes': megabytes.toString(),
+      }
+    });
+
+    nodeWs.on('open', () => {
+      console.log(`[Node Connected] ${sessionId} ↔ ${node.id}`);
+
+      clientWs.send(
+        JSON.stringify({
+          type: "session_start",
+          sessionId,
+          model,
+          served_by: node.id,
+          limits: {
+            timeSeconds: limits.timeLimit / 1000,
+            dataMB: bytesToMB(limits.dataLimit),
+          },
+          pricing: {
+            totalCost: calculateSessionCost(pricing, minutes, megabytes),
+            pricePerMinute: pricing.pricePerMinute,
+            pricePerMB: pricing.pricePerMB,
+          },
+        })
+      );
+    });
+
+    nodeWs.on('error', (error) => {
+      console.error(`[Node Error] ${node.id}:`, error.message);
+
+      console.log(`[WebSocket Fallback] ${sessionId} falling back to local`);
+      nodeWs.close();
+      router.decrementSession(node.id);
+      sessions.delete(sessionId);
+      handleLocalSession(clientWs, sessionId, model, minutes, megabytes);
+    });
+
+    clientWs.on('message', (data) => {
+      if (!session.active) return;
+      
+      const size = Buffer.byteLength(data);
+      session.usage.bytesReceived += size;
+      session.usage.totalBytes = session.usage.bytesReceived + session.usage.bytesSent;
+
+      if (nodeWs.readyState === WebSocket.OPEN) {
+        nodeWs.send(data);
+      }
+    });
+
+    nodeWs.on('message', (data) => {
+      if (!session.active) return;
+
+      const size = Buffer.byteLength(data);
+      session.usage.bytesSent += size;
+      session.usage.totalBytes = session.usage.bytesReceived + session.usage.bytesSent;
+
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(data);
+      }
+    });
+
+    clientWs.on('close', () => {
+      session.active = false;
+      nodeWs.close();
+      router.decrementSession(node.id);
+      sessions.delete(sessionId);
+      console.log(`[Client Disconnected] ${sessionId}`);
+    });
+
+    nodeWs.on('close', () => {
+      session.active = false;
+      clientWs.close();
+      router.decrementSession(node.id);
+      sessions.delete(sessionId);
+      console.log(`[Node Disconnected] ${sessionId} from ${node.id}`);
+    });
+  }
+
+  /**
+   * Handle WebSocket session locally (self-fallback)
+   */
+  function handleLocalSession(ws, sessionId, model, minutes, megabytes) {
     const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
     const pricing = PRICING_PRESETS[pricingKey];
     const totalCost = calculateSessionCost(pricing, minutes, megabytes);
     const limits = calculateSessionLimits(pricing, minutes, megabytes);
 
-    const sessionId = crypto.randomUUID();
     const session = {
       sessionId,
+      nodeId: 'local',
       pricing,
       limits,
       usage: {
@@ -151,6 +285,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
         type: "session_start",
         sessionId,
         model,
+        served_by: 'local',
         limits: {
           timeSeconds: limits.timeLimit / 1000,
           dataMB: bytesToMB(limits.dataLimit),
@@ -226,7 +361,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
 
       sessions.delete(sessionId);
     });
-  });
+  };
 
   setInterval(() => {
     const now = Date.now();
@@ -241,6 +376,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config){
     getStats: () => ({
       active_sessions: sessions.size,
       pending_tokens: pendingSessions.size,
+      router_stats: router.getStats(),
     }),
   };
 }
