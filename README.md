@@ -1,5 +1,4 @@
 <p align="center">
-  <img src="assets/logo-light.svg#gh-light-mode-only" width="200" />
   <img src="assets/logo-dark.svg#gh-dark-mode-only" width="200" />
 </p>
 
