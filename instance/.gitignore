@@ -7,3 +7,5 @@ main.key
 main.csr
 .consensus-node.key
 .consensus-node.pub
+dist
+VERSION
