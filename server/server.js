@@ -1,5 +1,5 @@
 import "dotenv/config";
-import https from "https";
+import http from "http";
 import fs from "fs";
 import path from "path";
 import express from "express";
@@ -13,7 +13,6 @@ import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
-import { registerWhitepaperSignup } from "./data/whitepaperSignup.js";
 import { registerWebSocket } from "./wss.js";
 import { registerNodes } from "./orchestrator.js";
 
@@ -21,7 +20,8 @@ import { registerNodes } from "./orchestrator.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 
-const PORT = 8080;
+const PORT = Number(process.env.PORT || process.env.CONSENSUS_PORT || 8081);
+const HOST = process.env.HOST || "::";
 const FACILITATOR_URL = "https://facilitator.payai.network";
 const EVM_PAY_TO = "0x9cd64438C8e66E7e85EB097b516541Cd50780845";
 const SOLANA_PAY_TO = "J6EHzeiWxrffitfscuaZty9A9AKQVPte7G9VEoHubuGw";
@@ -45,7 +45,7 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 registerWhitepaperSignup(app);
 
-const server = https.createServer(
+const server = http.createServer(
   {
     key: fs.readFileSync(MAIN_TLS_KEY),
     cert: fs.readFileSync(MAIN_TLS_CERT),
@@ -179,9 +179,10 @@ app.post("/proxy", async (req, res) => {
   }
 });
 
-server.listen(PORT, "::", () => {
+server.listen(PORT, HOST, () => {
   console.log(`Consensus x402 Proxy Service`);
-  console.log(`URL: https://consensus.canister.software:8888`);
+  const logHost = HOST === "::" || HOST === "0.0.0.0" ? "localhost" : HOST;
+  console.log(`URL: https://${logHost}:${PORT}`);
 });
 
 ["SIGTERM", "SIGINT"].forEach((signal) => {
