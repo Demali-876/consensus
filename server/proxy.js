@@ -125,6 +125,7 @@ export default class ConsensusProxy {
     this.paidKeys = new Map();
     this.stats = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router = config.router || new Router();
+    this.localMode = config.localMode || false;
     
     setInterval(() => this.cleanupExpiredKeys(), 60000);
   }
@@ -191,7 +192,7 @@ export default class ConsensusProxy {
 
       const response = await axios({
         method: 'POST',
-        url: `https://${node.domain}/proxy`,
+        url: `${this.localMode ? 'http' : 'https'}://${node.domain}/proxy`,
         headers: {
           'Content-Type': 'application/json',
         },

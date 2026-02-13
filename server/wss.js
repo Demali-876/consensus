@@ -24,7 +24,9 @@ const TOKEN_TTL_MS = 60_000;
  * @param {Router} router - shared router instance
  */
 export function registerWebSocket(app, httpsServer, x402Server, config, router){
-  const { EVM_PAY_TO, SOLANA_PAY_TO } = config;
+  const { EVM_PAY_TO, SOLANA_PAY_TO, localMode } = config;
+  const wsProtocol = localMode ? "ws" : "wss";
+  const httpProtocol = localMode ? "http" : "https";
 
   app.get(
     "/ws",
@@ -83,7 +85,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
 
       res.json({
         token,
-        connect_url: `wss://${req.headers.host}/ws-connect?token=${token}`,
+        connect_url: `${wsProtocol}://${req.headers.host}/ws-connect?token=${token}`,
         expires_in: Math.floor(TOKEN_TTL_MS / 1000),
       });
     }
@@ -92,7 +94,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
   const wss = new WebSocketServer({noServer: true});
 
   httpsServer.on("upgrade", (req, socket, head) => {
-    const url = new URL(req.url, `https://${req.headers.host}`);
+    const url = new URL(req.url, `${httpProtocol}://${req.headers.host}`);
 
     if(url.pathname !== "/ws-connect"){
       socket.destroy();
@@ -171,7 +173,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
 
     sessions.set(sessionId, session);
 
-    const nodeWs = new WebSocket(`wss://${node.domain}/ws-node`, {
+    const nodeWs = new WebSocket(`${wsProtocol}://${node.domain}/ws-node`, {
       headers: {
         'x-session-id': sessionId,
         'x-model': model,

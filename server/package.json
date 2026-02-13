@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:local": "NODE_DB_PATH=./consensus-local.db node server.local.js",
+    "dev:local": "NODE_DB_PATH=./consensus-local.db node --watch server.local.js"
   },
   "keywords": [],
   "author": "Demali Gregg",

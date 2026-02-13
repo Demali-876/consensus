@@ -15,40 +15,9 @@ function calculateJoinPrice() {
 }
 
 export function registerNodes(app, httpsServer, x402Server, config) {
-  const { EVM_PAY_TO, SOLANA_PAY_TO } = config;
+  const { EVM_PAY_TO, SOLANA_PAY_TO, localMode } = config;
 
-  app.post(
-    "/node/join",
-    paymentMiddleware(
-      {
-        "POST /node/join": {
-          accepts: [
-            {
-              scheme: "exact",
-              price: () => {
-                const price = calculateJoinPrice();
-                return `$${price}`;
-              },
-              network: "eip155:84532",
-              payTo: EVM_PAY_TO,
-            },
-            {
-              scheme: "exact",
-              price: () => {
-                const price = calculateJoinPrice();
-                return `$${price}`;
-              },
-              network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
-              payTo: SOLANA_PAY_TO,
-            },
-          ],
-          description: "Join the Consensus Network",
-          mimeType: "application/json",
-        },
-      },
-      x402Server
-    ),
-    async (req, res) => {
+  const joinHandler = async (req, res) => {
       const startTime = Date.now();
 
       try {
@@ -129,21 +98,28 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         console.log(` Benchmark passed: ${benchmarkResult.score}/100`);
 
         const nodeId = crypto.randomBytes(6).toString("hex");
-        const subdomain = `${nodeId}.consensus.canister.software`;
+        let subdomain;
 
-        console.log(`\nNode ID: ${nodeId}`);
-        console.log(`   Subdomain: ${subdomain}`);
+        if (localMode) {
+          subdomain = `localhost`;
+          console.log(`\nNode ID: ${nodeId}`);
+          console.log(`   Domain: ${subdomain} (local mode, DNS skipped)`);
+        } else {
+          subdomain = `${nodeId}.consensus.canister.software`;
+          console.log(`\nNode ID: ${nodeId}`);
+          console.log(`   Subdomain: ${subdomain}`);
 
-        console.log("\n🌍 Provisioning DNS...");
-        try {
-          await provisionNodeDNS(subdomain, ipv6, ipv4);
-          console.log(" DNS provisioned");
-        } catch (dnsError) {
-          console.error(`DNS failed: ${dnsError.message}\n`);
-          return res.status(500).json({
-            error: "DNS provisioning failed",
-            message: dnsError.message,
-          });
+          console.log("\n🌍 Provisioning DNS...");
+          try {
+            await provisionNodeDNS(subdomain, ipv6, ipv4);
+            console.log(" DNS provisioned");
+          } catch (dnsError) {
+            console.error(`DNS failed: ${dnsError.message}\n`);
+            return res.status(500).json({
+              error: "DNS provisioning failed",
+              message: dnsError.message,
+            });
+          }
         }
 
         const pubkey = crypto.createPublicKey(pubkey_pem).export({
@@ -205,8 +181,45 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           message: error.message,
         });
       }
-    }
-  );
+  };
+
+  if (localMode) {
+    app.post("/node/join", joinHandler);
+  } else {
+    app.post(
+      "/node/join",
+      paymentMiddleware(
+        {
+          "POST /node/join": {
+            accepts: [
+              {
+                scheme: "exact",
+                price: () => {
+                  const price = calculateJoinPrice();
+                  return `$${price}`;
+                },
+                network: "eip155:84532",
+                payTo: EVM_PAY_TO,
+              },
+              {
+                scheme: "exact",
+                price: () => {
+                  const price = calculateJoinPrice();
+                  return `$${price}`;
+                },
+                network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+                payTo: SOLANA_PAY_TO,
+              },
+            ],
+            description: "Join the Consensus Network",
+            mimeType: "application/json",
+          },
+        },
+        x402Server
+      ),
+      joinHandler
+    );
+  }
 
   app.post("/node/heartbeat/:node_id", (req, res) => {
     try {
