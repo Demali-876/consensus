@@ -225,3 +225,7 @@ The Licensed Work is:
 * Change License: GNU GPL v2.0 or later
 
 For full terms, see the [LICENSE](./LICENSE) file.
+
+<p align="center">
+<img src="assets/cs.png" alt="Consensus logo" width="100" />
+</p>
