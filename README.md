@@ -1,7 +1,7 @@
 <p align="center">
-  <img src="assets/logo-light.svg#gh-light-mode-only" alt="Consensus logo" width="200" />
-  <img src="assets/logo-dark.svg#gh-dark-mode-only" alt="Consensus logo" width="200" />
+<img src="assets/logo-light.svg" alt="Consensus logo" width="200" />
 </p>
+
 
 <h1 align="center">Consensus</h1>
 
