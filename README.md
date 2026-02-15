@@ -227,5 +227,5 @@ The Licensed Work is:
 For full terms, see the [LICENSE](./LICENSE) file.
 
 <p align="center">
-<img src="assets/cs.png" alt="Consensus logo" width="100" />
+<img src="assets/cs.png" alt="Consensus logo" width="100" height="37" />
 </p>
