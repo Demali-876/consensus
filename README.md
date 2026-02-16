@@ -3,7 +3,7 @@
 </p>
 
 
-<h1 align="center">Consensus</h1>
+<h1 align="center">Consensus Protocol</h1>
 
 <p align="center">
   HTTP deduplication protocol with secure, verifiable payments via <strong>x402</strong><br>
