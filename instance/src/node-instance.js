@@ -16,6 +16,13 @@ const app = express();
 const port = process.env.NODE_PORT || 9090;
 const gatewayUrl = process.env.GATEWAY_URL || 'https://consensus.canister.software:8888';
 
+// Idle detection counters
+let inFlightRequests = 0;
+
+function isIdle() {
+  return inFlightRequests === 0;
+}
+
 // Load node configuration if exists
 let nodeConfig = null;
 let nodeKeys = null;
@@ -229,17 +236,18 @@ app.get('/info', (req, res) => {
 
 // Proxy endpoint (will forward to target APIs)
 app.post('/proxy', async (req, res) => {
+  inFlightRequests++;
   try {
     const { target_url, method = 'GET', headers = {}, body } = req.body;
-    
+
     if (!target_url) {
       return res.status(400).json({ error: 'Missing target_url' });
     }
-    
+
     console.log(`🔄 Proxying ${method} request to ${target_url}`);
-    
+
     const start = Date.now();
-    
+
     // Make the request
     const fetchOptions = {
       method,
@@ -249,17 +257,17 @@ app.post('/proxy', async (req, res) => {
       },
       signal: AbortSignal.timeout(30000)
     };
-    
+
     if (body && method !== 'GET' && method !== 'HEAD') {
       fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
     }
-    
+
     const response = await fetch(target_url, fetchOptions);
     const responseBody = await response.text();
     const duration = Date.now() - start;
-    
+
     console.log(`   ✓ Completed in ${duration}ms (${response.status})`);
-    
+
     // Return response
     res.status(response.status).json({
       status: response.status,
@@ -272,13 +280,15 @@ app.post('/proxy', async (req, res) => {
         timestamp: new Date().toISOString()
       }
     });
-    
+
   } catch (error) {
     console.error(`   ✗ Proxy error: ${error.message}`);
     res.status(500).json({
       error: 'Proxy request failed',
       message: error.message
     });
+  } finally {
+    inFlightRequests--;
   }
 });
 
@@ -307,9 +317,9 @@ async function startServer() {
     console.log(`⚠️  Starting without TLS (registration mode)`);
   }
   
-  server.listen(port, '0.0.0.0', () => {
+  server.listen(port, '0.0.0.0', async () => {
     console.log(`\n✅ Consensus Node running on ${certsExist ? 'https' : 'http'}://localhost:${port}`);
-    
+
     if (nodeConfig) {
       console.log(`   Node ID: ${nodeConfig.node_id}`);
       console.log(`   Domain: ${nodeConfig.domain}`);
@@ -318,13 +328,62 @@ async function startServer() {
       console.log(`   Status: Not registered`);
       console.log(`   Run: node src/register.js to join the network`);
     }
-    
+
     console.log('\n📋 Endpoints:');
     console.log(`   GET  /health - Health check`);
     console.log(`   GET  /info - Node information`);
     console.log(`   POST /proxy - Proxy requests`);
     console.log(`   POST /benchmark/* - Benchmark endpoints`);
     console.log('\n');
+
+    // Start update loop if registered
+    if (nodeConfig) {
+      try {
+        const { NodeUpdater } = await import('./updater.js');
+        const updater = new NodeUpdater({
+          gatewayUrl,
+          nodeId: nodeConfig.node_id,
+          instanceRoot: root,
+          privateKeyPath: path.join(root, '.consensus-node.key'),
+        });
+
+        // Report integrity on startup
+        await updater.loadBuildDigest();
+        try {
+          const result = await updater.reportIntegrity();
+          console.log(`🔒 Integrity check: ${result.verified ? 'verified' : 'unverified'}`);
+        } catch (e) {
+          console.error('⚠️  Integrity report failed:', e.message);
+        }
+
+        // Check for updates every 5 minutes
+        setInterval(async () => {
+          try {
+            const manifest = await updater.checkForUpdate();
+            if (!manifest) return;
+
+            console.log(`📦 Update available: v${manifest.version}`);
+
+            // Wait for idle before applying
+            await new Promise((resolve) => {
+              const check = () => {
+                if (isIdle()) return resolve(undefined);
+                setTimeout(check, 1000);
+              };
+              check();
+            });
+
+            console.log('⏳ Node is idle, applying update...');
+            await updater.downloadAndApply(manifest);
+            updater.restart();
+          } catch (e) {
+            console.error('⚠️  Update check failed:', e.message);
+          }
+        }, 5 * 60 * 1000);
+      } catch (e) {
+        console.error('⚠️  Updater initialization failed:', e.message);
+      }
+    }
   });
 }
 

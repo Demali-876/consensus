@@ -1,0 +1,40 @@
+name: Updater E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  updater-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install server dependencies
+        run: cd server && npm ci
+
+      - name: Start local server
+        run: |
+          cd server
+          ADMIN_KEY=test-key NODE_DB_PATH=./consensus-local.db npx tsx server.local.js &
+          echo "Waiting for server to be healthy..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8082/health > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run updater E2E test
+        run: ADMIN_KEY=test-key npx tsx scripts/test-updater-e2e.ts

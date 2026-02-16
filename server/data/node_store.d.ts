@@ -12,6 +12,7 @@ export const NodeStore: {
   createJoinRequest(input: { pubkey: any; alg: string; ttlSeconds?: number }): any;
   getJoin(id: string): any;
   consumeJoin(id: string): any;
+  
 };
 
 declare const _default: typeof NodeStore;

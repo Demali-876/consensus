@@ -49,7 +49,31 @@ CREATE TABLE IF NOT EXISTS join_requests (
   expires_at INTEGER NOT NULL,
   consumed_at INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS version_manifests (
+  version TEXT PRIMARY KEY,
+  manifest TEXT NOT NULL,
+  released_at INTEGER NOT NULL,
+  github_release_url TEXT,
+  required INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
 `);
+
+// Safe column migrations — add new columns if they don't exist
+const nodeColumns = db.pragma('table_info(nodes)').map(c => c.name);
+if (!nodeColumns.includes('software_version')) {
+  db.exec('ALTER TABLE nodes ADD COLUMN software_version TEXT');
+}
+if (!nodeColumns.includes('build_digest')) {
+  db.exec('ALTER TABLE nodes ADD COLUMN build_digest TEXT');
+}
+if (!nodeColumns.includes('verified')) {
+  db.exec('ALTER TABLE nodes ADD COLUMN verified INTEGER NOT NULL DEFAULT 0');
+}
+if (!nodeColumns.includes('last_verified_at')) {
+  db.exec('ALTER TABLE nodes ADD COLUMN last_verified_at INTEGER');
+}
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -103,6 +127,7 @@ const listNodesWithLatestHeartbeatStmt = db.prepare(`
   SELECT
     n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.evm_address, n.solana_address, n.status,
     n.created_at, n.updated_at, n.domain, n.tls_mode,
+    n.software_version, n.build_digest, n.verified, n.last_verified_at,
     hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
   FROM nodes n
   LEFT JOIN (
@@ -115,6 +140,7 @@ const getNodeWithLatestHeartbeatStmt = db.prepare(`
   SELECT
     n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.evm_address, n.solana_address, n.status,
     n.created_at, n.updated_at, n.domain, n.tls_mode,
+    n.software_version, n.build_digest, n.verified, n.last_verified_at,
     hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
   FROM nodes n
   LEFT JOIN (
@@ -135,6 +161,37 @@ const consumeJoinStmt = db.prepare(`
   UPDATE join_requests SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL
 `);
 
+// Verification & manifest statements
+const updateVerificationStmt = db.prepare(`
+  UPDATE nodes SET software_version = ?, build_digest = ?, verified = ?, last_verified_at = ?, updated_at = ? WHERE id = ?
+`);
+
+const clearVerificationStmt = db.prepare(`
+  UPDATE nodes SET verified = 0, updated_at = ? WHERE id = ?
+`);
+
+const upsertManifestStmt = db.prepare(`
+  INSERT INTO version_manifests (version, manifest, released_at, github_release_url, required, created_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(version) DO UPDATE SET
+    manifest=excluded.manifest,
+    released_at=excluded.released_at,
+    github_release_url=excluded.github_release_url,
+    required=excluded.required
+`);
+
+const clearRequiredManifestsStmt = db.prepare(`
+  UPDATE version_manifests SET required = 0 WHERE required = 1
+`);
+
+const getRequiredManifestStmt = db.prepare(`
+  SELECT version, manifest, released_at, github_release_url, required, created_at FROM version_manifests WHERE required = 1 LIMIT 1
+`);
+
+const getManifestByVersionStmt = db.prepare(`
+  SELECT version, manifest, released_at, github_release_url, required, created_at FROM version_manifests WHERE version = ?
+`);
+
 function rowToNode(row) {
   if (!row) return null;
   return {
@@ -151,6 +208,10 @@ function rowToNode(row) {
     updated_at: row.updated_at,
     domain: row.domain,
     tls_mode: row.tls_mode,
+    software_version: row.software_version ?? null,
+    build_digest: row.build_digest ?? null,
+    verified: row.verified ?? 0,
+    last_verified_at: row.last_verified_at ?? null,
     heartbeat: row.hb_at ? {
       rps: row.hb_rps,
       p95_ms: row.hb_p95_ms,
@@ -238,7 +299,56 @@ export const NodeStore = {
       throw new Error(`Join not found or already consumed: ${id}`);
     }
     return this.getJoin(id);
-  }
+  },
+
+  updateNodeVerification(node_id, verified, software_version, build_digest) {
+    const ts = nowSec();
+    updateVerificationStmt.run(software_version, build_digest, verified ? 1 : 0, ts, ts, node_id);
+    return this.getNode(node_id);
+  },
+
+  clearNodeVerification(node_id) {
+    const ts = nowSec();
+    clearVerificationStmt.run(ts, node_id);
+  },
+
+  upsertManifest(version, manifest_json, github_url, required) {
+    const ts = nowSec();
+    const manifest = typeof manifest_json === 'string' ? manifest_json : JSON.stringify(manifest_json);
+    const parsed = typeof manifest_json === 'string' ? JSON.parse(manifest_json) : manifest_json;
+    const released_at = parsed.released_at ? Math.floor(new Date(parsed.released_at).getTime() / 1000) : ts;
+
+    if (required) {
+      clearRequiredManifestsStmt.run();
+    }
+    upsertManifestStmt.run(version, manifest, released_at, github_url ?? null, required ? 1 : 0, ts);
+  },
+
+  getRequiredManifest() {
+    const row = getRequiredManifestStmt.get();
+    if (!row) return null;
+    return {
+      version: row.version,
+      manifest: fromJson(row.manifest, {}),
+      released_at: row.released_at,
+      github_release_url: row.github_release_url,
+      required: row.required,
+      created_at: row.created_at,
+    };
+  },
+
+  getManifestByVersion(version) {
+    const row = getManifestByVersionStmt.get(version);
+    if (!row) return null;
+    return {
+      version: row.version,
+      manifest: fromJson(row.manifest, {}),
+      released_at: row.released_at,
+      github_release_url: row.github_release_url,
+      required: row.required,
+      created_at: row.created_at,
+    };
+  },
 };
 
 export default NodeStore;

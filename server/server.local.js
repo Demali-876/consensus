@@ -18,6 +18,7 @@ import ConsensusProxy from "./proxy.js";
 import Router from "./router.ts";
 import { registerWebSocket } from "./wss.js";
 import { registerNodes } from "./orchestrator.js";
+import { registerUpdater } from "./updater.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,6 +51,8 @@ const localConfig = {
 
 const wsStats = registerWebSocket(app, server, x402Server, localConfig, router);
 const nodeStats = registerNodes(app, server, x402Server, localConfig);
+
+registerUpdater(app, { adminKey: process.env.ADMIN_KEY });
 
 app.get("/", (req, res) => {
   res.json({

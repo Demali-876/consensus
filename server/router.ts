@@ -121,8 +121,10 @@ private powerOfTwoChoices(eligibleNodes: any[]): any {
   const node1 = eligibleNodes[idx1];
   const node2 = eligibleNodes[idx2];
 
-  const load1 = (this.activeRequests.get(node1.id) || 0) + (this.activeSessions.get(node1.id) || 0);
-  const load2 = (this.activeRequests.get(node2.id) || 0) + (this.activeSessions.get(node2.id) || 0);
+  const verifiedPenalty1 = node1.verified ? 0 : 5;
+  const verifiedPenalty2 = node2.verified ? 0 : 5;
+  const load1 = (this.activeRequests.get(node1.id) || 0) + (this.activeSessions.get(node1.id) || 0) + verifiedPenalty1;
+  const load2 = (this.activeRequests.get(node2.id) || 0) + (this.activeSessions.get(node2.id) || 0) + verifiedPenalty2;
 
   return load1 <= load2 ? node1 : node2;
 }
@@ -165,10 +167,14 @@ decrementSession(nodeId: string): void {
 getStats() {
   const allNodes = NodeStore.listNodes();
   const activeNodes = allNodes.filter((n:any) => n.status === 'active');
+  const verifiedNodes = activeNodes.filter((n:any) => n.verified);
+  const unverifiedNodes = activeNodes.filter((n:any) => !n.verified);
 
   return {
     total_nodes: allNodes.length,
     active_nodes: activeNodes.length,
+    verified_nodes: verifiedNodes.length,
+    unverified_nodes: unverifiedNodes.length,
     total_active_requests: Array.from(this.activeRequests.values()).reduce((sum, v) => sum + v, 0),
     total_active_sessions: Array.from(this.activeSessions.values()).reduce((sum, v) => sum + v, 0),
     sticky_mappings: this.requestToNode.size,

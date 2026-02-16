@@ -15,6 +15,7 @@ import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { registerWebSocket } from "./wss.js";
 import { registerNodes } from "./orchestrator.js";
+import { registerUpdater } from "./updater.ts";
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -61,6 +62,8 @@ const nodeStats = registerNodes(app, server, x402Server, {
   EVM_PAY_TO,
   SOLANA_PAY_TO,
 });
+
+registerUpdater(app, { adminKey: process.env.ADMIN_KEY });
 
 app.get("/", (req, res) => {
   res.json({

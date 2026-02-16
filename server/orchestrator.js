@@ -233,11 +233,27 @@ export function registerNodes(app, httpsServer, x402Server, config) {
 
       NodeStore.heartbeat(node_id, { rps, p95_ms, version });
 
+      // Check if node version matches the required version
+      let update_available = null;
+      try {
+        const required = NodeStore.getRequiredManifest();
+        if (required && version && version !== required.version) {
+          NodeStore.clearNodeVerification(node_id);
+          update_available = {
+            version: required.version,
+            github_release_url: required.github_release_url,
+          };
+        }
+      } catch (e) {
+        console.error("Version check error:", e.message);
+      }
+
       res.json({
         success: true,
         node_id,
         message: "Heartbeat recorded",
         next_heartbeat_in: 300,
+        update_available,
       });
     } catch (error) {
       console.error("Heartbeat error:", error);
@@ -267,6 +283,10 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         created_at: node.created_at,
         updated_at: node.updated_at,
         heartbeat: node.heartbeat,
+        software_version: node.software_version,
+        build_digest: node.build_digest,
+        verified: node.verified,
+        last_verified_at: node.last_verified_at,
       });
     } catch (error) {
       console.error("Status error:", error);

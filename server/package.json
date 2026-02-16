@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js",
-    "start:local": "NODE_DB_PATH=./consensus-local.db node server.local.js",
-    "dev:local": "NODE_DB_PATH=./consensus-local.db node --watch server.local.js"
+    "start": "npx tsx server.js",
+    "start:local": "NODE_DB_PATH=./consensus-local.db npx tsx server.local.js",
+    "dev:local": "NODE_DB_PATH=./consensus-local.db npx tsx --watch server.local.js"
   },
   "keywords": [],
   "author": "Demali Gregg",
@@ -30,6 +30,7 @@
     "helmet": "^7.2.0",
     "node-cache": "^5.1.2",
     "viem": "^2.31.7",
+    "ws": "^8.18.0",
     "x402": "^0.4.3",
     "x402-fetch": "^0.4.1"
   },
