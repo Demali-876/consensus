@@ -104,6 +104,30 @@ app.get("/stats", (req, res) => {
   });
 });
 
+app.post("/proxy", async (req, res, next) => {
+  const { target_url, method = "GET", headers = {}, body } = req.body;
+  if (!target_url) return next();
+
+  const dedupeKey = proxy.computeDedupeKey({ target_url, method, headers, body });
+  const cached = proxy.getCached(dedupeKey);
+
+  if (cached) {
+    console.log(`[Cache HIT - Pre-Payment] ${dedupeKey.substring(0, 12)}...`);
+    return res.json({
+      status: cached.status,
+      statusText: cached.statusText,
+      data: cached.data,
+      meta: {
+        cached: true,
+        dedupe_key: dedupeKey,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  }
+
+  next();
+});
+
 app.use(
   paymentMiddleware(
     {
@@ -178,7 +202,6 @@ app.post("/proxy", async (req, res) => {
     });
   }
 });
-
 server.listen(PORT, "::", () => {
   console.log(`Consensus x402 Proxy Service`);
   console.log(`URL: https://consensus.canister.software:8888`);
