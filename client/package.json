@@ -1,20 +1,32 @@
 {
   "name": "@canister-software/consensus-cli",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0-beta.4",
   "description": "Consensus SDK for interacting with the Consensus protocol",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./cli": "./bin/consensus.js"
+  },
   "bin": {
     "consensus": "./bin/consensus.js"
   },
   "scripts": {
     "consensus": "node bin/consensus.js",
     "setup": "node bin/consensus.js setup",
-    "reset": "node bin/consensus.js setup --force"
+    "reset": "node bin/consensus.js setup --force",
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.25.0",
     "@scure/base": "^2.0.0",
     "@solana/kit": "^5.1.0",
+    "@x402/core": "^2.3.1",
     "chalk": "^5.4.1",
     "chalk-animation": "^2.0.3",
     "dotenv": "^16.4.5",
@@ -23,6 +35,10 @@
     "inquirer": "^9.2.15",
     "ora": "^8.2.0",
     "viem": "^2.31.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "typescript": "^5.8.3"
   },
   "keywords": [
     "consensus",
@@ -39,6 +55,8 @@
     "node": ">=18.0.0"
   },
   "files": [
+    "dist/",
+    "index.d.ts",
     "bin/",
     "README.md",
     "LICENSE",
