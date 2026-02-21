@@ -353,7 +353,13 @@ export default class ConsensusProxy {
       router_stats: this.router.getStats(),
     };
   }
+  computeDedupeKey(params) {
+    return generateDedupeKey(params);
+  }
 
+  getCached(dedupeKey) {
+  return this.cache.get(dedupeKey) || null;
+  }
   getPaymentStatus(dedupeKey) {
     return {
       is_cached: this.cache.has(dedupeKey),
