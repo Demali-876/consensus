@@ -2,22 +2,79 @@ import { AsyncLocalStorage } from "async_hooks";
 
 const DEFAULT_SERVER_URL =
   process.env.CONSENSUS_SERVER_URL || "https://consensus.canister.software";
+const USD_SCALE = 1_000_000;
+const PROXY_PAID_REQUEST_COST_USD = 0.0001;
 
 type FetchWithPayment = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 type ProxyMode = "inclusive" | "exclusive";
 type ProxyStrategy = "auto" | "manual";
 
+type ProxyBudgetSnapshot = {
+  /** Configured max spend in USD, or null when no limit is configured. */
+  limit_usd: number | null;
+  /** Fixed proxy charge applied per paid /proxy request. */
+  request_cost_usd: number;
+  /** Total spent so far in USD. */
+  spent_usd: number;
+  /** Remaining budget in USD, or null when unlimited. */
+  remaining_usd: number | null;
+  /** True when proxying is in stand-down mode due to budget limits. */
+  exhausted: boolean;
+};
+
 type ProxyClientOptions = {
+  /**
+   * Route filtering behavior for inbound server paths.
+   * - "inclusive": proxy everything except `routes`
+   * - "exclusive": proxy only `routes`
+   */
   mode?: ProxyMode;
+  /**
+   * Path rules used with `mode`, for example `["/health", "/metrics"]`.
+   * Query params are ignored; matching is based on path only.
+   */
   routes?: string[];
+  /**
+   * Path matcher behavior for `routes`.
+   * - false (default): exact path only (`/route` does not match `/route/subroute`)
+   * - true: include subroutes (`/route` matches `/route/*`)
+   */
   matchSubroutes?: boolean;
+  /**
+   * Interception strategy.
+   * - "auto": globally intercepts `fetch` for route-matched request scope
+   * - "manual": does not intercept global `fetch`; use `req.consensus.fetch` / `request`
+   */
   strategy?: ProxyStrategy;
+  /**
+   * Cache time-to-live in seconds for proxy responses.
+   * Sent as `x-cache-ttl`; controls how long deduped responses can be reused.
+   */
   cache_ttl?: number;
+  /**
+   * Enables verbose proxy response payload.
+   * When true, proxy responses include `meta` with fields like:
+   * `cached`, `dedupe_key`, `processing_ms`, and `timestamp`.
+   */
   verbose?: boolean;
+  /** Preferred proxy region, for example "us-east". Sent as `x-node-region`. */
   node_region?: string;
+  /**
+   * Force routing through a specific node domain, for example:
+   * `nodexyz.consensus.canister.software`.
+   * Sent as `x-node-domain`.
+   */
   node_domain?: string;
+  /** Exclude a specific node/domain from routing. Sent as `x-node-exclude`. */
   node_exclude?: string;
+  /**
+   * Max proxy spend in USD (up to 6 decimals).
+   * Once exhausted, ProxyClient stands down and uses direct fetch.
+   */
+  limit_usd?: number;
+  /** Callback fired once when budget is exhausted and stand-down is activated. */
+  on_limit_reached?: (budget: ProxyBudgetSnapshot) => void;
 };
 
 type ProxyPayload = {
@@ -28,11 +85,25 @@ type ProxyPayload = {
 };
 
 type ProxyResponseShape = {
+  /** HTTP status code returned by proxy response. */
   status: number;
+  /** HTTP reason phrase from proxy response. */
   statusText: string;
+  /** Response headers returned by proxy. */
   headers: Record<string, string>;
+  /** Parsed response payload from proxy target response. */
   data: unknown;
-  meta: unknown;
+  /**
+   * Optional verbose proxy metadata. Common keys:
+   * cached, dedupe_key, processing_ms, timestamp.
+   */
+  meta: {
+    cached?: boolean;
+    dedupe_key?: string;
+    processing_ms?: number;
+    timestamp?: string;
+    [key: string]: unknown;
+  } | null;
 };
 
 type ConsensusContext = {
@@ -48,6 +119,9 @@ type ConsensusContext = {
     perRequestOptions?: Partial<ProxyClientOptions>
   ) => Promise<ProxyResponseShape>;
   passthroughFetch: FetchWithPayment | null;
+  createFetch: (pathname?: string) => FetchWithPayment;
+  getBudget: () => ProxyBudgetSnapshot;
+  isStandDown: () => boolean;
 };
 
 type MiddlewareReq = {
@@ -60,9 +134,31 @@ type MiddlewareReq = {
 type Next = (err?: unknown) => void;
 
 class ProxyClientError extends Error {
+  /** HTTP status from proxy response when available. */
   status?: number;
+  /** Parsed proxy error payload when available. */
   data?: unknown;
 }
+
+type ProxyClientRuntime = {
+  fetch: (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+    perRequestOptions?: Partial<ProxyClientOptions>
+  ) => Promise<Response>;
+  request: (
+    payload: Partial<ProxyPayload>,
+    perRequestOptions?: Partial<ProxyClientOptions>
+  ) => Promise<ProxyResponseShape>;
+  runWithPath: <T>(pathname: string, run: () => T | Promise<T>) => Promise<T>;
+  createFetch: (pathname?: string) => FetchWithPayment;
+  getBudget: () => ProxyBudgetSnapshot;
+  resetBudget: () => void;
+  isStandDown: () => boolean;
+};
+
+type ProxyClientMiddleware = ((req: MiddlewareReq, res: unknown, next: Next) => void) &
+  ProxyClientRuntime;
 
 const proxyFetchContext = new AsyncLocalStorage<{ proxyFetch: FetchWithPayment | null }>();
 let interceptorInstalled = false;
@@ -88,9 +184,7 @@ function normalizeHeaders(headers?: HeadersInit | null): Record<string, string> 
   }
 
   if (Array.isArray(headers)) {
-    return Object.fromEntries(
-      headers.map(([key, value]) => [String(key), String(value)])
-    );
+    return Object.fromEntries(headers.map(([key, value]) => [String(key), String(value)]));
   }
 
   const result: Record<string, string> = {};
@@ -116,9 +210,7 @@ function shouldProxyPath(pathname: string, options: ProxyClientOptions): boolean
   const mode: ProxyMode = options.mode === "exclusive" ? "exclusive" : "inclusive";
   const routes = Array.isArray(options.routes) ? options.routes : [];
   const matchSubroutes = Boolean(options.matchSubroutes);
-  const matched = routes.some((route) =>
-    pathMatches(pathname, route, matchSubroutes)
-  );
+  const matched = routes.some((route) => pathMatches(pathname, route, matchSubroutes));
 
   return mode === "exclusive" ? matched : !matched;
 }
@@ -152,6 +244,28 @@ function parseMaybeJson(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+function parseUsdToMicros(
+  value: number | undefined,
+  fieldName: string
+): number | null {
+  if (typeof value === "undefined" || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new TypeError(`${fieldName} must be a non-negative number`);
+  }
+
+  const micros = Math.round(value * USD_SCALE);
+  const normalized = micros / USD_SCALE;
+  if (Math.abs(normalized - value) > 1e-9) {
+    throw new TypeError(`${fieldName} supports at most 6 decimal places`);
+  }
+
+  return micros;
+}
+
+function microsToUsd(micros: number): number {
+  return Number((micros / USD_SCALE).toFixed(6));
 }
 
 function normalizeBody(body: BodyInit | object | null | undefined, headers: Record<string, string>): unknown {
@@ -191,6 +305,23 @@ function normalizeBody(body: BodyInit | object | null | undefined, headers: Reco
   }
 
   throw new Error(`Unsupported request body type: ${typeof body}`);
+}
+
+function bodyToInit(body: unknown, headers: Record<string, string>): BodyInit | undefined {
+  const normalized = normalizeBody(body as BodyInit | object | null | undefined, headers);
+
+  if (typeof normalized === "undefined") return undefined;
+  if (typeof normalized === "string") return normalized;
+  if (
+    typeof normalized === "object" &&
+    normalized !== null &&
+    !(normalized instanceof ArrayBuffer) &&
+    !ArrayBuffer.isView(normalized)
+  ) {
+    return JSON.stringify(normalized);
+  }
+
+  return normalized as BodyInit;
 }
 
 async function buildProxyPayload(
@@ -270,11 +401,7 @@ function toFetchResponse(proxyResult: ProxyResponseShape, requestUrl: string): R
         ? payload
         : JSON.stringify(payload);
 
-  if (
-    payload !== null &&
-    typeof payload === "object" &&
-    !headers.has("content-type")
-  ) {
+  if (payload !== null && typeof payload === "object" && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
 
@@ -295,6 +422,22 @@ function toFetchResponse(proxyResult: ProxyResponseShape, requestUrl: string): R
   });
 
   return response;
+}
+
+function responseHeadersToRecord(headers: Headers): Record<string, string> {
+  const record: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    record[key] = value;
+  });
+  return record;
+}
+
+function isLikelyPaidProxyResponse(proxyResult: ProxyResponseShape): boolean {
+  const meta = proxyResult.meta;
+  if (meta && typeof meta === "object" && "cached" in (meta as Record<string, unknown>)) {
+    return (meta as { cached?: unknown }).cached !== true;
+  }
+  return true;
 }
 
 function ensureInterceptorInstalled(): void {
@@ -329,17 +472,80 @@ function currentPassthroughFetch(): FetchWithPayment | null {
 export function ProxyClient(
   fetchWithPayment: FetchWithPayment,
   options: ProxyClientOptions = {}
-): (req: MiddlewareReq, res: unknown, next: Next) => void {
+): ProxyClientMiddleware {
   if (typeof fetchWithPayment !== "function") {
-    throw new TypeError(
-      "ProxyClient requires fetchWithPayment as the first argument"
-    );
+    throw new TypeError("ProxyClient requires fetchWithPayment as the first argument");
   }
 
   const strategy: ProxyStrategy = options.strategy === "manual" ? "manual" : "auto";
   const serverUrl = trimTrailingSlash(DEFAULT_SERVER_URL);
   const proxyEndpoint = `${serverUrl}/proxy`;
   const baseControlHeaders = controlHeadersFromOptions(options);
+  const limitMicros = parseUsdToMicros(options.limit_usd, "limit_usd");
+  const requestCostMicros = parseUsdToMicros(
+    PROXY_PAID_REQUEST_COST_USD,
+    "proxy_request_cost_usd"
+  ) ?? 0;
+
+  let spentMicros = 0;
+  let limitCallbackFired = false;
+
+  function computeStandDownState(): boolean {
+    if (limitMicros === null) return false;
+    if (spentMicros >= limitMicros) return true;
+    if (requestCostMicros <= 0) return false;
+    return spentMicros + requestCostMicros > limitMicros;
+  }
+
+  function getBudget(): ProxyBudgetSnapshot {
+    const remainingMicros = limitMicros === null ? null : Math.max(0, limitMicros - spentMicros);
+    return {
+      limit_usd: limitMicros === null ? null : microsToUsd(limitMicros),
+      request_cost_usd: microsToUsd(requestCostMicros),
+      spent_usd: microsToUsd(spentMicros),
+      remaining_usd: remainingMicros === null ? null : microsToUsd(remainingMicros),
+      exhausted: computeStandDownState(),
+    };
+  }
+
+  function isStandDown(): boolean {
+    const exhausted = computeStandDownState();
+    if (
+      exhausted &&
+      !limitCallbackFired &&
+      typeof options.on_limit_reached === "function"
+    ) {
+      limitCallbackFired = true;
+      options.on_limit_reached(getBudget());
+    }
+    return exhausted;
+  }
+
+  function incrementSpend(proxyResult: ProxyResponseShape): void {
+    if (requestCostMicros <= 0) return;
+    if (!isLikelyPaidProxyResponse(proxyResult)) return;
+    spentMicros += requestCostMicros;
+    if (limitMicros !== null && spentMicros > limitMicros) spentMicros = limitMicros;
+    isStandDown();
+  }
+
+  function resetBudget(): void {
+    spentMicros = 0;
+    limitCallbackFired = false;
+  }
+
+  async function passthroughFetchOrThrow(
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ): Promise<Response> {
+    const directFetch = currentPassthroughFetch();
+    if (!directFetch) {
+      throw new ProxyClientError(
+        "Global fetch is unavailable; cannot bypass proxy while in stand-down mode."
+      );
+    }
+    return directFetch(input, init);
+  }
 
   async function requestProxy(payload: ProxyPayload): Promise<ProxyResponseShape> {
     const response = await fetchWithPayment(proxyEndpoint, {
@@ -365,17 +571,57 @@ export function ProxyClient(
     return toProxyResult(response, parsed);
   }
 
+  async function requestDirectFromPayload(
+    payload: Partial<ProxyPayload>,
+    reason: string
+  ): Promise<ProxyResponseShape> {
+    const targetUrl = String(payload.target_url || "").trim();
+    if (!targetUrl) {
+      throw new ProxyClientError("target_url is required when proxy is in stand-down mode");
+    }
+
+    const method = String(payload.method || "GET").toUpperCase();
+    const headers = normalizeHeaders(payload.headers);
+    const init: RequestInit = {
+      method,
+      headers,
+    };
+
+    if (!["GET", "HEAD"].includes(method) && typeof payload.body !== "undefined") {
+      const convertedBody = bodyToInit(payload.body, headers);
+      if (typeof convertedBody !== "undefined") init.body = convertedBody;
+    }
+
+    const response = await passthroughFetchOrThrow(targetUrl, init);
+    const raw = await response.text();
+    const parsed = parseMaybeJson(raw);
+
+    return {
+      status: response.status,
+      statusText: response.statusText || "",
+      headers: responseHeadersToRecord(response.headers),
+      data: parsed,
+      meta: { bypassed: true, reason },
+    };
+  }
+
   async function proxiedFetch(
     input: RequestInfo | URL,
     init: RequestInit = {},
     perRequestOptions: Partial<ProxyClientOptions> = {}
   ): Promise<Response> {
+    if (isStandDown()) {
+      return passthroughFetchOrThrow(input, init);
+    }
+
     const controlHeaders = {
       ...baseControlHeaders,
       ...controlHeadersFromOptions(perRequestOptions),
     };
     const payload = await buildProxyPayload(input, init, controlHeaders);
     const proxyResult = await requestProxy(payload);
+    incrementSpend(proxyResult);
+
     const requestUrl =
       typeof Request !== "undefined" && input instanceof Request ? input.url : String(input);
     return toFetchResponse(proxyResult, requestUrl);
@@ -385,22 +631,59 @@ export function ProxyClient(
     payload: Partial<ProxyPayload> = {},
     perRequestOptions: Partial<ProxyClientOptions> = {}
   ): Promise<ProxyResponseShape> {
+    if (isStandDown()) {
+      return requestDirectFromPayload(payload, "limit_reached");
+    }
+
     const controlHeaders = {
       ...baseControlHeaders,
       ...controlHeadersFromOptions(perRequestOptions),
       ...normalizeHeaders(payload.headers),
     };
-    return requestProxy({
+
+    const proxyResult = await requestProxy({
       target_url: String(payload.target_url || ""),
       method: String(payload.method || "GET").toUpperCase(),
       headers: controlHeaders,
       ...(typeof payload.body !== "undefined" ? { body: payload.body } : {}),
     });
+
+    incrementSpend(proxyResult);
+    return proxyResult;
   }
 
-  return (req: MiddlewareReq, _res: unknown, next: Next) => {
+  function createFetch(pathname = "/"): FetchWithPayment {
+    return (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!shouldProxyPath(pathname, options)) {
+        return passthroughFetchOrThrow(input, init);
+      }
+      return proxiedFetch(input, init);
+    };
+  }
+
+  async function runWithPath<T>(pathname: string, run: () => T | Promise<T>): Promise<T> {
+    if (typeof run !== "function") {
+      throw new TypeError("runWithPath requires a callback function");
+    }
+
+    ensureInterceptorInstalled();
+    const shouldProxy = shouldProxyPath(pathname, options);
+
+    return new Promise<T>((resolve, reject) => {
+      proxyFetchContext.run(
+        { proxyFetch: shouldProxy ? proxiedFetch : null },
+        () => {
+          Promise.resolve()
+            .then(run)
+            .then(resolve, reject);
+        }
+      );
+    });
+  }
+
+  const middleware = ((req: MiddlewareReq, _res: unknown, next: Next) => {
     const routePath = req?.path || req?.url || "/";
-    const shouldProxy = shouldProxyPath(routePath, options);
+    const shouldProxy = shouldProxyPath(routePath, options) && !isStandDown();
 
     req.consensus = {
       strategy,
@@ -408,6 +691,9 @@ export function ProxyClient(
       fetch: proxiedFetch,
       request: proxiedRequest,
       passthroughFetch: currentPassthroughFetch(),
+      createFetch,
+      getBudget,
+      isStandDown,
     };
 
     if (strategy !== "auto") {
@@ -416,7 +702,16 @@ export function ProxyClient(
     }
 
     ensureInterceptorInstalled();
-
     proxyFetchContext.run({ proxyFetch: shouldProxy ? proxiedFetch : null }, () => next());
-  };
+  }) as ProxyClientMiddleware;
+
+  middleware.fetch = proxiedFetch;
+  middleware.request = proxiedRequest;
+  middleware.runWithPath = runWithPath;
+  middleware.createFetch = createFetch;
+  middleware.getBudget = getBudget;
+  middleware.resetBudget = resetBudget;
+  middleware.isStandDown = isStandDown;
+
+  return middleware;
 }
