@@ -24,7 +24,7 @@ const TOKEN_TTL_MS = 60_000;
  * @param {Router} router - shared router instance
  */
 export function registerWebSocket(app, httpsServer, x402Server, config, router){
-  const { EVM_PAY_TO, SOLANA_PAY_TO } = config;
+  const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
   app.get(
     "/ws",
@@ -63,6 +63,22 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
               },
               network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
               payTo: SOLANA_PAY_TO,
+            },
+            {
+              scheme: "exact",
+              price: (context) => {
+                const model = context.adapter.getQueryParam?.("model") ?? "hybrid";
+                const minutes = parseInt(context.adapter.getQueryParam?.("minutes") ?? "5");
+                const megabytes = parseInt(context.adapter.getQueryParam?.("megabytes") ?? "50");
+
+                const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+                const pricing = PRICING_PRESETS[pricingKey];
+                const cost = calculateSessionCost(pricing, minutes, megabytes);
+
+               return String(Math.round(cost * 1e8))
+              },
+              network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',
+              payTo: ICP_PAY_TO,
             },
           ],
           description: "Pay-per-use WebSockets on demand",

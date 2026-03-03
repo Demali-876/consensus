@@ -13,6 +13,7 @@ import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
+import { ExactIcpScheme } from '@canister-software/x402-icp/server'
 import { registerWhitepaperSignup } from "./data/whitepaperSignup.js";
 import { registerWebSocket } from "./wss.js";
 import { registerNodes } from "./orchestrator.js";
@@ -22,9 +23,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 
 const PORT = 8080;
-const FACILITATOR_URL = "https://facilitator.payai.network";
-const EVM_PAY_TO = "0x9cd64438C8e66E7e85EB097b516541Cd50780845";
-const SOLANA_PAY_TO = "J6EHzeiWxrffitfscuaZty9A9AKQVPte7G9VEoHubuGw";
+if (!process.env.FACILITATOR_URL) {
+  throw new Error("FACILITATOR_URL is missing from .env");
+}
+if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) {
+  throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO')
+}
+const FACILITATOR_URL = process.env.FACILITATOR_URL;
+const EVM_PAY_TO = process.env.EVM_PAY_TO;
+const SOLANA_PAY_TO = process.env.SOLANA_PAY_TO;
+const ICP_PAY_TO = process.env.ICP_PAY_TO;
 
 const MAIN_TLS_KEY =
   process.env.MAIN_TLS_KEY_PATH || path.join(root, "scripts/certs", "main.key");
@@ -33,8 +41,9 @@ const MAIN_TLS_CERT =
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 const x402Server = new x402ResourceServer(facilitatorClient)
-  .register("eip155:84532", new ExactEvmScheme())
-  .register("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", new ExactSvmScheme());
+  .register('eip155:84532', new ExactEvmScheme())
+  .register('solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', new ExactSvmScheme())
+  .register('icp:1:xafvr-biaaa-aaaai-aql5q-cai', new ExactIcpScheme())
 
 const router = new Router();
 const proxy = new ConsensusProxy({router: router});
@@ -55,11 +64,13 @@ const server = https.createServer(
 const wsStats = registerWebSocket(app, server, x402Server, {
   EVM_PAY_TO,
   SOLANA_PAY_TO,
+  ICP_PAY_TO
 }, router);
 
 const nodeStats = registerNodes(app, server, x402Server, {
   EVM_PAY_TO,
   SOLANA_PAY_TO,
+  ICP_PAY_TO
 });
 
 app.get("/", (req, res) => {
@@ -70,6 +81,7 @@ app.get("/", (req, res) => {
     payment_networks: {
       evm: { chain: "Base Sepolia", address: EVM_PAY_TO },
       solana: { chain: "Devnet", address: SOLANA_PAY_TO },
+      icp: { chain: 'TESTICP', address: ICP_PAY_TO },
     },
     facilitator: FACILITATOR_URL,
   });
@@ -145,6 +157,12 @@ app.use(
             network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
             payTo: SOLANA_PAY_TO,
           },
+          {
+            scheme: 'exact',
+            price: '100000',
+            network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',
+            payTo: ICP_PAY_TO,
+          }
         ],
         description: "API Deduplication Service",
         mimeType: "application/json",

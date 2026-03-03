@@ -12,6 +12,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@canister-software/x402-icp": "^0.1.1",
     "@coinbase/cdp-sdk": "^1.25.0",
     "@x402/core": "^2.1.0",
     "@x402/evm": "^2.1.0",
