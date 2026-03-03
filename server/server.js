@@ -104,7 +104,6 @@ app.get("/stats", (req, res) => {
   });
 });
 
-// Cache pre-check — runs before payment, returns cached response immediately
 app.post("/proxy", async (req, res, next) => {
   const { target_url, method = "GET", headers = {}, body } = req.body;
   if (!target_url) return next();
@@ -129,7 +128,6 @@ app.post("/proxy", async (req, res, next) => {
   next();
 });
 
-// Payment only fires if cache missed above
 app.use(
   paymentMiddleware(
     {
