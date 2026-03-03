@@ -1,16 +1,47 @@
 const DEFAULT_SERVER_URL =
   process.env.CONSENSUS_SERVER_URL || "https://consensus.canister.software";
+const USD_SCALE = 1_000_000;
 
 type FetchWithPayment = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 type ConsensusSocketModel = "hybrid" | "time" | "data";
 
+type SessionPricing = {
+  model: ConsensusSocketModel;
+  pricePerMinute: number;
+  pricePerMB: number;
+};
+
+const PRICING_PRESETS: Record<"TIME" | "DATA" | "HYBRID", SessionPricing> = {
+  TIME: {
+    model: "time",
+    pricePerMinute: 0.001,
+    pricePerMB: 0,
+  },
+  DATA: {
+    model: "data",
+    pricePerMinute: 0,
+    pricePerMB: 0.00012,
+  },
+  HYBRID: {
+    model: "hybrid",
+    pricePerMinute: 0.0005,
+    pricePerMB: 0.0001,
+  },
+};
+
 type ConsensusSocketTokenParams = {
+  /** Billing model used to calculate token/session price. */
   model?: ConsensusSocketModel;
+  /** Session duration to purchase (integer minutes, >= 0). */
   minutes?: number;
+  /** Session data allowance to purchase (integer MB, >= 0). */
   megabytes?: number;
+  /** Optional preferred node region during token request (for example "us-east"). */
   nodeRegion?: string;
+  /** Optional hard route to a specific node domain during token request. */
   nodeDomain?: string;
+  /** Optional node/domain to exclude from routing during token request. */
   nodeExclude?: string;
 };
 
@@ -54,10 +85,18 @@ type ConsensusSocketSession = {
 };
 
 type ConsensusSocketClientOptions = {
+  /** Custom WebSocket constructor; auto-detected when omitted. */
   webSocketFactory?: new (...args: unknown[]) => unknown;
+  /** Max time to wait for socket open before failing. */
   openTimeoutMs?: number;
+  /** Fixed delay between reconnect attempts. */
   reconnectIntervalMs?: number;
+  /** Default token params merged into every requestToken call. */
   defaults?: ConsensusSocketTokenParams;
+  /** Maximum websocket spend in USD (up to 6 decimals) before stand-down. */
+  limit_usd?: number;
+  /** Callback fired once when websocket budget is exhausted. */
+  on_limit_reached?: (budget: ConsensusSocketBudgetSnapshot) => void;
 };
 
 type ConsensusSocketClient = {
@@ -79,6 +118,22 @@ type ConsensusSocketClient = {
     callbacks: ConsensusSocketCallbacks | undefined,
     options: { safe: true }
   ): Promise<ConsensusSocketSafeResult<ConsensusSocketSession>>;
+  getBudget(): ConsensusSocketBudgetSnapshot;
+  resetBudget(): void;
+  isStandDown(): boolean;
+};
+
+type ConsensusSocketBudgetSnapshot = {
+  /** Configured max spend in USD, or null when no limit is configured. */
+  limit_usd: number | null;
+  /** Total spent so far in USD. */
+  spent_usd: number;
+  /** Remaining budget in USD, or null when unlimited. */
+  remaining_usd: number | null;
+  /** True when token purchase is blocked by the budget guard. */
+  exhausted: boolean;
+  /** Last locally quoted token/session cost in USD. */
+  last_quote_usd: number;
 };
 
 type SocketEventName = "open" | "message" | "close" | "error";
@@ -95,9 +150,14 @@ type SocketLike = {
 };
 
 class SocketClientError extends Error {
+  /** HTTP status from token endpoint when available. */
   status?: number;
+  /** Parsed server error payload when available. */
   data?: unknown;
 }
+
+/** Thrown when requested token cost exceeds remaining websocket budget. */
+class SocketBudgetLimitError extends SocketClientError {}
 
 function trimTrailingSlash(value: string): string {
   return String(value || "").replace(/\/+$/, "");
@@ -110,6 +170,38 @@ function parseMaybeJson(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+function parseUsdToMicros(value: number | undefined, fieldName: string): number | null {
+  if (typeof value === "undefined" || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new TypeError(`${fieldName} must be a non-negative number`);
+  }
+
+  const micros = Math.round(value * USD_SCALE);
+  const normalized = micros / USD_SCALE;
+  if (Math.abs(normalized - value) > 1e-9) {
+    throw new TypeError(`${fieldName} supports at most 6 decimal places`);
+  }
+
+  return micros;
+}
+
+function microsToUsd(micros: number): number {
+  return Number((micros / USD_SCALE).toFixed(6));
+}
+
+function calculateSessionCost(pricing: SessionPricing, minutes: number, megabytes: number): number {
+  let cost = 0;
+
+  if (pricing.model === "time" || pricing.model === "hybrid") {
+    cost += (minutes || 0) * pricing.pricePerMinute;
+  }
+  if (pricing.model === "data" || pricing.model === "hybrid") {
+    cost += (megabytes || 0) * pricing.pricePerMB;
+  }
+
+  return cost;
 }
 
 function normalizeTokenParams(
@@ -227,13 +319,85 @@ export function SocketClient(
   const baseUrl = trimTrailingSlash(DEFAULT_SERVER_URL);
   const openTimeoutMs = options.openTimeoutMs ?? 12_000;
   const reconnectIntervalMs = options.reconnectIntervalMs ?? 2_000;
+  const limitMicros = parseUsdToMicros(options.limit_usd, "limit_usd");
   let lastTokenParams: ConsensusSocketTokenParams | undefined;
+  let spentMicros = 0;
+  let limitCallbackFired = false;
+  let lastQuoteMicros = 0;
+
+  function computeStandDownState(nextCostMicros = 0): boolean {
+    if (limitMicros === null) return false;
+    if (spentMicros >= limitMicros) return true;
+    return spentMicros + nextCostMicros > limitMicros;
+  }
+
+  function getBudget(): ConsensusSocketBudgetSnapshot {
+    const remainingMicros = limitMicros === null ? null : Math.max(0, limitMicros - spentMicros);
+    return {
+      limit_usd: limitMicros === null ? null : microsToUsd(limitMicros),
+      spent_usd: microsToUsd(spentMicros),
+      remaining_usd: remainingMicros === null ? null : microsToUsd(remainingMicros),
+      exhausted: computeStandDownState(),
+      last_quote_usd: microsToUsd(lastQuoteMicros),
+    };
+  }
+
+  function isStandDown(): boolean {
+    const exhausted = computeStandDownState();
+    if (
+      exhausted &&
+      !limitCallbackFired &&
+      typeof options.on_limit_reached === "function"
+    ) {
+      limitCallbackFired = true;
+      options.on_limit_reached(getBudget());
+    }
+    return exhausted;
+  }
+
+  function ensureBudgetFor(quotedCostMicros: number): void {
+    if (!computeStandDownState(quotedCostMicros)) return;
+    isStandDown();
+    throw new SocketBudgetLimitError("WebSocket budget limit reached; token request blocked");
+  }
+
+  function incrementSpend(quotedCostMicros: number): void {
+    if (quotedCostMicros <= 0) return;
+    spentMicros += quotedCostMicros;
+    if (limitMicros !== null && spentMicros > limitMicros) spentMicros = limitMicros;
+    isStandDown();
+  }
+
+  function resetBudget(): void {
+    spentMicros = 0;
+    limitCallbackFired = false;
+    lastQuoteMicros = 0;
+  }
+
+  function quoteTokenCostMicros(params: {
+    model: ConsensusSocketModel;
+    minutes: number;
+    megabytes: number;
+  }): number {
+    const pricingKey =
+      params.model === "time" ? "TIME" : params.model === "data" ? "DATA" : "HYBRID";
+    const pricing = PRICING_PRESETS[pricingKey];
+    const usd = calculateSessionCost(pricing, params.minutes, params.megabytes);
+    return parseUsdToMicros(usd, "session_cost_usd") ?? 0;
+  }
 
   async function requestTokenInternal(
     params?: ConsensusSocketTokenParams
   ): Promise<ConsensusSocketTokenAuth> {
     const normalized = normalizeTokenParams(options.defaults, params);
     lastTokenParams = normalized;
+    const quotedCostMicros = quoteTokenCostMicros({
+      model: normalized.model,
+      minutes: normalized.minutes,
+      megabytes: normalized.megabytes,
+    });
+    lastQuoteMicros = quotedCostMicros;
+    ensureBudgetFor(quotedCostMicros);
 
     const query = new URLSearchParams({
       model: normalized.model,
@@ -264,6 +428,8 @@ export function SocketClient(
     if (!auth?.connect_url || !auth?.token) {
       throw new SocketClientError("Invalid token response: missing token/connect_url");
     }
+
+    incrementSpend(quotedCostMicros);
 
     return {
       token: String(auth.token),
@@ -420,6 +586,11 @@ export function SocketClient(
             callbacks?.onError?.(error);
             emit("error", error);
 
+            if (error instanceof SocketBudgetLimitError) {
+              state.reconnecting = false;
+              return;
+            }
+
             if (!state.closedByCaller) {
               reconnectTimer = setTimeout(async () => {
                 if (!state.closedByCaller) {
@@ -433,6 +604,9 @@ export function SocketClient(
                   } catch (retryError) {
                     callbacks?.onError?.(retryError);
                     emit("error", retryError);
+                    if (retryError instanceof SocketBudgetLimitError) {
+                      state.reconnecting = false;
+                    }
                   }
                 }
               }, reconnectIntervalMs);
@@ -499,5 +673,8 @@ export function SocketClient(
   return {
     requestToken,
     connect,
+    getBudget,
+    resetBudget,
+    isStandDown,
   };
 }

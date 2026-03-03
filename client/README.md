@@ -69,7 +69,7 @@ CONSENSUS_SERVER_URL=https://your-custom-node.example.com
 
 ## ProxyClient
 
-`ProxyClient(fetchWithPayment, options)` returns Express-compatible middleware that routes your outbound HTTP requests through Consensus proxy nodes, handling x402 payments automatically.
+`ProxyClient(fetchWithPayment, options)` returns a framework-agnostic proxy controller with Express-compatible middleware behavior. It routes outbound HTTP requests through Consensus proxy nodes and supports automatic spend-limit stand-down.
 
 ### ProxyClient Options
 
@@ -84,6 +84,10 @@ CONSENSUS_SERVER_URL=https://your-custom-node.example.com
 | `node_region` | `string` | — | Prefer proxy nodes in a specific geographic region. |
 | `node_domain` | `string` | — | Route through a specific node domain. |
 | `node_exclude` | `string` | — | Exclude a specific node domain from selection. |
+| `limit_usd` | `number` | — | Max proxy spend in USD (up to 6 decimals). When reached, proxying stands down to direct `fetch`. |
+| `on_limit_reached` | `(budget) => void` | — | Callback fired once when stand-down is activated. |
+
+Proxy spend tracking uses the fixed server price of `$0.0001` per paid `/proxy` request (cached hits are not charged).
 
 ### Auto Strategy (Default)
 
@@ -147,6 +151,26 @@ const response = await req.consensus.fetch(
 );
 ```
 
+### Framework-Agnostic Usage
+
+Use `runWithPath()` to scope interception in any server framework and `createFetch()` for explicit route-scoped fetch:
+
+```ts
+const proxy = ProxyClient(fetchWithPayment, {
+  mode: "exclusive",
+  routes: ["/api"],
+  limit_usd: 1.25,
+});
+
+await proxy.runWithPath("/api", async () => {
+  const response = await fetch("https://api.example.com/data");
+  console.log(await response.json());
+});
+
+const apiFetch = proxy.createFetch("/api");
+const directFetch = proxy.createFetch("/health");
+```
+
 ---
 
 ## SocketClient
@@ -160,7 +184,11 @@ const response = await req.consensus.fetch(
 | `openTimeoutMs` | `number` | `12000` | Milliseconds to wait for the WebSocket connection to open before timing out. |
 | `reconnectIntervalMs` | `number` | `2000` | Milliseconds between automatic reconnection attempts. |
 | `defaults` | `ConsensusSocketTokenParams` | — | Default token parameters applied to every `requestToken()` call unless overridden. |
+| `limit_usd` | `number` | — | Max WebSocket spend in USD (up to 6 decimals). If next token quote exceeds remaining budget, token request is blocked. |
+| `on_limit_reached` | `(budget) => void` | — | Callback fired once when the WebSocket spend limit is reached. |
 | `webSocketFactory` | `constructor` | auto-detected | Custom WebSocket constructor (browser `WebSocket` or `ws` for Node.js). Auto-detected if not provided. |
+
+WebSocket spend checks use a local quote from the known pricing model (`model`, `minutes`, `megabytes`) before token purchase, so there is no additional price-check round trip.
 
 ### Billing Models
 
