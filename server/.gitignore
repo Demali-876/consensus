@@ -1,8 +1,9 @@
 .env
 /node_modules
 .tmp
-/data/nodes.db
+/data/nodes.*
 yarn.lock
 main.key
 main.csr
 /node-certs
+data/*.json

@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 
-const DATA_FILE = path.resolve(process.cwd(), "server/data/whitepapersignups.json");
+const DATA_FILE = path.resolve(process.cwd(), "whitepapersignups.json");
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 async function readEntries() {
