@@ -1,8 +1,7 @@
 import crypto from "crypto";
 import Router from "./router.ts";
-import { WebSocketServer } from "ws";
+import { WebSocketServer , WebSocket} from "ws";
 import { paymentMiddleware } from "@x402/express";
-import WebSocket from "ws";
 import {
   PRICING_PRESETS,
   calculateSessionLimits,

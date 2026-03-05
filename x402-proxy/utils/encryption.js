@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import 'dotenv/config';
+import '@dotenvx/dotenvx/config';
 
 export class ChaChaPoly1305 {
     constructor(){

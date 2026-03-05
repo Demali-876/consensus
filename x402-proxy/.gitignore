@@ -1,5 +1,4 @@
 /node_modules
 .env
+.env.keys
 clients.db
-proxy.csr
-proxy.key

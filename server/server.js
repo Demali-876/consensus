@@ -1,6 +1,5 @@
-import "dotenv/config";
-import https from "https";
-import fs from "fs";
+import "@dotenvx/dotenvx/config";
+import http from "http";
 import path from "path";
 import express from "express";
 import helmet from "helmet";
@@ -20,24 +19,20 @@ import { registerNodes } from "./orchestrator.js";
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, "..");
 
 const PORT = 8080;
+const FACILITATOR_URL = process.env.FACILITATOR_URL;
+const EVM_PAY_TO = process.env.EVM_PAY_TO;
+const SOLANA_PAY_TO = process.env.SOLANA_PAY_TO;
+const ICP_PAY_TO = process.env.ICP_PAY_TO;
+
 if (!process.env.FACILITATOR_URL) {
   throw new Error("FACILITATOR_URL is missing from .env");
 }
 if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) {
   throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO')
 }
-const FACILITATOR_URL = process.env.FACILITATOR_URL;
-const EVM_PAY_TO = process.env.EVM_PAY_TO;
-const SOLANA_PAY_TO = process.env.SOLANA_PAY_TO;
-const ICP_PAY_TO = process.env.ICP_PAY_TO;
 
-const MAIN_TLS_KEY =
-  process.env.MAIN_TLS_KEY_PATH || path.join(root, "scripts/certs", "main.key");
-const MAIN_TLS_CERT =
-  process.env.MAIN_TLS_CERT_PATH || path.join(root, "scripts/certs", "main.crt");
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 const x402Server = new x402ResourceServer(facilitatorClient)
@@ -54,13 +49,7 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 registerWhitepaperSignup(app);
 
-const server = https.createServer(
-  {
-    key: fs.readFileSync(MAIN_TLS_KEY),
-    cert: fs.readFileSync(MAIN_TLS_CERT),
-  },
-  app
-);
+const server = http.createServer(app);
 const wsStats = registerWebSocket(app, server, x402Server, {
   EVM_PAY_TO,
   SOLANA_PAY_TO,
@@ -104,7 +93,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.get("/stats", (req, res) => {
+app.get("/stats", (_req, res) => {
   const stats = proxy.getStats();
   res.json({
     ...stats,
@@ -222,7 +211,7 @@ app.post("/proxy", async (req, res) => {
 });
 server.listen(PORT, "::", () => {
   console.log(`Consensus x402 Proxy Service`);
-  console.log(`URL: https://consensus.canister.software:8888`);
+  console.log(`URL: http://consensus.canister.software:8888`);
 });
 
 ["SIGTERM", "SIGINT"].forEach((signal) => {

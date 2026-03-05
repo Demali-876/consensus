@@ -1,9 +1,7 @@
-import 'dotenv/config';
-import https from 'https';
-import fs from 'fs';
+import '@dotenvx/dotenvx/config';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import crypto from 'crypto';
 import { Agent as UndiciAgent } from 'undici';
 import express from 'express';
 import helmet from 'helmet';
@@ -19,10 +17,6 @@ import { registerExactSvmScheme } from '@x402/svm/exact/client';
 import { createKeyPairSignerFromBytes } from '@solana/signers';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, '..');
-
-const PROXY_TLS_KEY = process.env.PROXY_TLS_KEY_PATH || path.join(root, 'scripts/certs', 'proxy.key');
-const PROXY_TLS_CERT = process.env.PROXY_TLS_CERT_PATH || path.join(root, 'scripts/certs', 'proxy.crt');
 
 const undiciAgent = new UndiciAgent({ 
   keepAliveTimeout: 10000, 
@@ -253,10 +247,7 @@ async function boot() {
     await restoreWallets();
     await testConsensusConnection();
     
-    const server = https.createServer({
-      key: fs.readFileSync(PROXY_TLS_KEY),
-      cert: fs.readFileSync(PROXY_TLS_CERT),
-    }, app);
+    const server = http.createServer(app);
     
     server.listen(port, '0.0.0.0', () => {
       console.log(`x402 Proxy Service`);

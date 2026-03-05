@@ -1,4 +1,5 @@
 .env
+.env.keys
 /node_modules
 .tmp
 /data/nodes.*
