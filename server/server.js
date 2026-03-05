@@ -72,7 +72,7 @@ app.get("/", (req, res) => {
       solana: { chain: "Devnet", address: SOLANA_PAY_TO },
       icp: { chain: 'TESTICP', address: ICP_PAY_TO },
     },
-    facilitator: FACILITATOR_URL,
+    facilitator: "https://facilitator.canister.software",
   });
 });
 
