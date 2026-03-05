@@ -2,18 +2,18 @@ import crypto from 'crypto';
 import 'dotenv/config';
 
 export class ChaChaPoly1305 {
-    constructor(){
+  constructor() {
     const key = process.env.NODE_DB_ENCRYPTION_KEY;
     if (!key) {
       throw new Error('Client Database Encryption key is missing');
-      }
-    
+    }
+
     this.key = Buffer.from(key, 'base64');
     if (this.key.length !== 32) {
       throw new Error('Key must be 32 bytes (base64 encoded)');
-      }
     }
-   /**
+  }
+  /**
    * Encrypts data
    * @param {plaintext: string}
    * @returns { ciphertext: string, nonce: string, tag: string }
@@ -21,16 +21,16 @@ export class ChaChaPoly1305 {
   encrypt(plaintext) {
     const nonce = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv('chacha20-poly1305', this.key, nonce);
-    
+
     let ciphertext = cipher.update(plaintext, 'utf8', 'hex');
     ciphertext += cipher.final('hex');
-    
+
     const tag = cipher.getAuthTag();
-    
+
     return {
       ciphertext: ciphertext,
       nonce: nonce.toString('hex'),
-      tag: tag.toString('hex')
+      tag: tag.toString('hex'),
     };
   }
   /**
@@ -42,10 +42,10 @@ export class ChaChaPoly1305 {
     const nonce = Buffer.from(encrypted.nonce, 'hex');
     const decipher = crypto.createDecipheriv('chacha20-poly1305', this.key, nonce);
     decipher.setAuthTag(Buffer.from(encrypted.tag, 'hex'));
-    
+
     let plaintext = decipher.update(encrypted.ciphertext, 'hex', 'utf8');
     plaintext += decipher.final('utf8');
-    
+
     return plaintext;
   }
   /**
@@ -57,4 +57,3 @@ export class ChaChaPoly1305 {
     return crypto.createHash('sha256').update(apiKey).digest('hex');
   }
 }
-

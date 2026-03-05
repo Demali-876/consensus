@@ -59,12 +59,19 @@ function toJson(value) {
 
 function fromJson(value, fallback) {
   if (!value) return fallback ?? null;
-  try { return JSON.parse(value); } catch { return fallback ?? null; }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback ?? null;
+  }
 }
 
 function b64url(buffer) {
-  return Buffer.from(buffer).toString('base64')
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return Buffer.from(buffer)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
 }
 
 const upsertNodeInsertStmt = db.prepare(`
@@ -151,12 +158,14 @@ function rowToNode(row) {
     updated_at: row.updated_at,
     domain: row.domain,
     tls_mode: row.tls_mode,
-    heartbeat: row.hb_at ? {
-      rps: row.hb_rps,
-      p95_ms: row.hb_p95_ms,
-      version: row.hb_version,
-      at: row.hb_at
-    } : null
+    heartbeat: row.hb_at
+      ? {
+          rps: row.hb_rps,
+          p95_ms: row.hb_p95_ms,
+          version: row.hb_version,
+          at: row.hb_at,
+        }
+      : null,
   };
 }
 
@@ -174,7 +183,7 @@ export const NodeStore = {
       solana_address: input.solana_address ?? null,
       status: input.status ?? 'provisioning',
       created_at: ts,
-      updated_at: ts
+      updated_at: ts,
     };
     upsertNodeInsertStmt.run(payload);
     return this.getNode(input.id);
@@ -213,7 +222,7 @@ export const NodeStore = {
       id,
       nonce: b64url(nonce),
       alg,
-      expires_at
+      expires_at,
     };
   },
 
@@ -227,7 +236,7 @@ export const NodeStore = {
       nonce: row.nonce,
       expires_at: row.expires_at,
       consumed_at: row.consumed_at ?? null,
-      nonce_b64: b64url(row.nonce)
+      nonce_b64: b64url(row.nonce),
     };
   },
 
@@ -238,7 +247,7 @@ export const NodeStore = {
       throw new Error(`Join not found or already consumed: ${id}`);
     }
     return this.getJoin(id);
-  }
+  },
 };
 
 export default NodeStore;

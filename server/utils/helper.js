@@ -17,18 +17,18 @@ resourceServer.register('solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', new ExactSvmS
 
 export function createPaymentRequirements(resourceUrl, description) {
   return {
-    resource: resourceUrl,  // ✅ Just the URL string
+    resource: resourceUrl, // ✅ Just the URL string
     accepts: [
       {
         scheme: 'exact',
         network: 'eip155:84532',
-        amount: '1000',  // 0.001 USDC (6 decimals)
+        amount: '1000', // 0.001 USDC (6 decimals)
         asset: BASE_SEPOLIA_USDC,
         payTo: evmPayTo,
         maxTimeoutSeconds: 300,
         extra: {
-          name: "USDC",
-          version: "2",
+          name: 'USDC',
+          version: '2',
           resourceUrl,
         },
       },
@@ -76,7 +76,7 @@ export async function verifyPayment(req, res, paymentRequirements) {
 
   console.log('📋 Verification request:', JSON.stringify(verificationReq, null, 2));
   console.log('🔍 Verifying payment with facilitator...');
-  
+
   try {
     const verifyResult = await resourceServer.verifyPayment(verificationReq, paymentRequirements);
 

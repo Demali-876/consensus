@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 config({
   path: path.join(__dirname, '../.env'),
   override: true,
-  quiet: true
+  quiet: true,
 });
 
 const { updateServerDDNS, setSilentMode } = await import('../utils/dns.js');

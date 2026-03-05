@@ -1,13 +1,13 @@
-import Database from "better-sqlite3";
-import fs from "fs";
-import path from "path";
-import { ChaChaPoly1305 } from "../utils/encryption.js";
-import "dotenv/config";
+import Database from 'better-sqlite3';
+import fs from 'fs';
+import path from 'path';
+import { ChaChaPoly1305 } from '../utils/encryption.js';
+import 'dotenv/config';
 
 export class WalletStore {
   constructor(dbPath = process.env.CLIENT_DB_PATH) {
     if (!dbPath) {
-      throw new Error("CLIENT_DB_PATH is missing");
+      throw new Error('CLIENT_DB_PATH is missing');
     }
     this.dbPath = dbPath;
     this.db = null;
@@ -31,9 +31,9 @@ export class WalletStore {
       this.createSchema();
       this.testConnection();
 
-      console.log("Database initialized successfully");
+      console.log('Database initialized successfully');
     } catch (error) {
-      console.error("Failed to initialize database:", error.message);
+      console.error('Failed to initialize database:', error.message);
       throw error;
     }
   }
@@ -41,8 +41,8 @@ export class WalletStore {
    * Create database schema
    */
   createSchema() {
-  try {
-    this.db.exec(`
+    try {
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS wallets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         wallet_name TEXT UNIQUE NOT NULL,
@@ -68,9 +68,9 @@ export class WalletStore {
       CREATE INDEX IF NOT EXISTS idx_evm_address ON wallets(evm_address);
       CREATE INDEX IF NOT EXISTS idx_solana_address ON wallets(solana_address);
     `);
-      console.log("Database schema created/verified");
+      console.log('Database schema created/verified');
     } catch (error) {
-      console.error("Failed to create schema:", error.message);
+      console.error('Failed to create schema:', error.message);
       throw error;
     }
   }
@@ -78,15 +78,15 @@ export class WalletStore {
    * Store wallet with encrypted private key
    */
   storeMultiChainWallet(walletName, evmAddress, evmPrivateKey, solanaAddress, solanaPrivateKey) {
-  try {
-    const apiKey = this.cipher.generateApiKey();
-    const apiKeyHash = this.cipher.hashAPIKey(apiKey);
-    
-    // Encrypt both private keys
-    const encryptedEvm = this.cipher.encrypt(evmPrivateKey);
-    const encryptedSolana = this.cipher.encrypt(solanaPrivateKey);
-    
-    const stmt = this.db.prepare(`
+    try {
+      const apiKey = this.cipher.generateApiKey();
+      const apiKeyHash = this.cipher.hashAPIKey(apiKey);
+
+      // Encrypt both private keys
+      const encryptedEvm = this.cipher.encrypt(evmPrivateKey);
+      const encryptedSolana = this.cipher.encrypt(solanaPrivateKey);
+
+      const stmt = this.db.prepare(`
       INSERT INTO wallets (
         wallet_name,
         evm_address,
@@ -101,156 +101,150 @@ export class WalletStore {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
-      walletName,
-      evmAddress,
-      encryptedEvm.ciphertext,
-      encryptedEvm.nonce,
-      encryptedEvm.tag,
-      solanaAddress,
-      encryptedSolana.ciphertext,
-      encryptedSolana.nonce,
-      encryptedSolana.tag,
-      apiKeyHash
-    );
-    
-    return {
-      success: true,
-      apiKey: apiKey,
-    };
-  } catch (error) {
-    if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
-      throw new Error(`Wallet '${walletName}' already exists`);
+      stmt.run(
+        walletName,
+        evmAddress,
+        encryptedEvm.ciphertext,
+        encryptedEvm.nonce,
+        encryptedEvm.tag,
+        solanaAddress,
+        encryptedSolana.ciphertext,
+        encryptedSolana.nonce,
+        encryptedSolana.tag,
+        apiKeyHash
+      );
+
+      return {
+        success: true,
+        apiKey: apiKey,
+      };
+    } catch (error) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        throw new Error(`Wallet '${walletName}' already exists`);
+      }
+      throw error;
     }
-    throw error;
   }
-}
   /**
- * Get wallet by name and decrypt private keys
- */
-getWallet(walletName) {
-  try {
-    const stmt = this.db.prepare(
-      "SELECT * FROM wallets WHERE wallet_name = ?"
-    );
-    const row = stmt.get(walletName);
-    if (!row) return null;
+   * Get wallet by name and decrypt private keys
+   */
+  getWallet(walletName) {
+    try {
+      const stmt = this.db.prepare('SELECT * FROM wallets WHERE wallet_name = ?');
+      const row = stmt.get(walletName);
+      if (!row) return null;
 
-    const evmPrivateKey = this.cipher.decrypt({
-      ciphertext: row.encrypted_evm_private_key,
-      nonce: row.evm_nonce,
-      tag: row.evm_auth_tag,
-    });
+      const evmPrivateKey = this.cipher.decrypt({
+        ciphertext: row.encrypted_evm_private_key,
+        nonce: row.evm_nonce,
+        tag: row.evm_auth_tag,
+      });
 
-    const solanaPrivateKey = this.cipher.decrypt({
-      ciphertext: row.encrypted_solana_private_key,
-      nonce: row.solana_nonce,
-      tag: row.solana_auth_tag,
-    });
+      const solanaPrivateKey = this.cipher.decrypt({
+        ciphertext: row.encrypted_solana_private_key,
+        nonce: row.solana_nonce,
+        tag: row.solana_auth_tag,
+      });
 
-    return {
-      walletName: row.wallet_name,
-      evmAddress: row.evm_address,
-      evmPrivateKey: evmPrivateKey,
-      solanaAddress: row.solana_address,
-      solanaPrivateKey: solanaPrivateKey,
-    };
-  } catch (error) {
-    console.error(`Failed to get wallet ${walletName}:`, error.message);
-    return null;
+      return {
+        walletName: row.wallet_name,
+        evmAddress: row.evm_address,
+        evmPrivateKey: evmPrivateKey,
+        solanaAddress: row.solana_address,
+        solanaPrivateKey: solanaPrivateKey,
+      };
+    } catch (error) {
+      console.error(`Failed to get wallet ${walletName}:`, error.message);
+      return null;
+    }
   }
-}
   /**
- * Get wallet by API key and decrypt private keys
- */
-getWalletByApiKey(apiKey) {
-  try {
-    const apiKeyHash = this.cipher.hashAPIKey(apiKey);
+   * Get wallet by API key and decrypt private keys
+   */
+  getWalletByApiKey(apiKey) {
+    try {
+      const apiKeyHash = this.cipher.hashAPIKey(apiKey);
 
-    const stmt = this.db.prepare(
-      "SELECT * FROM wallets WHERE api_key_hash = ?"
-    );
-    const row = stmt.get(apiKeyHash);
+      const stmt = this.db.prepare('SELECT * FROM wallets WHERE api_key_hash = ?');
+      const row = stmt.get(apiKeyHash);
 
-    if (!row) return null;
+      if (!row) return null;
 
-    const evmPrivateKey = this.cipher.decrypt({
-      ciphertext: row.encrypted_evm_private_key,
-      nonce: row.evm_nonce,
-      tag: row.evm_auth_tag,
-    });
+      const evmPrivateKey = this.cipher.decrypt({
+        ciphertext: row.encrypted_evm_private_key,
+        nonce: row.evm_nonce,
+        tag: row.evm_auth_tag,
+      });
 
-    const solanaPrivateKey = this.cipher.decrypt({
-      ciphertext: row.encrypted_solana_private_key,
-      nonce: row.solana_nonce,
-      tag: row.solana_auth_tag,
-    });
+      const solanaPrivateKey = this.cipher.decrypt({
+        ciphertext: row.encrypted_solana_private_key,
+        nonce: row.solana_nonce,
+        tag: row.solana_auth_tag,
+      });
 
-    return {
-      walletName: row.wallet_name,
-      evmAddress: row.evm_address,
-      evmPrivateKey: evmPrivateKey,
-      solanaAddress: row.solana_address,
-      solanaPrivateKey: solanaPrivateKey,
-    };
-  } catch (error) {
-    console.error("Failed to get wallet by API key:", error.message);
-    return null;
+      return {
+        walletName: row.wallet_name,
+        evmAddress: row.evm_address,
+        evmPrivateKey: evmPrivateKey,
+        solanaAddress: row.solana_address,
+        solanaPrivateKey: solanaPrivateKey,
+      };
+    } catch (error) {
+      console.error('Failed to get wallet by API key:', error.message);
+      return null;
+    }
   }
-}
 
-/**
- * Get all wallets with decrypted private keys (for server startup)
- */
-getAllWallets() {
-  try {
-    const stmt = this.db.prepare("SELECT * FROM wallets");
-    const rows = stmt.all();
+  /**
+   * Get all wallets with decrypted private keys (for server startup)
+   */
+  getAllWallets() {
+    try {
+      const stmt = this.db.prepare('SELECT * FROM wallets');
+      const rows = stmt.all();
 
-    return rows
-      .map((row) => {
-        try {
-          const evmPrivateKey = this.cipher.decrypt({
-            ciphertext: row.encrypted_evm_private_key,
-            nonce: row.evm_nonce,
-            tag: row.evm_auth_tag,
-          });
+      return rows
+        .map((row) => {
+          try {
+            const evmPrivateKey = this.cipher.decrypt({
+              ciphertext: row.encrypted_evm_private_key,
+              nonce: row.evm_nonce,
+              tag: row.evm_auth_tag,
+            });
 
-          const solanaPrivateKey = this.cipher.decrypt({
-            ciphertext: row.encrypted_solana_private_key,
-            nonce: row.solana_nonce,
-            tag: row.solana_auth_tag,
-          });
+            const solanaPrivateKey = this.cipher.decrypt({
+              ciphertext: row.encrypted_solana_private_key,
+              nonce: row.solana_nonce,
+              tag: row.solana_auth_tag,
+            });
 
-          return {
-            walletName: row.wallet_name,
-            evmAddress: row.evm_address,
-            evmPrivateKey: evmPrivateKey,
-            solanaAddress: row.solana_address,
-            solanaPrivateKey: solanaPrivateKey,
-          };
-        } catch (error) {
-          console.error(`Failed to decrypt wallet ${row.wallet_name}`);
-          return null;
-        }
-      })
-      .filter((wallet) => wallet !== null);
-  } catch (error) {
-    console.error("Failed to get all wallets:", error.message);
-    return [];
+            return {
+              walletName: row.wallet_name,
+              evmAddress: row.evm_address,
+              evmPrivateKey: evmPrivateKey,
+              solanaAddress: row.solana_address,
+              solanaPrivateKey: solanaPrivateKey,
+            };
+          } catch (error) {
+            console.error(`Failed to decrypt wallet ${row.wallet_name}`);
+            return null;
+          }
+        })
+        .filter((wallet) => wallet !== null);
+    } catch (error) {
+      console.error('Failed to get all wallets:', error.message);
+      return [];
+    }
   }
-}
   /**
    * Check if wallet exists
    */
   walletExists(walletName) {
     try {
-      const stmt = this.db.prepare(
-        "SELECT 1 FROM wallets WHERE wallet_name = ?"
-      );
+      const stmt = this.db.prepare('SELECT 1 FROM wallets WHERE wallet_name = ?');
       return stmt.get(walletName) !== undefined;
     } catch (error) {
-      console.error("Failed to check wallet existence:", error.message);
+      console.error('Failed to check wallet existence:', error.message);
       return false;
     }
   }
@@ -259,13 +253,11 @@ getAllWallets() {
    */
   testConnection() {
     try {
-      const result = this.db
-        .prepare("SELECT COUNT(*) as count FROM wallets")
-        .get();
+      const result = this.db.prepare('SELECT COUNT(*) as count FROM wallets').get();
       console.log(`Database test passed - ${result.count} wallets found`);
       return true;
     } catch (error) {
-      console.error("Database connection test failed:", error.message);
+      console.error('Database connection test failed:', error.message);
       throw error;
     }
   }
@@ -274,9 +266,7 @@ getAllWallets() {
    */
   getDatabaseInfo() {
     try {
-      const countResult = this.db
-        .prepare("SELECT COUNT(*) as count FROM wallets")
-        .get();
+      const countResult = this.db.prepare('SELECT COUNT(*) as count FROM wallets').get();
       const sizeResult = this.db
         .prepare(
           `
@@ -293,7 +283,7 @@ getAllWallets() {
         exists: fs.existsSync(this.dbPath),
       };
     } catch (error) {
-      console.error("Failed to get database info:", error.message);
+      console.error('Failed to get database info:', error.message);
       return null;
     }
   }
@@ -304,10 +294,10 @@ getAllWallets() {
     try {
       if (this.db) {
         this.db.close();
-        console.log("Database connection closed");
+        console.log('Database connection closed');
       }
     } catch (error) {
-      console.error("Error closing database:", error.message);
+      console.error('Error closing database:', error.message);
     }
   }
 }

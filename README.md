@@ -2,7 +2,6 @@
 <img src="assets/logo-light.svg" alt="Consensus logo" width="200" />
 </p>
 
-
 <h1 align="center">Consensus Protocol</h1>
 
 <p align="center">
@@ -33,9 +32,9 @@ Blockchain consensus algorithms are powerful — but they come with baggage.
 
 On the Internet Computer (ICP), for example, when an application subnet performs an HTTP outcall, **each node** in the subnet independently makes the request. These nodes run replicas, and the responses from the HTTP outcalls are compared in the consensus process. This means:
 
-* The same HTTP request is made by every node in the subnet (typically 13 for ICP).
-* Millisecond differences can lead to inconsistent responses.
-* Each request originates from a **different physical machine**, meaning **no shared IP address** — breaking determinism for services that rely on caller identity.
+- The same HTTP request is made by every node in the subnet (typically 13 for ICP).
+- Millisecond differences can lead to inconsistent responses.
+- Each request originates from a **different physical machine**, meaning **no shared IP address** — breaking determinism for services that rely on caller identity.
 
 This especially becomes a problem when your target endpoint is **not idempotent**.
 
@@ -53,10 +52,10 @@ Consensus Proxy solves this problem at the protocol level.
 
 It acts as a **deduplication layer** that:
 
-* Receives all node-originated HTTP outcalls
-* Executes the request **exactly once**
-* Caches and returns the same result to all callers
-* Challenges the caller with **x402** to ensure payment before processing
+- Receives all node-originated HTTP outcalls
+- Executes the request **exactly once**
+- Caches and returns the same result to all callers
+- Challenges the caller with **x402** to ensure payment before processing
 
 ---
 
@@ -150,10 +149,10 @@ npm run consensus setup
 
 This generates:
 
-* Your wallet
-* Proxy URL
-* API key
-* A config file with your client information(**DO NOT EXPOSE THIS FILE!!!**)
+- Your wallet
+- Proxy URL
+- API key
+- A config file with your client information(**DO NOT EXPOSE THIS FILE!!!**)
 
 ---
 
@@ -220,9 +219,9 @@ This project is licensed under the Business Source License 1.1 (BUSL-1.1).
 
 The Licensed Work is:
 
-* © 2025 Canister Software Inc
-* Change Date: July 23, 2029
-* Change License: GNU GPL v2.0 or later
+- © 2025 Canister Software Inc
+- Change Date: July 23, 2029
+- Change License: GNU GPL v2.0 or later
 
 For full terms, see the [LICENSE](./LICENSE) file.
 

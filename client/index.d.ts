@@ -4,7 +4,7 @@ export interface ProxyClientOptions {
    * - "inclusive": proxy everything except `routes`
    * - "exclusive": proxy only `routes`
    */
-  mode?: "inclusive" | "exclusive";
+  mode?: 'inclusive' | 'exclusive';
   /**
    * Path rules used with `mode`, for example `["/health", "/metrics"]`.
    * Query params are ignored; matching is based on path only.
@@ -21,7 +21,7 @@ export interface ProxyClientOptions {
    * - "auto": globally intercepts `fetch` for route-matched request scope
    * - "manual": does not intercept global `fetch`; use `req.consensus.fetch` / `request`
    */
-  strategy?: "auto" | "manual";
+  strategy?: 'auto' | 'manual';
   /**
    * Cache time-to-live in seconds for proxy responses.
    * Sent as `x-cache-ttl`; controls how long deduped responses can be reused.
@@ -99,7 +99,7 @@ export interface ProxyResponseShape {
 
 export interface ProxyClientRequestContext {
   consensus?: {
-    strategy?: "auto" | "manual";
+    strategy?: 'auto' | 'manual';
     shouldProxy?: boolean;
     fetch?: (
       input: RequestInfo | URL,
@@ -116,7 +116,9 @@ export interface ProxyClientRequestContext {
       perRequestOptions?: Partial<ProxyClientOptions>
     ) => Promise<ProxyResponseShape>;
     passthroughFetch?: ((input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) | null;
-    createFetch?: (pathname?: string) => (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    createFetch?: (
+      pathname?: string
+    ) => (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
     getBudget?: () => ProxyBudgetSnapshot;
     isStandDown?: () => boolean;
   };
@@ -139,7 +141,9 @@ export interface ProxyClientRuntime {
     perRequestOptions?: Partial<ProxyClientOptions>
   ): Promise<ProxyResponseShape>;
   runWithPath<T>(pathname: string, run: () => T | Promise<T>): Promise<T>;
-  createFetch(pathname?: string): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  createFetch(
+    pathname?: string
+  ): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   getBudget(): ProxyBudgetSnapshot;
   resetBudget(): void;
   isStandDown(): boolean;
@@ -157,7 +161,7 @@ export declare function ProxyClient(
   options?: ProxyClientOptions
 ): ProxyClientMiddleware;
 
-export type ConsensusSocketModel = "hybrid" | "time" | "data";
+export type ConsensusSocketModel = 'hybrid' | 'time' | 'data';
 
 export interface ConsensusSocketTokenParams {
   /** Billing model for session pricing. */
@@ -208,8 +212,8 @@ export interface ConsensusSocketSessionState {
 export interface ConsensusSocketSession {
   send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void;
   close(code?: number, reason?: string): void;
-  on(event: "open" | "message" | "close" | "error", handler: (...args: unknown[]) => void): void;
-  off(event: "open" | "message" | "close" | "error", handler: (...args: unknown[]) => void): void;
+  on(event: 'open' | 'message' | 'close' | 'error', handler: (...args: unknown[]) => void): void;
+  off(event: 'open' | 'message' | 'close' | 'error', handler: (...args: unknown[]) => void): void;
   getState(): ConsensusSocketSessionState;
 }
 

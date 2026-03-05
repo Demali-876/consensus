@@ -1,14 +1,14 @@
-import crypto from "crypto";
-import Router from "./router.ts";
-import { WebSocketServer , WebSocket} from "ws";
-import { paymentMiddleware } from "@x402/express";
+import crypto from 'crypto';
+import Router from './router.ts';
+import { WebSocketServer, WebSocket } from 'ws';
+import { paymentMiddleware } from '@x402/express';
 import {
   PRICING_PRESETS,
   calculateSessionLimits,
   calculateSessionCost,
   bytesToMB,
   msToMinutes,
-} from "./utils/types.js";
+} from './utils/types.js';
 
 const sessions = new Map();
 const pendingSessions = new Map();
@@ -22,76 +22,76 @@ const TOKEN_TTL_MS = 60_000;
  * @param {Object} config - Configuration
  * @param {Router} router - shared router instance
  */
-export function registerWebSocket(app, httpsServer, x402Server, config, router){
+export function registerWebSocket(app, httpsServer, x402Server, config, router) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
   app.get(
-    "/ws",
+    '/ws',
     paymentMiddleware(
       {
-        "GET /ws": {
+        'GET /ws': {
           accepts: [
             {
-              scheme: "exact",
+              scheme: 'exact',
               price: (context) => {
-                const model = context.adapter.getQueryParam?.("model") ?? "hybrid";
-                const minutes = parseInt(context.adapter.getQueryParam?.("minutes") ?? "5");
-                const megabytes = parseInt(context.adapter.getQueryParam?.("megabytes") ?? "50");
+                const model = context.adapter.getQueryParam?.('model') ?? 'hybrid';
+                const minutes = parseInt(context.adapter.getQueryParam?.('minutes') ?? '5');
+                const megabytes = parseInt(context.adapter.getQueryParam?.('megabytes') ?? '50');
 
-                const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+                const pricingKey = model === 'time' ? 'TIME' : model === 'data' ? 'DATA' : 'HYBRID';
                 const pricing = PRICING_PRESETS[pricingKey];
                 const cost = calculateSessionCost(pricing, minutes, megabytes);
 
                 return `$${cost.toFixed(4)}`;
               },
-              network: "eip155:84532",
+              network: 'eip155:84532',
               payTo: EVM_PAY_TO,
             },
             {
-              scheme: "exact",
+              scheme: 'exact',
               price: (context) => {
-                const model = context.adapter.getQueryParam?.("model") ?? "hybrid";
-                const minutes = parseInt(context.adapter.getQueryParam?.("minutes") ?? "5");
-                const megabytes = parseInt(context.adapter.getQueryParam?.("megabytes") ?? "50");
+                const model = context.adapter.getQueryParam?.('model') ?? 'hybrid';
+                const minutes = parseInt(context.adapter.getQueryParam?.('minutes') ?? '5');
+                const megabytes = parseInt(context.adapter.getQueryParam?.('megabytes') ?? '50');
 
-                const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+                const pricingKey = model === 'time' ? 'TIME' : model === 'data' ? 'DATA' : 'HYBRID';
                 const pricing = PRICING_PRESETS[pricingKey];
                 const cost = calculateSessionCost(pricing, minutes, megabytes);
 
                 return `$${cost.toFixed(4)}`;
               },
-              network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+              network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
               payTo: SOLANA_PAY_TO,
             },
             {
-              scheme: "exact",
+              scheme: 'exact',
               price: (context) => {
-                const model = context.adapter.getQueryParam?.("model") ?? "hybrid";
-                const minutes = parseInt(context.adapter.getQueryParam?.("minutes") ?? "5");
-                const megabytes = parseInt(context.adapter.getQueryParam?.("megabytes") ?? "50");
+                const model = context.adapter.getQueryParam?.('model') ?? 'hybrid';
+                const minutes = parseInt(context.adapter.getQueryParam?.('minutes') ?? '5');
+                const megabytes = parseInt(context.adapter.getQueryParam?.('megabytes') ?? '50');
 
-                const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+                const pricingKey = model === 'time' ? 'TIME' : model === 'data' ? 'DATA' : 'HYBRID';
                 const pricing = PRICING_PRESETS[pricingKey];
                 const cost = calculateSessionCost(pricing, minutes, megabytes);
 
-               return String(Math.round(cost * 1e8))
+                return String(Math.round(cost * 1e8));
               },
               network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',
               payTo: ICP_PAY_TO,
             },
           ],
-          description: "Pay-per-use WebSockets on demand",
-          mimeType: "application/json",
+          description: 'Pay-per-use WebSockets on demand',
+          mimeType: 'application/json',
         },
       },
       x402Server
     ),
     (req, res) => {
-      const model = (req.query.model ?? "hybrid").toString();
-      const minutes = parseInt((req.query.minutes ?? "5").toString(), 10);
-      const megabytes = parseInt((req.query.megabytes ?? "50").toString(), 10);
+      const model = (req.query.model ?? 'hybrid').toString();
+      const minutes = parseInt((req.query.minutes ?? '5').toString(), 10);
+      const megabytes = parseInt((req.query.megabytes ?? '50').toString(), 10);
 
-      const token = crypto.randomBytes(32).toString("hex");
+      const token = crypto.randomBytes(32).toString('hex');
       const expires = Date.now() + TOKEN_TTL_MS;
 
       pendingSessions.set(token, { model, minutes, megabytes, expires });
@@ -104,28 +104,28 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
     }
   );
 
-  const wss = new WebSocketServer({noServer: true});
+  const wss = new WebSocketServer({ noServer: true });
 
-  httpsServer.on("upgrade", (req, socket, head) => {
+  httpsServer.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, `https://${req.headers.host}`);
 
-    if(url.pathname !== "/ws-connect"){
+    if (url.pathname !== '/ws-connect') {
       socket.destroy();
       return;
     }
 
-    const token = url.searchParams.get("token");
+    const token = url.searchParams.get('token');
     const pending = token ? pendingSessions.get(token) : null;
-    
-    if (!pending){
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+
+    if (!pending) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
 
     if (pending.expires < Date.now()) {
       pendingSessions.delete(token);
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
@@ -135,11 +135,11 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.purchase = pending;
       ws.token = token;
-      wss.emit("connection", ws, req);
+      wss.emit('connection', ws, req);
     });
   });
 
-  wss.on("connection", (ws, req) => {
+  wss.on('connection', (ws, req) => {
     const { model, minutes, megabytes } = ws.purchase;
     const sessionId = crypto.randomUUID();
 
@@ -148,7 +148,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
       'x-node-domain': req.headers['x-node-domain'],
       'x-node-exclude': req.headers['x-node-exclude'],
     };
-    
+
     const node = router.selectNode(sessionId, preferenceHeaders);
 
     if (node) {
@@ -166,7 +166,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
     router.incrementSession(node.id);
     console.log(`[WebSocket Route] ${sessionId} → ${node.id} (${node.region})`);
 
-    const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+    const pricingKey = model === 'time' ? 'TIME' : model === 'data' ? 'DATA' : 'HYBRID';
     const pricing = PRICING_PRESETS[pricingKey];
     const limits = calculateSessionLimits(pricing, minutes, megabytes);
 
@@ -192,7 +192,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
         'x-model': model,
         'x-minutes': minutes.toString(),
         'x-megabytes': megabytes.toString(),
-      }
+      },
     });
 
     nodeWs.on('open', () => {
@@ -200,7 +200,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
 
       clientWs.send(
         JSON.stringify({
-          type: "session_start",
+          type: 'session_start',
           sessionId,
           model,
           served_by: node.id,
@@ -229,7 +229,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
 
     clientWs.on('message', (data) => {
       if (!session.active) return;
-      
+
       const size = Buffer.byteLength(data);
       session.usage.bytesReceived += size;
       session.usage.totalBytes = session.usage.bytesReceived + session.usage.bytesSent;
@@ -272,7 +272,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
    * Handle WebSocket session locally (self-fallback)
    */
   function handleLocalSession(ws, sessionId, model, minutes, megabytes) {
-    const pricingKey = model === "time" ? "TIME" : model === "data" ? "DATA" : "HYBRID";
+    const pricingKey = model === 'time' ? 'TIME' : model === 'data' ? 'DATA' : 'HYBRID';
     const pricing = PRICING_PRESETS[pricingKey];
     const totalCost = calculateSessionCost(pricing, minutes, megabytes);
     const limits = calculateSessionLimits(pricing, minutes, megabytes);
@@ -297,7 +297,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
 
     ws.send(
       JSON.stringify({
-        type: "session_start",
+        type: 'session_start',
         sessionId,
         model,
         served_by: 'local',
@@ -320,8 +320,8 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
 
       ws.send(
         JSON.stringify({
-          type: "session_expired",
-          reason: "time_limit_reached",
+          type: 'session_expired',
+          reason: 'time_limit_reached',
           finalUsage: {
             durationMinutes: msToMinutes(duration),
             dataMB: bytesToMB(session.usage.totalBytes),
@@ -329,10 +329,10 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
         })
       );
 
-      ws.close(1000, "Time limit reached");
+      ws.close(1000, 'Time limit reached');
     }, limits.timeLimit);
 
-    ws.on("message", (data) => {
+    ws.on('message', (data) => {
       if (!session.active) return;
 
       const size = Buffer.byteLength(data);
@@ -345,8 +345,8 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
 
         ws.send(
           JSON.stringify({
-            type: "session_expired",
-            reason: "data_limit_reached",
+            type: 'session_expired',
+            reason: 'data_limit_reached',
             finalUsage: {
               durationMinutes: msToMinutes(Date.now() - session.usage.connectedAt),
               dataMB: bytesToMB(session.usage.totalBytes),
@@ -354,7 +354,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
           })
         );
 
-        ws.close(1008, "Data limit reached");
+        ws.close(1008, 'Data limit reached');
         return;
       }
 
@@ -366,7 +366,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
       ws.send(response);
     });
 
-    ws.on("close", () => {
+    ws.on('close', () => {
       clearTimeout(session.timer);
       session.active = false;
 
@@ -376,7 +376,7 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router){
 
       sessions.delete(sessionId);
     });
-  };
+  }
 
   setInterval(() => {
     const now = Date.now();

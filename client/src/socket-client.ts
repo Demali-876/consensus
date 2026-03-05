@@ -1,10 +1,10 @@
 const DEFAULT_SERVER_URL =
-  process.env.CONSENSUS_SERVER_URL || "https://consensus.canister.software";
+  process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software';
 const USD_SCALE = 1_000_000;
 
 type FetchWithPayment = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-type ConsensusSocketModel = "hybrid" | "time" | "data";
+type ConsensusSocketModel = 'hybrid' | 'time' | 'data';
 
 type SessionPricing = {
   model: ConsensusSocketModel;
@@ -12,19 +12,19 @@ type SessionPricing = {
   pricePerMB: number;
 };
 
-const PRICING_PRESETS: Record<"TIME" | "DATA" | "HYBRID", SessionPricing> = {
+const PRICING_PRESETS: Record<'TIME' | 'DATA' | 'HYBRID', SessionPricing> = {
   TIME: {
-    model: "time",
+    model: 'time',
     pricePerMinute: 0.001,
     pricePerMB: 0,
   },
   DATA: {
-    model: "data",
+    model: 'data',
     pricePerMinute: 0,
     pricePerMB: 0.00012,
   },
   HYBRID: {
-    model: "hybrid",
+    model: 'hybrid',
     pricePerMinute: 0.0005,
     pricePerMB: 0.0001,
   },
@@ -79,8 +79,8 @@ type ConsensusSocketSessionState = {
 type ConsensusSocketSession = {
   send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void;
   close(code?: number, reason?: string): void;
-  on(event: "open" | "message" | "close" | "error", handler: (...args: unknown[]) => void): void;
-  off(event: "open" | "message" | "close" | "error", handler: (...args: unknown[]) => void): void;
+  on(event: 'open' | 'message' | 'close' | 'error', handler: (...args: unknown[]) => void): void;
+  off(event: 'open' | 'message' | 'close' | 'error', handler: (...args: unknown[]) => void): void;
   getState(): ConsensusSocketSessionState;
 };
 
@@ -136,7 +136,7 @@ type ConsensusSocketBudgetSnapshot = {
   last_quote_usd: number;
 };
 
-type SocketEventName = "open" | "message" | "close" | "error";
+type SocketEventName = 'open' | 'message' | 'close' | 'error';
 
 type SocketLike = {
   readyState: number;
@@ -160,7 +160,7 @@ class SocketClientError extends Error {
 class SocketBudgetLimitError extends SocketClientError {}
 
 function trimTrailingSlash(value: string): string {
-  return String(value || "").replace(/\/+$/, "");
+  return String(value || '').replace(/\/+$/, '');
 }
 
 function parseMaybeJson(text: string): unknown {
@@ -173,8 +173,8 @@ function parseMaybeJson(text: string): unknown {
 }
 
 function parseUsdToMicros(value: number | undefined, fieldName: string): number | null {
-  if (typeof value === "undefined" || value === null) return null;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+  if (typeof value === 'undefined' || value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     throw new TypeError(`${fieldName} must be a non-negative number`);
   }
 
@@ -194,10 +194,10 @@ function microsToUsd(micros: number): number {
 function calculateSessionCost(pricing: SessionPricing, minutes: number, megabytes: number): number {
   let cost = 0;
 
-  if (pricing.model === "time" || pricing.model === "hybrid") {
+  if (pricing.model === 'time' || pricing.model === 'hybrid') {
     cost += (minutes || 0) * pricing.pricePerMinute;
   }
-  if (pricing.model === "data" || pricing.model === "hybrid") {
+  if (pricing.model === 'data' || pricing.model === 'hybrid') {
     cost += (megabytes || 0) * pricing.pricePerMB;
   }
 
@@ -207,10 +207,10 @@ function calculateSessionCost(pricing: SessionPricing, minutes: number, megabyte
 function normalizeTokenParams(
   defaults: ConsensusSocketTokenParams | undefined,
   params: ConsensusSocketTokenParams | undefined
-): Required<Omit<ConsensusSocketTokenParams, "nodeRegion" | "nodeDomain" | "nodeExclude">> &
-  Pick<ConsensusSocketTokenParams, "nodeRegion" | "nodeDomain" | "nodeExclude"> {
+): Required<Omit<ConsensusSocketTokenParams, 'nodeRegion' | 'nodeDomain' | 'nodeExclude'>> &
+  Pick<ConsensusSocketTokenParams, 'nodeRegion' | 'nodeDomain' | 'nodeExclude'> {
   const merged = {
-    model: params?.model ?? defaults?.model ?? "hybrid",
+    model: params?.model ?? defaults?.model ?? 'hybrid',
     minutes: params?.minutes ?? defaults?.minutes ?? 5,
     megabytes: params?.megabytes ?? defaults?.megabytes ?? 50,
     nodeRegion: params?.nodeRegion ?? defaults?.nodeRegion,
@@ -218,14 +218,14 @@ function normalizeTokenParams(
     nodeExclude: params?.nodeExclude ?? defaults?.nodeExclude,
   };
 
-  if (!["hybrid", "time", "data"].includes(merged.model)) {
+  if (!['hybrid', 'time', 'data'].includes(merged.model)) {
     throw new SocketClientError(`Invalid model '${String(merged.model)}'`);
   }
   if (!Number.isInteger(merged.minutes) || merged.minutes < 0) {
-    throw new SocketClientError("minutes must be a non-negative integer");
+    throw new SocketClientError('minutes must be a non-negative integer');
   }
   if (!Number.isInteger(merged.megabytes) || merged.megabytes < 0) {
-    throw new SocketClientError("megabytes must be a non-negative integer");
+    throw new SocketClientError('megabytes must be a non-negative integer');
   }
 
   return merged;
@@ -234,9 +234,9 @@ function normalizeTokenParams(
 function toTokenHeaders(params: ConsensusSocketTokenParams | undefined): Record<string, string> {
   const headers: Record<string, string> = {};
 
-  if (params?.nodeRegion) headers["x-node-region"] = params.nodeRegion;
-  if (params?.nodeDomain) headers["x-node-domain"] = params.nodeDomain;
-  if (params?.nodeExclude) headers["x-node-exclude"] = params.nodeExclude;
+  if (params?.nodeRegion) headers['x-node-region'] = params.nodeRegion;
+  if (params?.nodeDomain) headers['x-node-domain'] = params.nodeDomain;
+  if (params?.nodeExclude) headers['x-node-exclude'] = params.nodeExclude;
 
   return headers;
 }
@@ -245,14 +245,13 @@ async function resolveWebSocketFactory(
   factory?: new (...args: unknown[]) => unknown
 ): Promise<new (...args: unknown[]) => unknown> {
   if (factory) return factory;
-  if (typeof WebSocket !== "undefined") return WebSocket as unknown as new (...args: unknown[]) => unknown;
+  if (typeof WebSocket !== 'undefined')
+    return WebSocket as unknown as new (...args: unknown[]) => unknown;
 
-  const wsModule = await import("ws");
-  const maybeCtor =
-    wsModule.default ||
-    (wsModule as unknown as { WebSocket?: unknown }).WebSocket;
-  if (typeof maybeCtor !== "function") {
-    throw new SocketClientError("Unable to resolve a WebSocket constructor");
+  const wsModule = await import('ws');
+  const maybeCtor = wsModule.default || (wsModule as unknown as { WebSocket?: unknown }).WebSocket;
+  if (typeof maybeCtor !== 'function') {
+    throw new SocketClientError('Unable to resolve a WebSocket constructor');
   }
   return maybeCtor as new (...args: unknown[]) => unknown;
 }
@@ -262,11 +261,11 @@ function addListener(
   event: SocketEventName,
   handler: (...args: unknown[]) => void
 ): void {
-  if (typeof socket.addEventListener === "function") {
+  if (typeof socket.addEventListener === 'function') {
     socket.addEventListener(event, handler);
     return;
   }
-  if (typeof socket.on === "function") {
+  if (typeof socket.on === 'function') {
     socket.on(event, handler);
   }
 }
@@ -276,15 +275,15 @@ function removeListener(
   event: SocketEventName,
   handler: (...args: unknown[]) => void
 ): void {
-  if (typeof socket.removeEventListener === "function") {
+  if (typeof socket.removeEventListener === 'function') {
     socket.removeEventListener(event, handler);
     return;
   }
-  if (typeof socket.off === "function") {
+  if (typeof socket.off === 'function') {
     socket.off(event, handler);
     return;
   }
-  if (typeof socket.removeListener === "function") {
+  if (typeof socket.removeListener === 'function') {
     socket.removeListener(event, handler);
   }
 }
@@ -292,34 +291,32 @@ function removeListener(
 function getOpenStateValue(socket: SocketLike): number {
   const maybeCtor = socket as unknown as { constructor?: { OPEN?: number } };
   const open = maybeCtor.constructor?.OPEN;
-  return typeof open === "number" ? open : 1;
+  return typeof open === 'number' ? open : 1;
 }
 
 function getMessagePayload(value: unknown): unknown {
-  if (value && typeof value === "object" && "data" in (value as Record<string, unknown>)) {
+  if (value && typeof value === 'object' && 'data' in (value as Record<string, unknown>)) {
     return (value as { data: unknown }).data;
   }
   return value;
 }
 
 function toSafeResult<T>(promise: Promise<T>): Promise<ConsensusSocketSafeResult<T>> {
-  return promise
-    .then((data) => ({ ok: true, data }))
-    .catch((error) => ({ ok: false, error }));
+  return promise.then((data) => ({ ok: true, data })).catch((error) => ({ ok: false, error }));
 }
 
 export function SocketClient(
   fetchWithPayment: FetchWithPayment,
   options: ConsensusSocketClientOptions = {}
 ): ConsensusSocketClient {
-  if (typeof fetchWithPayment !== "function") {
-    throw new TypeError("SocketClient requires fetchWithPayment as the first argument");
+  if (typeof fetchWithPayment !== 'function') {
+    throw new TypeError('SocketClient requires fetchWithPayment as the first argument');
   }
 
   const baseUrl = trimTrailingSlash(DEFAULT_SERVER_URL);
   const openTimeoutMs = options.openTimeoutMs ?? 12_000;
   const reconnectIntervalMs = options.reconnectIntervalMs ?? 2_000;
-  const limitMicros = parseUsdToMicros(options.limit_usd, "limit_usd");
+  const limitMicros = parseUsdToMicros(options.limit_usd, 'limit_usd');
   let lastTokenParams: ConsensusSocketTokenParams | undefined;
   let spentMicros = 0;
   let limitCallbackFired = false;
@@ -344,11 +341,7 @@ export function SocketClient(
 
   function isStandDown(): boolean {
     const exhausted = computeStandDownState();
-    if (
-      exhausted &&
-      !limitCallbackFired &&
-      typeof options.on_limit_reached === "function"
-    ) {
+    if (exhausted && !limitCallbackFired && typeof options.on_limit_reached === 'function') {
       limitCallbackFired = true;
       options.on_limit_reached(getBudget());
     }
@@ -358,7 +351,7 @@ export function SocketClient(
   function ensureBudgetFor(quotedCostMicros: number): void {
     if (!computeStandDownState(quotedCostMicros)) return;
     isStandDown();
-    throw new SocketBudgetLimitError("WebSocket budget limit reached; token request blocked");
+    throw new SocketBudgetLimitError('WebSocket budget limit reached; token request blocked');
   }
 
   function incrementSpend(quotedCostMicros: number): void {
@@ -380,10 +373,10 @@ export function SocketClient(
     megabytes: number;
   }): number {
     const pricingKey =
-      params.model === "time" ? "TIME" : params.model === "data" ? "DATA" : "HYBRID";
+      params.model === 'time' ? 'TIME' : params.model === 'data' ? 'DATA' : 'HYBRID';
     const pricing = PRICING_PRESETS[pricingKey];
     const usd = calculateSessionCost(pricing, params.minutes, params.megabytes);
-    return parseUsdToMicros(usd, "session_cost_usd") ?? 0;
+    return parseUsdToMicros(usd, 'session_cost_usd') ?? 0;
   }
 
   async function requestTokenInternal(
@@ -406,7 +399,7 @@ export function SocketClient(
     });
 
     const response = await fetchWithPayment(`${baseUrl}/ws?${query.toString()}`, {
-      method: "GET",
+      method: 'GET',
       headers: toTokenHeaders(normalized),
     });
 
@@ -426,7 +419,7 @@ export function SocketClient(
 
     const auth = parsed as Partial<ConsensusSocketTokenAuth>;
     if (!auth?.connect_url || !auth?.token) {
-      throw new SocketClientError("Invalid token response: missing token/connect_url");
+      throw new SocketClientError('Invalid token response: missing token/connect_url');
     }
 
     incrementSpend(quotedCostMicros);
@@ -460,12 +453,10 @@ export function SocketClient(
     callbacks?: ConsensusSocketCallbacks
   ): Promise<ConsensusSocketSession> {
     const initialConnectUrl =
-      typeof connectUrlOrAuth === "string"
-        ? connectUrlOrAuth
-        : connectUrlOrAuth?.connect_url;
+      typeof connectUrlOrAuth === 'string' ? connectUrlOrAuth : connectUrlOrAuth?.connect_url;
 
     if (!initialConnectUrl) {
-      throw new SocketClientError("connect requires connect_url");
+      throw new SocketClientError('connect requires connect_url');
     }
 
     const listeners: Record<SocketEventName, Set<(...args: unknown[]) => void>> = {
@@ -505,9 +496,9 @@ export function SocketClient(
 
         const cleanup = () => {
           if (timeout) clearTimeout(timeout);
-          removeListener(socket, "open", onOpen);
-          removeListener(socket, "error", onError);
-          removeListener(socket, "close", onClose);
+          removeListener(socket, 'open', onOpen);
+          removeListener(socket, 'error', onError);
+          removeListener(socket, 'close', onClose);
         };
 
         const onOpen = () => {
@@ -520,16 +511,16 @@ export function SocketClient(
         };
         const onClose = () => {
           cleanup();
-          reject(new SocketClientError("Socket closed before opening"));
+          reject(new SocketClientError('Socket closed before opening'));
         };
 
-        addListener(socket, "open", onOpen);
-        addListener(socket, "error", onError);
-        addListener(socket, "close", onClose);
+        addListener(socket, 'open', onOpen);
+        addListener(socket, 'error', onError);
+        addListener(socket, 'close', onClose);
 
         timeout = setTimeout(() => {
           cleanup();
-          reject(new SocketClientError("Socket open timeout"));
+          reject(new SocketClientError('Socket open timeout'));
         }, openTimeoutMs);
       });
 
@@ -541,33 +532,31 @@ export function SocketClient(
           options?: { headers?: Record<string, string> }
         ) => SocketLike)(currentConnectUrl, { headers: connectHeaders });
       } catch {
-        socketInstance = new (socketFactory as new (url: string) => SocketLike)(
-          currentConnectUrl
-        );
+        socketInstance = new (socketFactory as new (url: string) => SocketLike)(currentConnectUrl);
       }
 
-      addListener(socketInstance, "open", () => {
+      addListener(socketInstance, 'open', () => {
         state.connected = true;
         state.reconnecting = false;
         callbacks?.onOpen?.();
-        emit("open");
+        emit('open');
       });
 
-      addListener(socketInstance, "message", (event: unknown) => {
+      addListener(socketInstance, 'message', (event: unknown) => {
         const payload = getMessagePayload(event);
         callbacks?.onMessage?.(payload);
-        emit("message", payload);
+        emit('message', payload);
       });
 
-      addListener(socketInstance, "error", (error: unknown) => {
+      addListener(socketInstance, 'error', (error: unknown) => {
         callbacks?.onError?.(error);
-        emit("error", error);
+        emit('error', error);
       });
 
-      addListener(socketInstance, "close", (event: unknown) => {
+      addListener(socketInstance, 'close', (event: unknown) => {
         state.connected = false;
         callbacks?.onClose?.(event);
-        emit("close", event);
+        emit('close', event);
 
         if (state.closedByCaller) return;
 
@@ -584,7 +573,7 @@ export function SocketClient(
             await openSocket();
           } catch (error) {
             callbacks?.onError?.(error);
-            emit("error", error);
+            emit('error', error);
 
             if (error instanceof SocketBudgetLimitError) {
               state.reconnecting = false;
@@ -603,7 +592,7 @@ export function SocketClient(
                     await openSocket();
                   } catch (retryError) {
                     callbacks?.onError?.(retryError);
-                    emit("error", retryError);
+                    emit('error', retryError);
                     if (retryError instanceof SocketBudgetLimitError) {
                       state.reconnecting = false;
                     }
@@ -624,11 +613,11 @@ export function SocketClient(
     return {
       send(data) {
         if (!activeSocket) {
-          throw new SocketClientError("No active socket session");
+          throw new SocketClientError('No active socket session');
         }
         const openState = getOpenStateValue(activeSocket);
         if (activeSocket.readyState !== openState) {
-          throw new SocketClientError("Socket is not open");
+          throw new SocketClientError('Socket is not open');
         }
         activeSocket.send(data);
       },

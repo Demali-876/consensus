@@ -18,10 +18,10 @@ import { createKeyPairSignerFromBytes } from '@solana/signers';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const undiciAgent = new UndiciAgent({ 
-  keepAliveTimeout: 10000, 
-  connections: 10, 
-  pipelining: 1 
+const undiciAgent = new UndiciAgent({
+  keepAliveTimeout: 10000,
+  connections: 10,
+  pipelining: 1,
 });
 
 const enhancedFetch = (url, options = {}) => {
@@ -30,7 +30,8 @@ const enhancedFetch = (url, options = {}) => {
 
 const app = express();
 const port = process.env.X402_PROXY_PORT || 3001;
-const consensusServerUrl = process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software:8080';
+const consensusServerUrl =
+  process.env.CONSENSUS_SERVER_URL || 'https://consensus.canister.software:8080';
 const walletStore = new WalletStore();
 const registeredWallets = new Map();
 const walletClients = new Map();
@@ -43,29 +44,29 @@ app.use(express.json({ limit: '10mb' }));
 function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'Missing API key' });
-  
+
   const walletData = walletStore.getWalletByApiKey(apiKey);
   if (!walletData) return res.status(401).json({ error: 'Invalid API key' });
-  
+
   req.walletName = walletData.walletName;
   req.walletData = {
     evm_address: walletData.evmAddress,
-    solana_address: walletData.solanaAddress
+    solana_address: walletData.solanaAddress,
   };
-  
+
   next();
 }
 
 async function createWallet(evmPrivateKey, evmAddress, solanaPrivateKey, solanaAddress) {
   const formattedEvmKey = evmPrivateKey.startsWith('0x') ? evmPrivateKey : `0x${evmPrivateKey}`;
   const evmSigner = privateKeyToAccount(formattedEvmKey);
-  
+
   if (evmSigner.address.toLowerCase() !== evmAddress.toLowerCase()) {
     throw new Error('EVM address mismatch');
   }
   const solanaKeypair = base58.decode(solanaPrivateKey);
   const svmSigner = await createKeyPairSignerFromBytes(solanaKeypair);
-  
+
   if (svmSigner.address !== solanaAddress) {
     throw new Error('Solana address mismatch');
   }
@@ -89,19 +90,19 @@ async function restoreWallets() {
         wallet.solanaPrivateKey,
         wallet.solanaAddress
       );
-      
+
       registeredWallets.set(wallet.walletName, {
         evm_address: wallet.evmAddress,
-        solana_address: wallet.solanaAddress
+        solana_address: wallet.solanaAddress,
       });
-      
+
       walletClients.set(wallet.walletName, fetchWithPayment);
-      
+
       return wallet.walletName;
     })
   );
-  
-  const loaded = results.filter(r => r.status === 'fulfilled').length;
+
+  const loaded = results.filter((r) => r.status === 'fulfilled').length;
   console.log(`Loaded ${loaded}/${wallets.length} wallet(s)`);
   return loaded;
 }
@@ -109,9 +110,14 @@ async function restoreWallets() {
 app.post('/register-wallet', async (req, res) => {
   try {
     const { wallet_name, evm, solana } = req.body;
-    
-    if (!wallet_name || !evm?.address || !evm?.private_key || 
-        !solana?.address || !solana?.private_key) {
+
+    if (
+      !wallet_name ||
+      !evm?.address ||
+      !evm?.private_key ||
+      !solana?.address ||
+      !solana?.private_key
+    ) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
@@ -132,47 +138,46 @@ app.post('/register-wallet', async (req, res) => {
       solana.address,
       solana.private_key
     );
-    
+
     registeredWallets.set(wallet_name, {
       evm_address: evm.address,
-      solana_address: solana.address
+      solana_address: solana.address,
     });
     walletClients.set(wallet_name, fetchWithPayment);
-    
+
     console.log(`✓ Registered wallet: ${wallet_name}`);
     res.json({
       success: true,
       wallet_name,
       evm_address: evm.address,
       solana_address: solana.address,
-      api_key: storeResult.apiKey
+      api_key: storeResult.apiKey,
     });
-    
   } catch (error) {
     console.error('Registration error:', error.message);
     res.status(400).json({ error: error.message });
   }
 });
 
-app.post("/fetch", validateApiKey, async (req, res) => {
+app.post('/fetch', validateApiKey, async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { target_url, method = "GET", headers = {}, body } = req.body;
+    const { target_url, method = 'GET', headers = {}, body } = req.body;
     const walletName = req.walletName;
 
     if (!target_url) {
-      return res.status(400).json({ error: "Missing target_url" });
+      return res.status(400).json({ error: 'Missing target_url' });
     }
 
     const fetchWithPayment = walletClients.get(walletName);
     if (!fetchWithPayment) {
-      throw new Error("Wallet not registered");
+      throw new Error('Wallet not registered');
     }
 
-    const response = await fetchWithPayment(consensusServerUrl + "/proxy", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    const response = await fetchWithPayment(consensusServerUrl + '/proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         target_url,
         method,
@@ -198,20 +203,19 @@ app.post("/fetch", validateApiKey, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Fetch error:", error.message);
-    res.status(500).json({ error: "Request failed", message: error.message });
+    console.error('Fetch error:', error.message);
+    res.status(500).json({ error: 'Request failed', message: error.message });
   }
 });
 
-
 app.get('/health', (req, res) => {
   const dbInfo = walletStore.getDatabaseInfo();
-  res.json({ 
+  res.json({
     status: 'healthy',
     wallets: registeredWallets.size,
     database: dbInfo?.walletCount || 0,
     server: consensusServerUrl,
-    chains: ['evm', 'solana']
+    chains: ['evm', 'solana'],
   });
 });
 
@@ -220,7 +224,7 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-['SIGTERM', 'SIGINT'].forEach(signal => {
+['SIGTERM', 'SIGINT'].forEach((signal) => {
   process.on(signal, () => {
     console.log(`${signal} received, shutting down`);
     walletStore.close();
@@ -230,7 +234,7 @@ app.use((error, req, res, next) => {
 
 async function testConsensusConnection() {
   try {
-    const response = await enhancedFetch(consensusServerUrl + "/");
+    const response = await enhancedFetch(consensusServerUrl + '/');
     if (!response.ok) return false;
 
     const data = await response.json();
@@ -246,9 +250,9 @@ async function boot() {
   try {
     await restoreWallets();
     await testConsensusConnection();
-    
+
     const server = http.createServer(app);
-    
+
     server.listen(port, '0.0.0.0', () => {
       console.log(`x402 Proxy Service`);
       console.log(`https://consensus.proxy.canister.software:8888`);

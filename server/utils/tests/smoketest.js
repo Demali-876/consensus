@@ -39,14 +39,18 @@ function assert(cond, msg) {
       alg: 'ed25519',
       region: 'us-east',
       capabilities: { http2: true, websockets: true },
-      status: 'provisioning'
+      status: 'provisioning',
     });
     console.log('node created:', created);
     assert(created && created.id === nodeId, 'node not created');
     assert(created.domain == null && created.tls_mode == null, 'domain/tls should start null');
 
     // 3) Set domain + tls_mode and verify persistence
-    const updatedWithDomain = NodeStore.setDomain(nodeId, 'n-abc123.us-east.consensus.net', 'wildcard');
+    const updatedWithDomain = NodeStore.setDomain(
+      nodeId,
+      'n-abc123.us-east.consensus.net',
+      'wildcard'
+    );
     console.log('after setDomain:', updatedWithDomain);
     assert(updatedWithDomain.domain === 'n-abc123.us-east.consensus.net', 'domain not persisted');
     assert(updatedWithDomain.tls_mode === 'wildcard', 'tls_mode not persisted');
@@ -60,8 +64,10 @@ function assert(cond, msg) {
     NodeStore.heartbeat(nodeId, { rps: 100, p95_ms: 90, version: 'proxy/1.0.2' });
     const afterHb2 = NodeStore.getNode(nodeId);
     console.log('after heartbeat #2:', afterHb2);
-    assert(afterHb2.heartbeat.rps === 100 && afterHb2.heartbeat.version === 'proxy/1.0.2',
-      `latest heartbeat not reflected, got ${JSON.stringify(afterHb2.heartbeat)}`);
+    assert(
+      afterHb2.heartbeat.rps === 100 && afterHb2.heartbeat.version === 'proxy/1.0.2',
+      `latest heartbeat not reflected, got ${JSON.stringify(afterHb2.heartbeat)}`
+    );
 
     // 6) listNodes should include domain/tls and latest heartbeat
     const list = NodeStore.listNodes();
@@ -69,7 +75,10 @@ function assert(cond, msg) {
     assert(Array.isArray(list) && list.length === 1, 'listNodes length mismatch');
     assert(list[0].domain === 'n-abc123.us-east.consensus.net', 'listNodes missing domain');
     assert(list[0].tls_mode === 'wildcard', 'listNodes missing tls_mode');
-    assert(list[0].heartbeat && list[0].heartbeat.rps === 100, 'listNodes missing latest heartbeat');
+    assert(
+      list[0].heartbeat && list[0].heartbeat.rps === 100,
+      'listNodes missing latest heartbeat'
+    );
 
     // 7) getJoin + consumeJoin flow
     const gotJoin = NodeStore.getJoin(jr.id);
@@ -81,11 +90,15 @@ function assert(cond, msg) {
     assert(consumed.consumed_at != null, 'consumeJoin did not set consumed_at');
 
     console.log('\n✅ All checks passed.');
-    try { db.close(); } catch (_) {}
+    try {
+      db.close();
+    } catch (_) {}
     process.exit(0);
   } catch (err) {
     console.error(err);
-    try { db.close(); } catch (_) {}
+    try {
+      db.close();
+    } catch (_) {}
     process.exit(1);
   }
 })();

@@ -1,22 +1,22 @@
-import NodeCache from "node-cache";
-import axios from "axios";
-import zlib from "zlib";
-import crypto from "crypto";
-import Router from "./router.ts";
-import { promisify } from "util";
-import { URL } from "url";
+import NodeCache from 'node-cache';
+import axios from 'axios';
+import zlib from 'zlib';
+import crypto from 'crypto';
+import Router from './router.ts';
+import { promisify } from 'util';
+import { URL } from 'url';
 
 const gunzipAsync = promisify(zlib.gunzip);
 const inflateAsync = promisify(zlib.inflate);
 const brotliDecompressAsync = promisify(zlib.brotliDecompress);
 
 function sha256Hex(input) {
-  return crypto.createHash("sha256").update(input).digest("hex");
+  return crypto.createHash('sha256').update(input).digest('hex');
 }
 
 function deepSort(value) {
   if (Array.isArray(value)) return value.map(deepSort);
-  if (value && typeof value === "object") {
+  if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
         .map(([k, v]) => [k, deepSort(v)])
@@ -32,15 +32,15 @@ function stableStringify(value) {
 
 function canonicalizeUrl(raw) {
   const u = new URL(String(raw));
-  u.hash = "";
+  u.hash = '';
   u.protocol = u.protocol.toLowerCase();
   u.hostname = u.hostname.toLowerCase();
 
   if (
-    (u.protocol === "https:" && u.port === "443") ||
-    (u.protocol === "http:" && u.port === "80")
+    (u.protocol === 'https:' && u.port === '443') ||
+    (u.protocol === 'http:' && u.port === '80')
   ) {
-    u.port = "";
+    u.port = '';
   }
 
   const params = [...u.searchParams.entries()].sort((a, b) => {
@@ -48,38 +48,35 @@ function canonicalizeUrl(raw) {
     return k !== 0 ? k : a[1].localeCompare(b[1]);
   });
 
-  u.search = "";
+  u.search = '';
   for (const [k, v] of params) u.searchParams.append(k, v);
 
-  u.pathname = u.pathname || "/";
+  u.pathname = u.pathname || '/';
   return u.toString();
 }
 
 function canonicalizeSemanticHeaders(headers = {}) {
-  const allow = new Set(["accept", "content-type"]);
+  const allow = new Set(['accept', 'content-type']);
   const entries = Object.entries(headers)
-    .map(([k, v]) => [
-      k.toLowerCase().trim(),
-      String(v).trim().replace(/\s+/g, " "),
-    ])
+    .map(([k, v]) => [k.toLowerCase().trim(), String(v).trim().replace(/\s+/g, ' ')])
     .filter(([k]) => allow.has(k))
     .sort(([a], [b]) => a.localeCompare(b));
 
   return Object.fromEntries(entries);
 }
 
-function computeBodyHash(body, contentType = "") {
-  if (body === undefined || body === null) return "no-body";
+function computeBodyHash(body, contentType = '') {
+  if (body === undefined || body === null) return 'no-body';
   if (Buffer.isBuffer(body)) return sha256Hex(body);
-  if (typeof body === "string") return sha256Hex(body);
+  if (typeof body === 'string') return sha256Hex(body);
 
   const ct = String(contentType).toLowerCase();
 
-  if (ct.includes("application/json") && typeof body === "object") {
+  if (ct.includes('application/json') && typeof body === 'object') {
     return sha256Hex(stableStringify(body));
   }
 
-  if (typeof body === "object") {
+  if (typeof body === 'object') {
     return sha256Hex(stableStringify(body));
   }
 
@@ -88,13 +85,13 @@ function computeBodyHash(body, contentType = "") {
 
 function getScope(headers = {}) {
   const h = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
-  const apiKey = h["x-api-key"];
-  return apiKey ? sha256Hex(String(apiKey)) : "global";
+  const apiKey = h['x-api-key'];
+  return apiKey ? sha256Hex(String(apiKey)) : 'global';
 }
 
 function generateDedupeKey({ target_url, method, headers = {}, body }) {
   const semanticHeaders = canonicalizeSemanticHeaders(headers);
-  const contentType = semanticHeaders["content-type"] || "";
+  const contentType = semanticHeaders['content-type'] || '';
 
   const canonical = {
     v: 1,
@@ -118,14 +115,14 @@ export default class ConsensusProxy {
       stdTTL: 300,
       checkperiod: 60,
       useClones: false,
-      maxKeys: 10000
+      maxKeys: 10000,
     });
 
     this.pendingRequests = new Map();
     this.paidKeys = new Map();
     this.stats = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router = config.router || new Router();
-    
+
     setInterval(() => this.cleanupExpiredKeys(), 60000);
   }
 
@@ -144,9 +141,10 @@ export default class ConsensusProxy {
   async handleRequest(target_url, method, headers = {}, body, cacheTTL) {
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
 
-    const requestedTTL = cacheTTL || 
-                         parseInt(headers['cache-ttl'] || headers['x-cache-ttl'] || headers['X-Cache-TTL']) || 
-                         300;
+    const requestedTTL =
+      cacheTTL ||
+      parseInt(headers['cache-ttl'] || headers['x-cache-ttl'] || headers['X-Cache-TTL']) ||
+      300;
 
     const ttl = Math.max(1, requestedTTL);
 
@@ -185,7 +183,7 @@ export default class ConsensusProxy {
 
   async executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl) {
     this.router.incrementRequest(node.id);
-    
+
     try {
       console.log(`[Route to Node] ${node.id} (${node.region})`);
 
@@ -241,10 +239,10 @@ export default class ConsensusProxy {
     this.pendingRequests.set(dedupeKey, requestPromise);
 
     const response = await requestPromise;
-    return { 
-      ...response, 
-      cached: false, 
-      payment_required: true, 
+    return {
+      ...response,
+      cached: false,
+      payment_required: true,
       dedupe_key: dedupeKey,
       served_by: 'proxy-direct',
     };
@@ -253,28 +251,28 @@ export default class ConsensusProxy {
   async makeRequest(url, method, headers, body) {
     const cleanHeaders = { ...(headers || {}) };
 
-    delete cleanHeaders["host"];
-    delete cleanHeaders["content-length"];
-    delete cleanHeaders["content-encoding"];
-    delete cleanHeaders["transfer-encoding"];
-    delete cleanHeaders["connection"];
-    delete cleanHeaders["x-idempotency-key"];
-    delete cleanHeaders["idempotency-key"];
-    delete cleanHeaders["X-Idempotency-Key"];
-    delete cleanHeaders["x-payment"];
-    delete cleanHeaders["X-Payment"];
-    delete cleanHeaders["x-verbose"];
-    delete cleanHeaders["X-Verbose"];
-    delete cleanHeaders["x-api-key"];
-    delete cleanHeaders["X-Api-Key"];
-    delete cleanHeaders["x-cache-ttl"];
-    delete cleanHeaders["X-Cache-TTL"];
-    delete cleanHeaders["x-node-region"];
-    delete cleanHeaders["X-Node-Region"];
-    delete cleanHeaders["x-node-domain"];
-    delete cleanHeaders["X-Node-Domain"];
-    delete cleanHeaders["x-node-exclude"];
-    delete cleanHeaders["X-Node-Exclude"];
+    delete cleanHeaders['host'];
+    delete cleanHeaders['content-length'];
+    delete cleanHeaders['content-encoding'];
+    delete cleanHeaders['transfer-encoding'];
+    delete cleanHeaders['connection'];
+    delete cleanHeaders['x-idempotency-key'];
+    delete cleanHeaders['idempotency-key'];
+    delete cleanHeaders['X-Idempotency-Key'];
+    delete cleanHeaders['x-payment'];
+    delete cleanHeaders['X-Payment'];
+    delete cleanHeaders['x-verbose'];
+    delete cleanHeaders['X-Verbose'];
+    delete cleanHeaders['x-api-key'];
+    delete cleanHeaders['X-Api-Key'];
+    delete cleanHeaders['x-cache-ttl'];
+    delete cleanHeaders['X-Cache-TTL'];
+    delete cleanHeaders['x-node-region'];
+    delete cleanHeaders['X-Node-Region'];
+    delete cleanHeaders['x-node-domain'];
+    delete cleanHeaders['X-Node-Domain'];
+    delete cleanHeaders['x-node-exclude'];
+    delete cleanHeaders['X-Node-Exclude'];
 
     const config = {
       method: String(method).toLowerCase(),
@@ -284,15 +282,15 @@ export default class ConsensusProxy {
       validateStatus: () => true,
       maxRedirects: 5,
       decompress: false,
-      responseType: "arraybuffer",
+      responseType: 'arraybuffer',
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
     };
 
-    if (body && ["post", "put", "patch"].includes(String(method).toLowerCase())) {
+    if (body && ['post', 'put', 'patch'].includes(String(method).toLowerCase())) {
       config.data = body;
-      if (!cleanHeaders["content-type"] && typeof body === "object") {
-        config.headers["content-type"] = "application/json";
+      if (!cleanHeaders['content-type'] && typeof body === 'object') {
+        config.headers['content-type'] = 'application/json';
       }
     }
 
@@ -300,13 +298,13 @@ export default class ConsensusProxy {
       const response = await axios(config);
 
       let rawData = response.data;
-      const contentEncoding = String(response.headers?.["content-encoding"] || "").toLowerCase();
+      const contentEncoding = String(response.headers?.['content-encoding'] || '').toLowerCase();
 
-      if (contentEncoding === "gzip") rawData = await gunzipAsync(rawData);
-      else if (contentEncoding === "deflate") rawData = await inflateAsync(rawData);
-      else if (contentEncoding === "br") rawData = await brotliDecompressAsync(rawData);
+      if (contentEncoding === 'gzip') rawData = await gunzipAsync(rawData);
+      else if (contentEncoding === 'deflate') rawData = await inflateAsync(rawData);
+      else if (contentEncoding === 'br') rawData = await brotliDecompressAsync(rawData);
 
-      const textData = Buffer.from(rawData).toString("utf8");
+      const textData = Buffer.from(rawData).toString('utf8');
 
       let parsed;
       try {
@@ -325,10 +323,10 @@ export default class ConsensusProxy {
     } catch (error) {
       return {
         status: error.response?.status || 500,
-        statusText: error.response?.statusText || "Internal Server Error",
+        statusText: error.response?.statusText || 'Internal Server Error',
         headers: error.response?.headers || {},
         data: {
-          error: "Request failed",
+          error: 'Request failed',
           message: error.message,
           code: error.code,
           url,
@@ -346,9 +344,10 @@ export default class ConsensusProxy {
       total_requests: this.stats.total_requests,
       cache_hits: this.stats.cache_hits,
       cache_misses: this.stats.cache_misses,
-      hit_rate: this.stats.total_requests > 0 
-        ? ((this.stats.cache_hits / this.stats.total_requests) * 100).toFixed(2) + '%'
-        : '0%',
+      hit_rate:
+        this.stats.total_requests > 0
+          ? ((this.stats.cache_hits / this.stats.total_requests) * 100).toFixed(2) + '%'
+          : '0%',
       cache_stats: this.cache.getStats(),
       router_stats: this.router.getStats(),
     };
@@ -358,7 +357,7 @@ export default class ConsensusProxy {
   }
 
   getCached(dedupeKey) {
-  return this.cache.get(dedupeKey) || null;
+    return this.cache.get(dedupeKey) || null;
   }
   getPaymentStatus(dedupeKey) {
     return {

@@ -35,10 +35,10 @@ async function loadKeys() {
   try {
     const privateKeyPath = path.join(root, '.consensus-node.key');
     const publicKeyPath = path.join(root, '.consensus-node.pub');
-    
+
     const privateKey = await fs.readFile(privateKeyPath, 'utf8');
     const publicKey = await fs.readFile(publicKeyPath, 'utf8');
-    
+
     nodeKeys = { privateKey, publicKey };
     console.log('✓ Loaded node keypair');
   } catch {
@@ -57,34 +57,33 @@ console.log('🌐 Consensus Node Server\n');
 app.post('/benchmark/fetch', async (req, res) => {
   try {
     const { target_url } = req.body;
-    
+
     if (!target_url) {
       return res.status(400).json({ error: 'Missing target_url' });
     }
-    
+
     console.log(`📡 Fetch benchmark: ${target_url}`);
-    
+
     const start = Date.now();
     const response = await fetch(target_url, {
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(5000),
     });
-    
+
     await response.text();
     const duration = Date.now() - start;
-    
+
     console.log(`   ✓ Completed in ${duration}ms`);
-    
+
     res.json({
       success: true,
       status: response.status,
-      duration_ms: duration
+      duration_ms: duration,
     });
-    
   } catch (error) {
     console.log(`   ✗ Error: ${error.message}`);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message,
     });
   }
 });
@@ -92,35 +91,34 @@ app.post('/benchmark/fetch', async (req, res) => {
 app.post('/benchmark/cpu', (req, res) => {
   try {
     const { iterations, data } = req.body;
-    
+
     if (!iterations || !data) {
       return res.status(400).json({ error: 'Missing iterations or data' });
     }
-    
+
     console.log(`⚙️  CPU benchmark: ${iterations} iterations`);
-    
+
     const start = Date.now();
     for (let i = 0; i < iterations; i++) {
       crypto.createHash('sha256').update(data).digest('hex');
     }
-    
+
     const duration = Date.now() - start;
     const hashesPerSecond = (iterations / duration) * 1000;
-    
+
     console.log(`   ✓ ${Math.round(hashesPerSecond)} hashes/second`);
-    
+
     res.json({
       success: true,
       iterations,
       duration_ms: duration,
-      hashes_per_second: Math.round(hashesPerSecond)
+      hashes_per_second: Math.round(hashesPerSecond),
     });
-    
   } catch (error) {
     console.log(`   ✗ Error: ${error.message}`);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message,
     });
   }
 });
@@ -129,9 +127,9 @@ app.get('/benchmark/system', (req, res) => {
   try {
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
-    
+
     console.log(`💾 System info: ${Math.round(freeMem / 1024 / 1024)}MB free`);
-    
+
     res.json({
       success: true,
       platform: os.platform(),
@@ -140,14 +138,13 @@ app.get('/benchmark/system', (req, res) => {
       total_memory_bytes: totalMem,
       free_memory_bytes: freeMem,
       uptime_seconds: os.uptime(),
-      node_version: process.version
+      node_version: process.version,
     });
-    
   } catch (error) {
     console.log(`   ✗ Error: ${error.message}`);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message,
     });
   }
 });
@@ -180,22 +177,21 @@ app.post('/benchmark/memory-test', (req, res) => {
       res.json({
         success: true,
         allocated_mb: test_size_mb,
-        duration_ms: duration
+        duration_ms: duration,
       });
     } catch (allocError) {
       console.log(`   ✗ Failed to allocate: ${allocError.message}`);
       res.json({
         success: false,
         error: allocError.message,
-        allocated_mb: 0
+        allocated_mb: 0,
       });
     }
-    
   } catch (error) {
     console.log(`   ✗ Error: ${error.message}`);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message,
     });
   }
 });
@@ -208,7 +204,7 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     node_id: nodeConfig?.node_id || null,
     domain: nodeConfig?.domain || null,
-    registered: !!nodeConfig
+    registered: !!nodeConfig,
   });
 });
 
@@ -223,7 +219,7 @@ app.get('/info', (req, res) => {
     port: port,
     status: nodeConfig ? 'registered' : 'unregistered',
     uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -231,35 +227,35 @@ app.get('/info', (req, res) => {
 app.post('/proxy', async (req, res) => {
   try {
     const { target_url, method = 'GET', headers = {}, body } = req.body;
-    
+
     if (!target_url) {
       return res.status(400).json({ error: 'Missing target_url' });
     }
-    
+
     console.log(`🔄 Proxying ${method} request to ${target_url}`);
-    
+
     const start = Date.now();
-    
+
     // Make the request
     const fetchOptions = {
       method,
       headers: {
         ...headers,
-        'User-Agent': `Consensus-Node/${nodeConfig?.node_id || 'unregistered'}`
+        'User-Agent': `Consensus-Node/${nodeConfig?.node_id || 'unregistered'}`,
       },
-      signal: AbortSignal.timeout(30000)
+      signal: AbortSignal.timeout(30000),
     };
-    
+
     if (body && method !== 'GET' && method !== 'HEAD') {
       fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
     }
-    
+
     const response = await fetch(target_url, fetchOptions);
     const responseBody = await response.text();
     const duration = Date.now() - start;
-    
+
     console.log(`   ✓ Completed in ${duration}ms (${response.status})`);
-    
+
     // Return response
     res.status(response.status).json({
       status: response.status,
@@ -269,35 +265,33 @@ app.post('/proxy', async (req, res) => {
       meta: {
         node_id: nodeConfig?.node_id || null,
         processing_time_ms: duration,
-        timestamp: new Date().toISOString()
-      }
+        timestamp: new Date().toISOString(),
+      },
     });
-    
   } catch (error) {
     console.error(`   ✗ Proxy error: ${error.message}`);
     res.status(500).json({
       error: 'Proxy request failed',
-      message: error.message
+      message: error.message,
     });
   }
 });
-
 
 // Start server
 async function startServer() {
   await loadConfig();
   await loadKeys();
-  
+
   // Check if we have mTLS certificates
   let server;
   const certsExist = await checkCertsExist();
-  
+
   if (certsExist && nodeConfig) {
     // Use HTTPS with mTLS
     const key = await fs.readFile(path.join(root, 'certs/node.key'));
     const cert = await fs.readFile(path.join(root, 'certs/node.crt'));
     const ca = await fs.readFile(path.join(root, 'certs/ca.crt'));
-    
+
     server = https.createServer({ key, cert, ca }, app);
     console.log(`🔐 Starting with mTLS enabled`);
   } else {
@@ -306,10 +300,12 @@ async function startServer() {
     server = http.createServer(app);
     console.log(`⚠️  Starting without TLS (registration mode)`);
   }
-  
+
   server.listen(port, '0.0.0.0', () => {
-    console.log(`\n✅ Consensus Node running on ${certsExist ? 'https' : 'http'}://localhost:${port}`);
-    
+    console.log(
+      `\n✅ Consensus Node running on ${certsExist ? 'https' : 'http'}://localhost:${port}`
+    );
+
     if (nodeConfig) {
       console.log(`   Node ID: ${nodeConfig.node_id}`);
       console.log(`   Domain: ${nodeConfig.domain}`);
@@ -318,7 +314,7 @@ async function startServer() {
       console.log(`   Status: Not registered`);
       console.log(`   Run: node src/register.js to join the network`);
     }
-    
+
     console.log('\n📋 Endpoints:');
     console.log(`   GET  /health - Health check`);
     console.log(`   GET  /info - Node information`);

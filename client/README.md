@@ -73,19 +73,19 @@ CONSENSUS_SERVER_URL=https://your-custom-node.example.com
 
 ### ProxyClient Options
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `mode` | `"inclusive" \| "exclusive"` | `"inclusive"` | `inclusive` proxies all routes **except** those in `routes`. `exclusive` proxies **only** the listed routes. |
-| `routes` | `string[]` | `[]` | Route paths to include or exclude, depending on `mode`. |
-| `matchSubroutes` | `boolean` | `false` | When `true`, a route match also applies to all sub-paths beneath it. |
-| `strategy` | `"auto" \| "manual"` | `"auto"` | `auto` transparently intercepts `fetch()` calls within middleware. `manual` exposes `req.consensus.fetch()` for explicit control. |
-| `cache_ttl` | `number` | — | TTL in seconds for node-level response caching. |
-| `verbose` | `boolean` | `false` | Enables verbose response metadata from the proxy node. |
-| `node_region` | `string` | — | Prefer proxy nodes in a specific geographic region. |
-| `node_domain` | `string` | — | Route through a specific node domain. |
-| `node_exclude` | `string` | — | Exclude a specific node domain from selection. |
-| `limit_usd` | `number` | — | Max proxy spend in USD (up to 6 decimals). When reached, proxying stands down to direct `fetch`. |
-| `on_limit_reached` | `(budget) => void` | — | Callback fired once when stand-down is activated. |
+| Option             | Type                         | Default       | Description                                                                                                                       |
+| ------------------ | ---------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `mode`             | `"inclusive" \| "exclusive"` | `"inclusive"` | `inclusive` proxies all routes **except** those in `routes`. `exclusive` proxies **only** the listed routes.                      |
+| `routes`           | `string[]`                   | `[]`          | Route paths to include or exclude, depending on `mode`.                                                                           |
+| `matchSubroutes`   | `boolean`                    | `false`       | When `true`, a route match also applies to all sub-paths beneath it.                                                              |
+| `strategy`         | `"auto" \| "manual"`         | `"auto"`      | `auto` transparently intercepts `fetch()` calls within middleware. `manual` exposes `req.consensus.fetch()` for explicit control. |
+| `cache_ttl`        | `number`                     | —             | TTL in seconds for node-level response caching.                                                                                   |
+| `verbose`          | `boolean`                    | `false`       | Enables verbose response metadata from the proxy node.                                                                            |
+| `node_region`      | `string`                     | —             | Prefer proxy nodes in a specific geographic region.                                                                               |
+| `node_domain`      | `string`                     | —             | Route through a specific node domain.                                                                                             |
+| `node_exclude`     | `string`                     | —             | Exclude a specific node domain from selection.                                                                                    |
+| `limit_usd`        | `number`                     | —             | Max proxy spend in USD (up to 6 decimals). When reached, proxying stands down to direct `fetch`.                                  |
+| `on_limit_reached` | `(budget) => void`           | —             | Callback fired once when stand-down is activated.                                                                                 |
 
 Proxy spend tracking uses the fixed server price of `$0.0001` per paid `/proxy` request (cached hits are not charged).
 
@@ -94,26 +94,26 @@ Proxy spend tracking uses the fixed server price of `$0.0001` per paid `/proxy` 
 In `auto` mode, `ProxyClient` intercepts the global `fetch()` within the request context so your route handlers require no changes.
 
 ```ts
-import express from "express";
-import { ProxyClient } from "@canister-software/consensus-cli";
+import express from 'express';
+import { ProxyClient } from '@canister-software/consensus-cli';
 
 const app = express();
 
 // Proxy only /price — all other routes use direct fetch
 app.use(
   ProxyClient(fetchWithPayment, {
-    mode: "exclusive",
-    routes: ["/price"],
+    mode: 'exclusive',
+    routes: ['/price'],
     matchSubroutes: false,
-    strategy: "auto",
+    strategy: 'auto',
     cache_ttl: 60,
     verbose: true,
   })
 );
 
 // No changes needed — fetch() is automatically proxied for /price
-app.get("/price", async (_req, res) => {
-  const response = await fetch("https://api.example.com/price");
+app.get('/price', async (_req, res) => {
+  const response = await fetch('https://api.example.com/price');
   res.json(await response.json());
 });
 ```
@@ -123,17 +123,17 @@ app.get("/price", async (_req, res) => {
 In `manual` mode, the proxy is not applied automatically. Use `req.consensus.fetch()` to explicitly proxy individual requests, or `req.consensus.request()` for a lower-level structured payload:
 
 ```ts
-app.use(ProxyClient(fetchWithPayment, { strategy: "manual" }));
+app.use(ProxyClient(fetchWithPayment, { strategy: 'manual' }));
 
-app.get("/data", async (req, res) => {
+app.get('/data', async (req, res) => {
   // Proxied fetch — returns a standard Response
-  const response = await req.consensus.fetch("https://api.example.com/data");
+  const response = await req.consensus.fetch('https://api.example.com/data');
   res.json(await response.json());
 
   // Or use the structured request helper — returns a ProxyResponseShape
   const result = await req.consensus.request({
-    target_url: "https://api.example.com/data",
-    method: "GET",
+    target_url: 'https://api.example.com/data',
+    method: 'GET',
   });
   res.json(result.data);
 });
@@ -145,9 +145,9 @@ Both `req.consensus.fetch()` and `req.consensus.request()` accept per-request op
 
 ```ts
 const response = await req.consensus.fetch(
-  "https://api.example.com/data",
-  { method: "GET" },
-  { node_region: "us-east", cache_ttl: 30 }
+  'https://api.example.com/data',
+  { method: 'GET' },
+  { node_region: 'us-east', cache_ttl: 30 }
 );
 ```
 
@@ -157,18 +157,18 @@ Use `runWithPath()` to scope interception in any server framework and `createFet
 
 ```ts
 const proxy = ProxyClient(fetchWithPayment, {
-  mode: "exclusive",
-  routes: ["/api"],
+  mode: 'exclusive',
+  routes: ['/api'],
   limit_usd: 1.25,
 });
 
-await proxy.runWithPath("/api", async () => {
-  const response = await fetch("https://api.example.com/data");
+await proxy.runWithPath('/api', async () => {
+  const response = await fetch('https://api.example.com/data');
   console.log(await response.json());
 });
 
-const apiFetch = proxy.createFetch("/api");
-const directFetch = proxy.createFetch("/health");
+const apiFetch = proxy.createFetch('/api');
+const directFetch = proxy.createFetch('/health');
 ```
 
 ---
@@ -179,14 +179,14 @@ const directFetch = proxy.createFetch("/health");
 
 ### SocketClient Options
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `openTimeoutMs` | `number` | `12000` | Milliseconds to wait for the WebSocket connection to open before timing out. |
-| `reconnectIntervalMs` | `number` | `2000` | Milliseconds between automatic reconnection attempts. |
-| `defaults` | `ConsensusSocketTokenParams` | — | Default token parameters applied to every `requestToken()` call unless overridden. |
-| `limit_usd` | `number` | — | Max WebSocket spend in USD (up to 6 decimals). If next token quote exceeds remaining budget, token request is blocked. |
-| `on_limit_reached` | `(budget) => void` | — | Callback fired once when the WebSocket spend limit is reached. |
-| `webSocketFactory` | `constructor` | auto-detected | Custom WebSocket constructor (browser `WebSocket` or `ws` for Node.js). Auto-detected if not provided. |
+| Option                | Type                         | Default       | Description                                                                                                            |
+| --------------------- | ---------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `openTimeoutMs`       | `number`                     | `12000`       | Milliseconds to wait for the WebSocket connection to open before timing out.                                           |
+| `reconnectIntervalMs` | `number`                     | `2000`        | Milliseconds between automatic reconnection attempts.                                                                  |
+| `defaults`            | `ConsensusSocketTokenParams` | —             | Default token parameters applied to every `requestToken()` call unless overridden.                                     |
+| `limit_usd`           | `number`                     | —             | Max WebSocket spend in USD (up to 6 decimals). If next token quote exceeds remaining budget, token request is blocked. |
+| `on_limit_reached`    | `(budget) => void`           | —             | Callback fired once when the WebSocket spend limit is reached.                                                         |
+| `webSocketFactory`    | `constructor`                | auto-detected | Custom WebSocket constructor (browser `WebSocket` or `ws` for Node.js). Auto-detected if not provided.                 |
 
 WebSocket spend checks use a local quote from the known pricing model (`model`, `minutes`, `megabytes`) before token purchase, so there is no additional price-check round trip.
 
@@ -194,16 +194,16 @@ WebSocket spend checks use a local quote from the known pricing model (`model`, 
 
 Token requests accept a `model` parameter to control how your session is billed:
 
-| Model | Description |
-|---|---|
-| `"hybrid"` | Billed by both time and data (default). |
-| `"time"` | Billed by duration only (`minutes`). |
-| `"data"` | Billed by data transfer only (`megabytes`). |
+| Model      | Description                                 |
+| ---------- | ------------------------------------------- |
+| `"hybrid"` | Billed by both time and data (default).     |
+| `"time"`   | Billed by duration only (`minutes`).        |
+| `"data"`   | Billed by data transfer only (`megabytes`). |
 
 ### Basic Usage
 
 ```ts
-import { SocketClient } from "@canister-software/consensus-cli";
+import { SocketClient } from '@canister-software/consensus-cli';
 
 const client = SocketClient(fetchWithPayment, {
   reconnectIntervalMs: 2000,
@@ -211,7 +211,7 @@ const client = SocketClient(fetchWithPayment, {
 
 // Request a session token — pays for a time-based session
 const auth = await client.requestToken({
-  model: "time",
+  model: 'time',
   minutes: 5,
   megabytes: 0,
 });
@@ -219,12 +219,12 @@ const auth = await client.requestToken({
 // Connect using the token — returns a managed session
 const session = await client.connect(auth);
 
-session.on("open", () => console.log("Connected"));
-session.on("message", (msg) => console.log("Received:", msg));
-session.on("error", (err) => console.error("Error:", err));
-session.on("close", () => console.log("Disconnected"));
+session.on('open', () => console.log('Connected'));
+session.on('message', (msg) => console.log('Received:', msg));
+session.on('error', (err) => console.error('Error:', err));
+session.on('close', () => console.log('Disconnected'));
 
-session.send("hello");
+session.send('hello');
 
 // Close when done
 session.close();
@@ -236,11 +236,11 @@ Target specific proxy nodes for WebSocket sessions:
 
 ```ts
 const auth = await client.requestToken({
-  model: "hybrid",
+  model: 'hybrid',
   minutes: 10,
   megabytes: 100,
-  nodeRegion: "eu-west",
-  nodeExclude: "node.example.com",
+  nodeRegion: 'eu-west',
+  nodeExclude: 'node.example.com',
 });
 ```
 
@@ -255,10 +255,10 @@ To stop reconnection, call `session.close()` — this sets an internal flag that
 Both `requestToken()` and `connect()` support a `{ safe: true }` option that catches errors and returns a result object instead of throwing:
 
 ```ts
-const result = await client.requestToken({ model: "time", minutes: 1 }, { safe: true });
+const result = await client.requestToken({ model: 'time', minutes: 1 }, { safe: true });
 
 if (!result.ok) {
-  console.error("Token request failed:", result.error);
+  console.error('Token request failed:', result.error);
 } else {
   const session = await client.connect(result.data);
 }
@@ -275,11 +275,11 @@ const state = session.getState();
 
 ## CLI Commands
 
-| Command | Description |
-|---|---|
-| `consensus setup` | Create a wallet and register it with the x402 proxy. |
+| Command                   | Description                                                        |
+| ------------------------- | ------------------------------------------------------------------ |
+| `consensus setup`         | Create a wallet and register it with the x402 proxy.               |
 | `consensus setup --force` | Force re-create the account, resetting any existing configuration. |
-| `consensus help` | Show help message. |
+| `consensus help`          | Show help message.                                                 |
 
 ---
 
@@ -298,5 +298,5 @@ Run `consensus setup` to initialize your environment. The CLI will:
 
 > **⚠️ Never commit `.consensus-config.json`.** It contains sensitive wallet credentials. The setup command adds it to `.gitignore` automatically, but verify this if you use a custom `.gitignore` setup.
 
->**DO NOT keep large amounts** in the proxy-delegated wallet - if the proxy is compromised, your delegation could be at risk.
+> **DO NOT keep large amounts** in the proxy-delegated wallet - if the proxy is compromised, your delegation could be at risk.
 > Only fund the wallet with amounts you're comfortable delegating for API payments.

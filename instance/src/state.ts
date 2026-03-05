@@ -1,6 +1,6 @@
 // src/state.ts
-import fs from "fs/promises";
-import path from "path";
+import fs from 'fs/promises';
+import path from 'path';
 
 export type StatePaths = {
   base: string;
@@ -18,21 +18,21 @@ export type StatePaths = {
 };
 
 export function stateDir(): string {
-  return process.env.CONSENSUS_STATE_DIR || "/var/lib/consensus/node";
+  return process.env.CONSENSUS_STATE_DIR || '/var/lib/consensus/node';
 }
 
 export function paths(): StatePaths {
   const base = stateDir();
   return {
     base,
-    config: path.join(base, "config.json"),
-    keysDir: path.join(base, "keys"),
-    certsDir: path.join(base, "certs"),
-    privateKeyPem: path.join(base, "keys", "node.key"),
-    publicKeyPem: path.join(base, "keys", "node.pub"),
-    nodeCrt: path.join(base, "certs", "node.crt"),
-    nodeKey: path.join(base, "certs", "node.key"),
-    caCrt: path.join(base, "certs", "ca.crt"),
+    config: path.join(base, 'config.json'),
+    keysDir: path.join(base, 'keys'),
+    certsDir: path.join(base, 'certs'),
+    privateKeyPem: path.join(base, 'keys', 'node.key'),
+    publicKeyPem: path.join(base, 'keys', 'node.pub'),
+    nodeCrt: path.join(base, 'certs', 'node.crt'),
+    nodeKey: path.join(base, 'certs', 'node.key'),
+    caCrt: path.join(base, 'certs', 'ca.crt'),
   };
 }
 
@@ -45,7 +45,7 @@ export async function ensureState(): Promise<StatePaths> {
 }
 
 export async function readJson<T>(file: string): Promise<T> {
-  const raw = await fs.readFile(file, "utf8");
+  const raw = await fs.readFile(file, 'utf8');
   return JSON.parse(raw) as T;
 }
 
