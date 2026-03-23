@@ -1,6 +1,5 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
-import 'dotenv/config';
 import { CdpClient } from '@coinbase/cdp-sdk';
 import { toAccount } from 'viem/accounts';
 import fs from 'fs';
@@ -11,17 +10,30 @@ import ora from 'ora';
 import chalk from 'chalk';
 import { readFile } from 'fs/promises';
 import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+type WalletConfig = {
+  wallet_name: string;
+  addresses: {
+    evm: string;
+    solana: string;
+  };
+  api_key: string;
+  x402_proxy_url: string;
+  setup_date: string;
+  version: string;
+};
 
-async function showBanner() {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
+type WalletResult = {
+  wallet_name: string;
+  evm_account: Awaited<ReturnType<CdpClient['evm']['createAccount']>>;
+  evm_address: string;
+  solana_account: Awaited<ReturnType<CdpClient['solana']['createAccount']>>;
+  solana_address: string;
+};
 
-  const pkg = await readFile(path.join(__dirname, '../package.json'), 'utf8');
-  const version = JSON.parse(pkg).version;
+async function showBanner(): Promise<void> {
+  const pkg = await readFile(path.join(import.meta.dir, '../package.json'), 'utf8');
+  const version = JSON.parse(pkg).version as string;
 
   const ascii = figlet.textSync('CONSENSUS\nClient', {
     font: 'ANSI Shadow',
@@ -31,7 +43,6 @@ async function showBanner() {
 
   console.log(chalk.black(ascii));
   console.log(chalk.dim(`v${version}\n`));
-
   console.log(
     chalk.gray(
       '• Stable IPs • HTTP Deduplication • Built for Blockchains \nPowered by x402 Payments\n'
@@ -39,58 +50,60 @@ async function showBanner() {
   );
 
   const spinner = ora('Launching Consensus Client...').start();
-
   await new Promise((resolve) => setTimeout(resolve, 800));
   spinner.succeed('Client CLI READY');
 }
 
 class ConsensusSDK {
+  private configPath: string;
+  private x402ProxyUrl: string;
+
   constructor() {
     this.configPath = path.join(process.cwd(), '.consensus-config.json');
     this.x402ProxyUrl =
       process.env.X402_PROXY_URL || 'https://consensus.proxy.canister.software:3001';
-    this.extractPrivateKey = function extractPrivateKey(privateKeyData, keyType = 'EVM') {
-      if (typeof privateKeyData === 'string') {
-        if (keyType === 'EVM') {
-          return privateKeyData.startsWith('0x') ? privateKeyData : `0x${privateKeyData}`;
-        }
-        return privateKeyData;
-      }
-
-      if (privateKeyData?.privateKey) {
-        if (keyType === 'EVM') {
-          return privateKeyData.privateKey.startsWith('0x')
-            ? privateKeyData.privateKey
-            : `0x${privateKeyData.privateKey}`;
-        }
-        return privateKeyData.privateKey;
-      }
-
-      throw new Error(`Unexpected ${keyType} private key format from CDP`);
-    };
   }
 
-  generateWalletName() {
+  private extractPrivateKey(privateKeyData: unknown, keyType: 'EVM' | 'Solana' = 'EVM'): string {
+    if (typeof privateKeyData === 'string') {
+      if (keyType === 'EVM') {
+        return privateKeyData.startsWith('0x') ? privateKeyData : `0x${privateKeyData}`;
+      }
+      return privateKeyData;
+    }
+
+    const data = privateKeyData as { privateKey?: string } | null;
+    if (data?.privateKey) {
+      if (keyType === 'EVM') {
+        return data.privateKey.startsWith('0x') ? data.privateKey : `0x${data.privateKey}`;
+      }
+      return data.privateKey;
+    }
+
+    throw new Error(`Unexpected ${keyType} private key format from CDP`);
+  }
+
+  private generateWalletName(): string {
     return crypto.randomBytes(8).toString('hex');
   }
 
-  loadConfig() {
+  loadConfig(): WalletConfig | null {
     try {
       if (fs.existsSync(this.configPath)) {
-        return JSON.parse(fs.readFileSync(this.configPath, 'utf8'));
+        return JSON.parse(fs.readFileSync(this.configPath, 'utf8')) as WalletConfig;
       }
     } catch (error) {
-      console.error(chalk.red('Error reading config:'), error.message);
+      console.error(chalk.red('Error reading config:'), (error as Error).message);
     }
     return null;
   }
 
-  saveConfig(config) {
+  saveConfig(config: WalletConfig): void {
     try {
       fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2));
       console.log(chalk.green('✓ Configuration saved'));
 
-      const rootDir = path.resolve(__dirname, '../../');
+      const rootDir = path.resolve(import.meta.dir, '../../');
       const gitignorePath = path.join(rootDir, '.gitignore');
       const ignoreEntry = path.basename(this.configPath);
 
@@ -101,14 +114,14 @@ class ConsensusSDK {
 
       if (!gitignoreContents.split('\n').includes(ignoreEntry)) {
         fs.appendFileSync(gitignorePath, `\n# Ignore consensus config\n${ignoreEntry}\n`);
-        console.log(chalk.yellow(`⚠️  .config hidden from git`));
+        console.log(chalk.yellow('⚠️  .config hidden from git'));
       }
     } catch (error) {
-      throw new Error(`Failed to save config: ${error.message}`);
+      throw new Error(`Failed to save config: ${(error as Error).message}`);
     }
   }
 
-  validateEnvironment() {
+  validateEnvironment(): boolean {
     const requiredVars = ['CDP_API_KEY_ID', 'CDP_API_KEY_SECRET', 'CDP_WALLET_SECRET'];
     const missing = requiredVars.filter((varName) => !process.env[varName]);
 
@@ -126,7 +139,7 @@ class ConsensusSDK {
     return true;
   }
 
-  async checkExistingSetup(forceFlag) {
+  async checkExistingSetup(forceFlag: boolean): Promise<boolean> {
     const config = this.loadConfig();
 
     if (config) {
@@ -140,14 +153,10 @@ class ConsensusSDK {
         console.log(chalk.cyan('Solana Address:'), config.addresses.solana);
       }
 
-      if (config.account_address && !config.addresses) {
-        console.log(chalk.cyan('Account Address:'), config.account_address);
-      }
-
       console.log(chalk.cyan('Setup Date:'), config.setup_date);
 
       if (!forceFlag) {
-        const { action } = await inquirer.prompt([
+        const { action } = await inquirer.prompt<{ action: string }>([
           {
             type: 'list',
             name: 'action',
@@ -178,11 +187,11 @@ class ConsensusSDK {
     return false;
   }
 
-  async confirmReset() {
+  async confirmReset(): Promise<boolean> {
     console.log(chalk.red('\n⚠️  WARNING: This will reset your account and create a new wallet.'));
     console.log(chalk.red('⚠️  Make sure to backup any funds from your current wallet!'));
 
-    const { confirmed } = await inquirer.prompt([
+    const { confirmed } = await inquirer.prompt<{ confirmed: boolean }>([
       {
         type: 'confirm',
         name: 'confirmed',
@@ -199,7 +208,7 @@ class ConsensusSDK {
     return false;
   }
 
-  async createWallets() {
+  async createWallets(): Promise<WalletResult> {
     const spinner = ora('Creating multi-chain CDP wallets...').start();
 
     try {
@@ -212,7 +221,6 @@ class ConsensusSDK {
       ]);
 
       const evmViemAccount = toAccount(evmAccount);
-
       spinner.succeed('Multi-chain wallets created');
 
       return {
@@ -224,11 +232,15 @@ class ConsensusSDK {
       };
     } catch (error) {
       spinner.fail('Failed to create wallets');
-      throw new Error(`Wallet creation failed: ${error.message}`);
+      throw new Error(`Wallet creation failed: ${(error as Error).message}`);
     }
   }
 
-  async registerWithProxy(walletName, evmAddress, solanaAddress) {
+  async registerWithProxy(
+    walletName: string,
+    evmAddress: string,
+    solanaAddress: string
+  ): Promise<string> {
     const spinner = ora('Registering with x402 proxy...').start();
 
     try {
@@ -254,33 +266,29 @@ class ConsensusSDK {
 
       if (!response.ok) {
         const raw = await response.text();
-
         let message = raw;
         try {
-          const parsed = JSON.parse(raw);
+          const parsed = JSON.parse(raw) as { error?: string; message?: string };
           message = parsed.error || parsed.message || raw;
         } catch {}
-
         throw new Error(`HTTP ${response.status}: ${message}`);
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as { api_key: string };
       spinner.succeed('Registered with x402 proxy');
-
       return data.api_key;
     } catch (error) {
       spinner.fail('Failed to register with x402 proxy');
-      if (error.message.includes('ECONNREFUSED')) {
+      if ((error as Error).message.includes('ECONNREFUSED')) {
         throw new Error(
           'Cannot connect to x402 proxy. Is it running on ' + this.x402ProxyUrl + '?'
         );
       }
-
       throw error;
     }
   }
 
-  async setup() {
+  async setup(): Promise<void> {
     try {
       console.log(chalk.blue.bold('Consensus SDK Setup\n'));
 
@@ -291,20 +299,14 @@ class ConsensusSDK {
       const forceFlag = process.argv.includes('--force');
       const shouldSkip = await this.checkExistingSetup(forceFlag);
 
-      if (shouldSkip) {
-        return;
-      }
+      if (shouldSkip) return;
 
       const { wallet_name, evm_address, solana_address } = await this.createWallets();
-
       const api_key = await this.registerWithProxy(wallet_name, evm_address, solana_address);
 
-      const config = {
+      const config: WalletConfig = {
         wallet_name,
-        addresses: {
-          evm: evm_address,
-          solana: solana_address,
-        },
+        addresses: { evm: evm_address, solana: solana_address },
         api_key,
         x402_proxy_url: this.x402ProxyUrl,
         setup_date: new Date().toISOString(),
@@ -334,16 +336,17 @@ class ConsensusSDK {
       console.log('  -H "Content-Type: application/json" \\');
       console.log(`  -d '{"target_url": "https://api.example.com", "chain": "base"}'`);
     } catch (error) {
-      console.error(chalk.red('\n❌ Setup failed:'), error.message);
+      console.error(chalk.red('\n❌ Setup failed:'), (error as Error).message);
       process.exit(1);
     }
   }
 
-  showHelp() {
+  showHelp(): void {
     console.log(chalk.blue.bold('Consensus SDK\n'));
     console.log('Commands:');
     console.log('  setup          Create new account and register with proxy');
     console.log('  setup --force  Force create new account (reset existing)');
+    console.log('  tunnel <host>  Expose a local or LAN device to the internet');
     console.log('  help           Show this help message');
     console.log('\nEnvironment variables required:');
     console.log('  CDP_API_KEY_ID, CDP_API_KEY_SECRET, CDP_WALLET_SECRET');
@@ -354,7 +357,7 @@ class ConsensusSDK {
   }
 }
 
-async function main() {
+async function main(): Promise<void> {
   await showBanner();
   const sdk = new ConsensusSDK();
   const command = process.argv[2];
@@ -362,6 +365,10 @@ async function main() {
   switch (command) {
     case 'setup':
       await sdk.setup();
+      break;
+    case 'tunnel':
+      // TODO: implement tunnel subcommand
+      console.log(chalk.yellow('Tunnel command coming soon'));
       break;
     case 'help':
     case '--help':
@@ -379,7 +386,7 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+main().catch((error: Error) => {
   console.error(chalk.red('Error:'), error.message);
   process.exit(1);
 });

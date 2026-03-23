@@ -274,6 +274,18 @@ export default class ConsensusProxy {
     delete cleanHeaders['x-node-exclude'];
     delete cleanHeaders['X-Node-Exclude'];
 
+    // IP privacy — never reveal the client's identity to the target
+    // x called us, we call y. y should only ever see Consensus as the caller.
+    delete cleanHeaders['x-forwarded-for'];
+    delete cleanHeaders['X-Forwarded-For'];
+    delete cleanHeaders['x-real-ip'];
+    delete cleanHeaders['X-Real-IP'];
+    delete cleanHeaders['forwarded'];
+    delete cleanHeaders['Forwarded'];
+
+    // Replace axios default User-Agent — don't leak proxy technology to target
+    cleanHeaders['user-agent'] = 'Consensus-Proxy/2.0';
+
     const config = {
       method: String(method).toLowerCase(),
       url,

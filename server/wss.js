@@ -110,7 +110,6 @@ export function registerWebSocket(app, httpsServer, x402Server, config, router) 
     const url = new URL(req.url, `https://${req.headers.host}`);
 
     if (url.pathname !== '/ws-connect') {
-      socket.destroy();
       return;
     }
 

@@ -16,6 +16,7 @@ import { ExactIcpScheme } from '@canister-software/x402-icp/server';
 import { registerWhitepaperSignup } from './data/whitepaperSignup.js';
 import { registerWebSocket } from './wss.js';
 import { registerNodes } from './orchestrator.js';
+import { registerTunnel } from './tunnel.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -65,6 +66,7 @@ const nodeStats = registerNodes(app, server, x402Server, {
   SOLANA_PAY_TO,
   ICP_PAY_TO,
 });
+const tunnelStats = registerTunnel(app, server);
 
 app.get('/', (req, res) => {
   res.json({
@@ -84,6 +86,7 @@ app.get('/health', (req, res) => {
   const stats = proxy.getStats();
   const ws = wsStats.getStats();
   const nodes = nodeStats.getStats();
+  const tunnels = tunnelStats.getStats();
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
@@ -94,6 +97,7 @@ app.get('/health', (req, res) => {
     },
     websocket: ws,
     nodes: nodes,
+    tunnels,
   });
 });
 
