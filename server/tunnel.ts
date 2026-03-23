@@ -1,6 +1,6 @@
 import crypto                         from 'crypto';
 import net                            from 'net';
-import { WebSocketServer, WebSocket } from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import type { Express, Request }      from 'express';
 import type { Server }                from 'http';
 

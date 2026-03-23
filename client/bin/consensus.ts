@@ -5,11 +5,17 @@ import { toAccount } from 'viem/accounts';
 import fs from 'fs';
 import crypto from 'crypto';
 import inquirer from 'inquirer';
-import figlet from 'figlet';
 import ora from 'ora';
 import chalk from 'chalk';
 import { readFile } from 'fs/promises';
 import path from 'path';
+import { runTunnel } from './tunnel.ts';
+import {
+  createCliRenderer,
+  ASCIIFontRenderable,
+  BoxRenderable,
+  TextRenderable,
+} from '@opentui/core';
 
 type WalletConfig = {
   wallet_name: string;
@@ -31,27 +37,69 @@ type WalletResult = {
   solana_address: string;
 };
 
+// ─── Design tokens ────────────────────────────────────────────────────────────
+const PALETTE = {
+  cyan:    '#06b6d4',
+  sky:     '#0ea5e9',
+  emerald: '#10b981',
+  slate:   '#94a3b8',
+  dim:     '#475569',
+  white:   '#f8fafc',
+  dark:    '#0f172a',
+  panel:   '#1e293b',
+} as const;
+
+// ─── Splash screen (1.2 s opentui render, then destroys itself) ───────────────
 async function showBanner(): Promise<void> {
-  const pkg = await readFile(path.join(import.meta.dir, '../package.json'), 'utf8');
+  const pkg     = await readFile(path.join(import.meta.dir, '../package.json'), 'utf8');
   const version = JSON.parse(pkg).version as string;
 
-  const ascii = figlet.textSync('CONSENSUS\nClient', {
-    font: 'ANSI Shadow',
-    horizontalLayout: 'default',
-    verticalLayout: 'default',
+  const renderer = await createCliRenderer({
+    exitOnCtrlC:        false,
+    targetFps:          30,
+    useMouse:           false,
+    useAlternateScreen: false,   // keep in the same scroll-back buffer
   });
 
-  console.log(chalk.black(ascii));
-  console.log(chalk.dim(`v${version}\n`));
-  console.log(
-    chalk.gray(
-      '• Stable IPs • HTTP Deduplication • Built for Blockchains \nPowered by x402 Payments\n'
-    )
-  );
+  // Root
+  const root = renderer.root;
+  root.flexDirection   = 'column';
+  root.alignItems      = 'center';
+  root.justifyContent  = 'center';
+  root.backgroundColor = PALETTE.dark;
+  root.padding         = 2;
 
-  const spinner = ora('Launching Consensus Client...').start();
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  spinner.succeed('Client CLI READY');
+  // Logo
+  const logo = new ASCIIFontRenderable(renderer, {
+    text:            'CONSENSUS',
+    font:            'slick',
+    color:           [PALETTE.sky, PALETTE.cyan, PALETTE.emerald],
+    backgroundColor: 'transparent',
+  });
+
+  // Tagline
+  const tagline = new TextRenderable(renderer, {
+    content: '  Stable IPs · HTTP Deduplication · IoT Tunnels · Powered by x402  ',
+    fg:      PALETTE.slate,
+    bg:      PALETTE.dark,
+  });
+
+  // Version pill
+  const versionBadge = new TextRenderable(renderer, {
+    content: `  v${version}  `,
+    fg:      PALETTE.dim,
+    bg:      PALETTE.panel,
+  });
+
+  root.add(logo);
+  root.add(tagline);
+  root.add(versionBadge);
+
+  renderer.start();
+
+  // Show for 1.2 s then hand off to normal terminal output
+  await new Promise((r) => setTimeout(r, 1200));
+  renderer.destroy();
 }
 
 class ConsensusSDK {
@@ -344,16 +392,20 @@ class ConsensusSDK {
   showHelp(): void {
     console.log(chalk.blue.bold('Consensus SDK\n'));
     console.log('Commands:');
-    console.log('  setup          Create new account and register with proxy');
-    console.log('  setup --force  Force create new account (reset existing)');
-    console.log('  tunnel <host>  Expose a local or LAN device to the internet');
-    console.log('  help           Show this help message');
-    console.log('\nEnvironment variables required:');
+    console.log('  setup                             Create new account and register with proxy');
+    console.log('  setup --force                     Force create new account (reset existing)');
+    console.log('  tunnel http <host[:port]>         Expose a local HTTP server to the internet');
+    console.log('  tunnel tcp  <host:port>           Expose a local TCP device to the internet');
+    console.log('  help                              Show this help message');
+    console.log('\nTunnel examples:');
+    console.log(chalk.dim('  consensus tunnel http 192.168.1.101         # LAN device on port 80'));
+    console.log(chalk.dim('  consensus tunnel http 192.168.1.101:3000    # LAN device on port 3000'));
+    console.log(chalk.dim('  consensus tunnel tcp  192.168.1.101:1883    # MQTT broker'));
+    console.log('\nEnvironment variables required for setup:');
     console.log('  CDP_API_KEY_ID, CDP_API_KEY_SECRET, CDP_WALLET_SECRET');
     console.log(
       '  X402_PROXY_URL (optional, defaults to https://consensus.proxy.canister.software:3001/)'
     );
-    console.log('\nAfter setup, use the API key from .consensus-config.json for requests');
   }
 }
 
@@ -366,10 +418,30 @@ async function main(): Promise<void> {
     case 'setup':
       await sdk.setup();
       break;
-    case 'tunnel':
-      // TODO: implement tunnel subcommand
-      console.log(chalk.yellow('Tunnel command coming soon'));
+    case 'tunnel': {
+      // consensus tunnel http 192.168.1.101
+      // consensus tunnel http 192.168.1.101:3000
+      // consensus tunnel tcp  192.168.1.101:1883
+      const tunnelType = process.argv[3] as 'http' | 'tcp' | undefined;
+      const tunnelTarget = process.argv[4];
+
+      if (!tunnelType || !['http', 'tcp'].includes(tunnelType)) {
+        console.error(chalk.red('Usage: consensus tunnel <http|tcp> <host[:port]>'));
+        console.error(chalk.dim('  Examples:'));
+        console.error(chalk.dim('    consensus tunnel http 192.168.1.101'));
+        console.error(chalk.dim('    consensus tunnel http 192.168.1.101:3000'));
+        console.error(chalk.dim('    consensus tunnel tcp  192.168.1.101:1883'));
+        process.exit(1);
+      }
+
+      if (!tunnelTarget) {
+        console.error(chalk.red(`Usage: consensus tunnel ${tunnelType} <host[:port]>`));
+        process.exit(1);
+      }
+
+      await runTunnel(tunnelType, tunnelTarget);
       break;
+    }
     case 'help':
     case '--help':
     case '-h':
