@@ -66,7 +66,6 @@ async function showBanner(): Promise<void> {
   root.flexDirection   = 'column';
   root.alignItems      = 'center';
   root.justifyContent  = 'center';
-  root.backgroundColor = PALETTE.dark;
   root.padding         = 2;
 
   // Logo

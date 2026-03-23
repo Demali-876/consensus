@@ -10,7 +10,9 @@
     "skipLibCheck": true,
     "allowJs": false,
     "declaration": false,
-    "sourceMap": false
+    "sourceMap": false,
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "bin/**/*.ts"]
 }

@@ -110,7 +110,6 @@ async function buildTUI(
 
   const root = renderer.root;
   root.flexDirection    = 'column';
-  root.backgroundColor  = C.dark;
   root.padding          = 0;
 
   // ── Header: ASCII logo ─────────────────────────────────────────────────────
@@ -154,7 +153,6 @@ async function buildTUI(
   const infoBox = new BoxRenderable(renderer, {
     flexGrow:        1,
     flexShrink:      1,
-    flexBasis:       '50%',
     borderStyle:     'rounded',
     borderColor:     C.sky,
     title:           ' Tunnel ',
@@ -162,7 +160,7 @@ async function buildTUI(
     backgroundColor: C.panel,
   });
 
-  const mkRow = (renderer_: typeof renderer, label: string, value: string, valueColor = C.white) => {
+  const mkRow = (renderer_: typeof renderer, label: string, value: string, valueColor: string = C.white) => {
     const row = new BoxRenderable(renderer_, {
       flexDirection:   'row',
       backgroundColor: 'transparent',
@@ -196,7 +194,6 @@ async function buildTUI(
   const statsBox = new BoxRenderable(renderer, {
     flexGrow:       1,
     flexShrink:     1,
-    flexBasis:      '50%',
     borderStyle:    'rounded',
     borderColor:    C.cyan,
     title:          ' Traffic ',
@@ -278,7 +275,7 @@ async function buildTUI(
     // Keep at most 200 log lines
     const children = logScroll.getChildren();
     if (children.length > 200) {
-      logScroll.remove(children[0]!);
+      logScroll.remove(children[0]!.id);
     }
   }
 
