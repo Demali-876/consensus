@@ -323,7 +323,7 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
     type === 'http' ? 80 : 0
   );
 
-  const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://canister.software';
+  const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
 
   // ── 1. Register tunnel (before launching TUI so we can show errors cleanly) ──
 
@@ -336,7 +336,7 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
     tcp_addr?:   string;
   };
 
-  console.log(`Registering ${type} tunnel to ${targetRaw}…`);
+  process.stderr.write(`Registering ${type} tunnel → ${SERVER}/tunnel\n`);
 
   try {
     const res = await fetch(`${SERVER}/tunnel`, {
@@ -344,10 +344,15 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ type }),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      process.stderr.write(`\nServer error ${res.status}: ${body}\n`);
+      process.exit(1);
+    }
     registration = await res.json() as typeof registration;
   } catch (err) {
-    console.error(`Failed to register tunnel: ${(err as Error).message}`);
+    process.stderr.write(`\nFailed to reach server: ${(err as Error).message}\n`);
+    process.stderr.write(`Is the server running? Try: curl ${SERVER}/health\n`);
     process.exit(1);
   }
 

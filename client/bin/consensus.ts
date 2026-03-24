@@ -58,7 +58,7 @@ async function showBanner(): Promise<void> {
     exitOnCtrlC:        false,
     targetFps:          30,
     useMouse:           false,
-    useAlternateScreen: false,   // keep in the same scroll-back buffer
+    useAlternateScreen: true,
   });
 
   // Root
