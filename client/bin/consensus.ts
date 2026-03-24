@@ -9,7 +9,7 @@ import ora from 'ora';
 import chalk from 'chalk';
 import { readFile } from 'fs/promises';
 import path from 'path';
-import { runTunnel } from './tunnel.ts';
+import { runTunnel } from './tunnel';
 import {
   createCliRenderer,
   ASCIIFontRenderable,

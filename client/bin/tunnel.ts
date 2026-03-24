@@ -45,6 +45,7 @@ function decodeFrame(data: Buffer): { type: number; streamId: number; payload: B
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function parseTarget(raw: string, defaultPort: number): { host: string; port: number } {
+  // IPv6 literal: [::1]:8080
   if (raw.startsWith('[')) {
     const close = raw.indexOf(']');
     const host  = raw.slice(1, close);
@@ -52,6 +53,12 @@ function parseTarget(raw: string, defaultPort: number): { host: string; port: nu
     const port  = rest.startsWith(':') ? parseInt(rest.slice(1)) : defaultPort;
     return { host, port: isNaN(port) ? defaultPort : port };
   }
+  // Plain port number: "3000" → localhost:3000
+  const asPort = parseInt(raw, 10);
+  if (!isNaN(asPort) && String(asPort) === raw) {
+    return { host: 'localhost', port: asPort };
+  }
+  // host:port or bare host
   const lastColon = raw.lastIndexOf(':');
   if (lastColon === -1) return { host: raw, port: defaultPort };
   const maybePort = parseInt(raw.slice(lastColon + 1));
@@ -316,7 +323,7 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
     type === 'http' ? 80 : 0
   );
 
-  const SERVER = 'https://consensus.canister.software';
+  const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://canister.software';
 
   // ── 1. Register tunnel (before launching TUI so we can show errors cleanly) ──
 
