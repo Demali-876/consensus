@@ -26,6 +26,7 @@
     "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@types/inquirer": "^9.0.9",
     "@types/ws": "^8.18.1",
     "bun-types": "latest"
   },
