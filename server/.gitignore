@@ -8,3 +8,4 @@ main.key
 main.csr
 /node-certs
 data/*.json
+consensus.*
