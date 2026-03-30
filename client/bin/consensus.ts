@@ -9,13 +9,15 @@ import ora from 'ora';
 import chalk from 'chalk';
 import { readFile } from 'fs/promises';
 import path from 'path';
-import { runTunnel } from './tunnel';
-import {
-  createCliRenderer,
-  ASCIIFontRenderable,
-  BoxRenderable,
-  TextRenderable,
-} from '@opentui/core';
+import { runTunnel }    from './tunnel';
+import { showLanding }  from './screens/landing';
+import { showMainMenu } from './screens/menu';
+import { showTunnels }  from './screens/tunnels';
+import { showProxy }    from './screens/proxy';
+import { showReverseProxy } from './screens/reverse-proxy';
+import { showWebsockets }   from './screens/websockets';
+import { showIps }          from './screens/ips';
+import { showSettings }     from './screens/settings';
 
 type WalletConfig = {
   wallet_name: string;
@@ -37,67 +39,183 @@ type WalletResult = {
   solana_address: string;
 };
 
-// ─── Design tokens ────────────────────────────────────────────────────────────
-const PALETTE = {
-  cyan:    '#06b6d4',
-  sky:     '#0ea5e9',
-  emerald: '#10b981',
-  slate:   '#94a3b8',
-  dim:     '#475569',
-  white:   '#f8fafc',
-  dark:    '#0f172a',
-  panel:   '#1e293b',
-} as const;
+// ─── Design tokens ───────────────────────────────────────────────────────────
+import { C as PALETTE } from './theme';
 
-// ─── Splash screen (1.2 s opentui render, then destroys itself) ───────────────
+// ─── (landing screen moved to screens/landing.ts) ─────────────────────────────
 async function showBanner(): Promise<void> {
   const pkg     = await readFile(path.join(import.meta.dir, '../package.json'), 'utf8');
   const version = JSON.parse(pkg).version as string;
 
+  const SERVER  = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
+
   const renderer = await createCliRenderer({
     exitOnCtrlC:        false,
-    targetFps:          30,
+    targetFps:          15,
     useMouse:           false,
     useAlternateScreen: true,
   });
 
-  // Root
-  const root = renderer.root;
-  root.flexDirection   = 'column';
-  root.alignItems      = 'center';
-  root.justifyContent  = 'center';
-  root.padding         = 2;
+  renderer.start();
 
-  // Logo
+  const root = renderer.root;
+  root.flexDirection = 'column';
+  root.padding       = 0;
+
+  // ── Top bar ─────────────────────────────────────────────────────────────────
+  const topBar = new BoxRenderable(renderer, {
+    width:           '100%',
+    flexDirection:   'row',
+    justifyContent:  'space-between',
+    alignItems:      'center',
+    paddingX:        2,
+    paddingY:        0,
+    backgroundColor: PALETTE.panel,
+  });
+  topBar.add(new TextRenderable(renderer, {
+    content: 'CONSENSUS',
+    fg:      PALETTE.white,
+    bg:      PALETTE.panel,
+  }));
+  topBar.add(new TextRenderable(renderer, {
+    content: `v${version}`,
+    fg:      PALETTE.slate,
+    bg:      PALETTE.panel,
+  }));
+  root.add(topBar);
+
+  // ── Centre content ──────────────────────────────────────────────────────────
+  const centre = new BoxRenderable(renderer, {
+    width:           '100%',
+    flexGrow:        1,
+    flexDirection:   'column',
+    alignItems:      'center',
+    justifyContent:  'center',
+    paddingY:        1,
+    backgroundColor: PALETTE.dark,
+  });
+
+  // Big logo
   const logo = new ASCIIFontRenderable(renderer, {
     text:            'CONSENSUS',
-    font:            'slick',
-    color:           [PALETTE.sky, PALETTE.cyan, PALETTE.emerald],
-    backgroundColor: 'transparent',
+    font:            'block',
+    color:           PALETTE.white,
+    backgroundColor: PALETTE.dark,
   });
 
   // Tagline
   const tagline = new TextRenderable(renderer, {
-    content: '  Stable IPs · HTTP Deduplication · IoT Tunnels · Powered by x402  ',
+    content: 'The IoT Protocol Layer  ·  canister.software',
     fg:      PALETTE.slate,
     bg:      PALETTE.dark,
   });
 
-  // Version pill
-  const versionBadge = new TextRenderable(renderer, {
-    content: `  v${version}  `,
-    fg:      PALETTE.dim,
-    bg:      PALETTE.panel,
+  centre.add(logo);
+  centre.add(tagline);
+
+  // ── Two info panels ─────────────────────────────────────────────────────────
+  const panelRow = new BoxRenderable(renderer, {
+    width:          '100%',
+    flexDirection:  'row',
+    justifyContent: 'center',
+    gap:            2,
+    paddingX:       4,
+    paddingTop:     2,
+    backgroundColor: PALETTE.dark,
   });
 
-  root.add(logo);
-  root.add(tagline);
-  root.add(versionBadge);
+  // Left: Features
+  const featuresBox = new BoxRenderable(renderer, {
+    flexGrow:        1,
+    borderStyle:     'single',
+    borderColor:     PALETTE.dim,
+    title:           ' Features ',
+    padding:         1,
+    backgroundColor: PALETTE.panel,
+  });
+  for (const f of ['Tunnels', 'Proxy', 'Reverse-Proxy', 'WebSockets', 'IPs']) {
+    featuresBox.add(new TextRenderable(renderer, {
+      content: `  ·  ${f}`,
+      fg:      PALETTE.slate,
+      bg:      PALETTE.panel,
+    }));
+  }
 
-  renderer.start();
+  // Right: Status — server, protocol, network
+  const statusBox = new BoxRenderable(renderer, {
+    flexGrow:        1,
+    borderStyle:     'single',
+    borderColor:     PALETTE.dim,
+    title:           ' Status ',
+    padding:         1,
+    backgroundColor: PALETTE.panel,
+  });
 
-  // Show for 1.2 s then hand off to normal terminal output
-  await new Promise((r) => setTimeout(r, 1200));
+  const mk = (label: string, value: string) => {
+    const row = new BoxRenderable(renderer, {
+      flexDirection:   'row',
+      backgroundColor: 'transparent',
+    });
+    row.add(new TextRenderable(renderer, { content: label.padEnd(12), fg: PALETTE.dim,   bg: 'transparent' }));
+    row.add(new TextRenderable(renderer, { content: value,            fg: PALETTE.slate, bg: 'transparent' }));
+    return row;
+  };
+
+  const serverStatusVal = new TextRenderable(renderer, { content: '◌  checking…', fg: PALETTE.dim, bg: 'transparent' });
+  const serverRow = new BoxRenderable(renderer, { flexDirection: 'row', backgroundColor: 'transparent' });
+  serverRow.add(new TextRenderable(renderer, { content: 'Server'.padEnd(12), fg: PALETTE.dim, bg: 'transparent' }));
+  serverRow.add(serverStatusVal);
+
+  statusBox.add(serverRow);
+  statusBox.add(mk('Protocol',  'x402  v2.1'));
+  statusBox.add(mk('Network',   'Base  ·  Solana'));
+  statusBox.add(mk('Runtime',   `Bun  ${Bun.version}`));
+
+  panelRow.add(featuresBox);
+  panelRow.add(statusBox);
+  centre.add(panelRow);
+  root.add(centre);
+
+  // ── Bottom shortcut bar ──────────────────────────────────────────────────────
+  const bottomBar = new BoxRenderable(renderer, {
+    width:           '100%',
+    flexDirection:   'row',
+    justifyContent:  'space-between',
+    paddingX:        2,
+    paddingY:        0,
+    backgroundColor: PALETTE.panel,
+  });
+  bottomBar.add(new TextRenderable(renderer, {
+    content: '[↵  continue]  [Q  quit]',
+    fg:      PALETTE.slate,
+    bg:      PALETTE.panel,
+  }));
+  bottomBar.add(new TextRenderable(renderer, {
+    content: 'canister.software',
+    fg:      PALETTE.dim,
+    bg:      PALETTE.panel,
+  }));
+  root.add(bottomBar);
+
+  // ── Background server health check ───────────────────────────────────────────
+  fetch(`${SERVER}/health`, { signal: AbortSignal.timeout(4000) })
+    .then((r) => {
+      serverStatusVal.content = r.ok ? '●  connected' : '○  degraded';
+      serverStatusVal.fg      = r.ok ? '#10b981'      : '#f59e0b';
+    })
+    .catch(() => {
+      serverStatusVal.content = '○  unreachable';
+      serverStatusVal.fg      = '#ef4444';
+    });
+
+  // ── Key input ────────────────────────────────────────────────────────────────
+  await new Promise<void>((resolve) => {
+    renderer.keyInput.on('keypress', (key) => {
+      if (key.name === 'q' || key.name === 'Q') { process.exit(0); }
+      resolve();
+    });
+  });
+
   renderer.destroy();
 }
 
@@ -409,9 +527,33 @@ class ConsensusSDK {
 }
 
 async function main(): Promise<void> {
-  await showBanner();
   const sdk = new ConsensusSDK();
   const command = process.argv[2];
+
+  // No subcommand → landing → section (direct shortcut or menu) → back to landing
+  if (!command) {
+    const goTo = async (section: string) => {
+      if      (section === 'tunnels')       await showTunnels();
+      else if (section === 'proxy')         await showProxy();
+      else if (section === 'reverse-proxy') await showReverseProxy();
+      else if (section === 'websockets')    await showWebsockets();
+      else if (section === 'ips')           await showIps();
+      else if (section === 'settings')      await showSettings();
+    };
+
+    let next = await showLanding();
+    while (next !== 'quit') {
+      if (next === 'menu') {
+        // Full menu → picks a section → returns to landing
+        const section = await showMainMenu();
+        if (section !== 'quit') await goTo(section);
+      } else {
+        await goTo(next);
+      }
+      next = await showLanding();
+    }
+    return;
+  }
 
   switch (command) {
     case 'setup':
@@ -421,8 +563,9 @@ async function main(): Promise<void> {
       // consensus tunnel http 192.168.1.101
       // consensus tunnel http 192.168.1.101:3000
       // consensus tunnel tcp  192.168.1.101:1883
-      const tunnelType = process.argv[3] as 'http' | 'tcp' | undefined;
+      const tunnelType   = process.argv[3] as 'http' | 'tcp' | undefined;
       const tunnelTarget = process.argv[4];
+      const isInternal   = process.argv.includes('--internal');
 
       if (!tunnelType || !['http', 'tcp'].includes(tunnelType)) {
         console.error(chalk.red('Usage: consensus tunnel <http|tcp> <host[:port]>'));
@@ -436,6 +579,30 @@ async function main(): Promise<void> {
       if (!tunnelTarget) {
         console.error(chalk.red(`Usage: consensus tunnel ${tunnelType} <host[:port]>`));
         process.exit(1);
+      }
+
+      if (!isInternal && process.platform === 'darwin') {
+        // Write a temp shell script to avoid all osascript escaping issues
+        const bunBin    = Bun.which('bun') ?? `${process.env.HOME}/.bun/bin/bun`;
+        const self      = import.meta.path;
+        const tmpScript = `/tmp/consensus-tunnel-${Date.now()}.sh`;
+
+        await Bun.write(tmpScript, [
+          '#!/bin/bash',
+          `export PATH="$HOME/.bun/bin:$PATH"`,
+          `cd '${process.cwd()}'`,
+          `exec '${bunBin}' '${self}' tunnel ${tunnelType} ${tunnelTarget} --internal`,
+        ].join('\n'));
+
+        Bun.spawnSync(['chmod', '+x', tmpScript]);
+
+        const appleScript = `tell application "Terminal"
+  do script "bash '${tmpScript}'"
+  activate
+end tell`;
+        Bun.spawnSync(['osascript', '-e', appleScript]);
+        console.log(chalk.green(`✓`) + chalk.dim(` Tunnel opening in new window — ${tunnelType.toUpperCase()} → ${tunnelTarget}`));
+        break;
       }
 
       await runTunnel(tunnelType, tunnelTarget);

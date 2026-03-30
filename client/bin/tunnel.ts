@@ -81,24 +81,12 @@ function formatUptime(ms: number): string {
   return `${s}s`;
 }
 
-// ─── Palette ─────────────────────────────────────────────────────────────────
-
-const C = {
-  cyan:    '#06b6d4',
-  sky:     '#0ea5e9',
-  emerald: '#10b981',
-  amber:   '#f59e0b',
-  red:     '#ef4444',
-  slate:   '#94a3b8',
-  dim:     '#475569',
-  white:   '#f8fafc',
-  dark:    '#0f172a',
-  panel:   '#1e293b',
-} as const;
+// ─── Palette (dark / light mode aware) ───────────────────────────────────────
+import { C } from './theme';
 
 // ─── Build the TUI layout ────────────────────────────────────────────────────
 
-async function buildTUI(
+export async function buildTUI(
   tunnelId: string,
   type: 'http' | 'tcp',
   publicUrl: string,
@@ -130,9 +118,9 @@ async function buildTUI(
   });
 
   const logo = new ASCIIFontRenderable(renderer, {
-    text:  'CONSENSUS',
-    font:  'slick',
-    color: [C.sky, C.cyan, C.emerald],     // horizontal gradient
+    text:            'CONSENSUS',
+    font:            'block',
+    color:           C.white,
     backgroundColor: 'transparent',
   });
 
@@ -260,8 +248,11 @@ async function buildTUI(
   root.add(logBox);
 
   // ── Footer ────────────────────────────────────────────────────────────────
+  const FOOTER_IDLE    = '  Ctrl+C  close tunnel    ↑↓  scroll log  ';
+  const FOOTER_CONFIRM = '  Close tunnel?  Y  confirm    any key  cancel  ';
+
   const footer = new TextRenderable(renderer, {
-    content: '  Ctrl+C  close tunnel    ↑↓  scroll log  ',
+    content: FOOTER_IDLE,
     fg:      C.dim,
     bg:      C.dark,
   });
@@ -289,6 +280,9 @@ async function buildTUI(
   return {
     renderer,
     addLog,
+    footer,
+    FOOTER_IDLE,
+    FOOTER_CONFIRM,
     setStatus(online: boolean) {
       statusText.content = online ? '● Connected' : '● Disconnected';
       statusText.fg      = online ? C.emerald     : C.red;
@@ -530,8 +524,24 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
     process.exit(0);
   };
 
+  let pendingClose = false;
+
   tui.renderer.keyInput.on('keypress', (key) => {
-    if (key.ctrl && key.name === 'c') shutdown();
+    if (pendingClose) {
+      if (key.name === 'y' || key.name === 'Y') {
+        shutdown();
+      } else {
+        pendingClose = false;
+        tui.footer.content = tui.FOOTER_IDLE;
+        tui.footer.fg      = C.dim;
+      }
+      return;
+    }
+    if (key.ctrl && key.name === 'c') {
+      pendingClose            = true;
+      tui.footer.content      = tui.FOOTER_CONFIRM;
+      tui.footer.fg           = C.amber;
+    }
   });
 
   process.on('SIGTERM', shutdown);
@@ -542,5 +552,3 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
   });
 }
 
-// ─── Re-export palette for use in other files if needed ──────────────────────
-export { C as TUI_COLORS };
