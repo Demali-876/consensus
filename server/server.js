@@ -5,7 +5,7 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import crypto from 'crypto';
-import ConsensusProxy from './proxy.js';
+import ConsensusProxy from './features/proxy/proxy.ts';
 import Router from './router.ts';
 import { fileURLToPath } from 'url';
 import { paymentMiddleware, x402ResourceServer } from '@x402/express';
@@ -14,9 +14,9 @@ import { ExactSvmScheme } from '@x402/svm/exact/server';
 import { HTTPFacilitatorClient } from '@x402/core/server';
 import { ExactIcpScheme } from '@canister-software/x402-icp/server';
 import { registerWhitepaperSignup } from './data/whitepaperSignup.js';
-import { registerWebSocket } from './wss.js';
-import { registerNodes } from './orchestrator.js';
-import { registerTunnel } from './tunnel.ts';
+import { registerWebSocket } from './features/websocket/wss.ts';
+import { registerNodes } from './features/nodes/orchestrator.js';
+import { registerTunnel } from './features/tunnel/tunnel.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

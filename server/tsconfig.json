@@ -15,5 +15,5 @@
     "declaration": false,
     "types": ["node"]
   },
-  "include": ["**/*.ts"]
+  "include": ["**/**/**/*.ts", "utils/types.js"]
 }
