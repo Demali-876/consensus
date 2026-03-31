@@ -470,3 +470,29 @@ export async function resolveCurrentObservation(
     source: 'detector',
   };
 }
+
+/**
+ * Build a DeviceIpObservation for a remote node whose IPs are already known.
+ * Skips the ipify calls entirely — only performs reverse DNS lookups.
+ * localAssignment is always 'unknown' since we cannot inspect the remote machine.
+ */
+export async function observeRemoteIp(
+  publicIps: PublicIps,
+  options: ResolveCurrentIpsOptions = {},
+): Promise<DeviceIpObservation> {
+  const normalized = normalizeIps(publicIps);
+  const reverseDns: ReverseDnsByFamily = {};
+
+  if (options.reverseDns !== false) {
+    if (normalized.ipv4) reverseDns.ipv4 = await reverseDnsForIp(normalized.ipv4);
+    if (normalized.ipv6) reverseDns.ipv6 = await reverseDnsForIp(normalized.ipv6);
+  }
+
+  return {
+    observedAt: Date.now(),
+    publicIps: normalized,
+    reverseDns,
+    localAssignment: 'unknown',
+    source: 'server-observer',
+  };
+}

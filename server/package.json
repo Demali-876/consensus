@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "dotenvx run -- node server.js"
+    "start": "dotenvx run -- node --import tsx/esm server.js"
   },
   "keywords": [],
   "author": "Canister Software, Inc.",
@@ -31,6 +31,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.2.3",
     "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
 }

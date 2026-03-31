@@ -18,6 +18,10 @@ import { showReverseProxy } from './screens/reverse-proxy';
 import { showWebsockets }   from './screens/websockets';
 import { showIps }          from './screens/ips';
 import { showSettings }     from './screens/settings';
+import { loadConfig, saveConfig, makeFetchWithPayment, fmtUsd, fmtBytes, fmtUptime } from './lib/config.ts';
+import { proxyFetch, startProxyDaemon } from './lib/proxy.ts';
+import { getWsToken, connectWs, quoteWs } from './lib/websockets.ts';
+import { listNodes, leaseNode, releaseNode, fmtCapabilities } from './lib/ip.ts';
 
 type WalletConfig = {
   wallet_name: string;
@@ -29,6 +33,12 @@ type WalletConfig = {
   x402_proxy_url: string;
   setup_date: string;
   version: string;
+  leased_node?: {
+    domain: string;
+    node_id?: string;
+    region?: string;
+    leased_at: string;
+  } | null;
 };
 
 type WalletResult = {
@@ -509,11 +519,22 @@ class ConsensusSDK {
   showHelp(): void {
     console.log(chalk.blue.bold('Consensus SDK\n'));
     console.log('Commands:');
-    console.log('  setup                             Create new account and register with proxy');
-    console.log('  setup --force                     Force create new account (reset existing)');
-    console.log('  tunnel http <host[:port]>         Expose a local HTTP server to the internet');
-    console.log('  tunnel tcp  <host:port>           Expose a local TCP device to the internet');
-    console.log('  help                              Show this help message');
+    console.log('  setup                                      Create new account and register with proxy');
+    console.log('  setup --force                              Force create new account (reset existing)');
+    console.log('  tunnel http <host[:port]>                  Expose a local HTTP server to the internet');
+    console.log('  tunnel tcp  <host:port>                    Expose a local TCP device to the internet');
+    console.log('  proxy fetch <url> [opts]                   One-shot proxied HTTP request');
+    console.log('  proxy start [--port N] [--budget N]        Start local HTTP proxy daemon');
+    console.log('  reverse-proxy                              (Coming soon)');
+    console.log('  ws token [--model X] [--minutes N]         Get a WebSocket session token');
+    console.log('  ws connect [--model X] [--minutes N]       Open an interactive WebSocket session');
+    console.log('  ip list [--region X]                       List available nodes');
+    console.log('  ip lease <domain-or-id>                    Pin all traffic to a specific node');
+    console.log('  ip active                                   Show currently leased node');
+    console.log('  ip release                                  Release leased node');
+    console.log('  help                                       Show this help message');
+    console.log('\nProxy options:  --method GET  --region us-east  --cache-ttl 60  --verbose  --json');
+    console.log('WS options:     --model hybrid|time|data  --minutes 5  --megabytes 50  --region X');
     console.log('\nTunnel examples:');
     console.log(chalk.dim('  consensus tunnel http 192.168.1.101         # LAN device on port 80'));
     console.log(chalk.dim('  consensus tunnel http 192.168.1.101:3000    # LAN device on port 3000'));
@@ -524,6 +545,21 @@ class ConsensusSDK {
       '  X402_PROXY_URL (optional, defaults to https://consensus.proxy.canister.software:3001/)'
     );
   }
+}
+
+// ─── CLI flag helpers ─────────────────────────────────────────────────────────
+
+function getFlagValue(args: string[], flag: string): string | undefined {
+  const idx = args.indexOf(flag);
+  if (idx !== -1 && idx + 1 < args.length) return args[idx + 1];
+  // Support --flag=value form
+  const prefixed = args.find((a) => a.startsWith(`${flag}=`));
+  if (prefixed) return prefixed.slice(flag.length + 1);
+  return undefined;
+}
+
+function hasFlag(args: string[], flag: string): boolean {
+  return args.includes(flag);
 }
 
 async function main(): Promise<void> {
@@ -608,6 +644,310 @@ end tell`;
       await runTunnel(tunnelType, tunnelTarget);
       break;
     }
+    // ── proxy ──────────────────────────────────────────────────────────────────
+    case 'proxy': {
+      const sub  = process.argv[3];
+      const args = process.argv.slice(4);
+      const cfg  = loadConfig();
+      const fetchFn = makeFetchWithPayment(cfg.api_key ?? '');
+
+      if (sub === 'fetch') {
+        const targetUrl = args.find((a) => !a.startsWith('-'));
+        if (!targetUrl) {
+          console.error(chalk.red('Usage: consensus proxy fetch <url> [--method GET] [--region X] [--cache-ttl N] [--verbose] [--json]'));
+          process.exit(1);
+        }
+        const method   = getFlagValue(args, '--method') ?? 'GET';
+        const region   = getFlagValue(args, '--region');
+        const cacheTtl = getFlagValue(args, '--cache-ttl') ? Number(getFlagValue(args, '--cache-ttl')) : undefined;
+        const verbose  = hasFlag(args, '--verbose');
+        const jsonOnly = hasFlag(args, '--json');
+
+        // Collect --header "Key: Value" pairs
+        const extraHeaders: Record<string, string> = {};
+        for (let i = 0; i < args.length - 1; i++) {
+          if (args[i] === '--header' || args[i] === '-H') {
+            const [k, ...rest] = args[i + 1].split(':');
+            if (k && rest.length) extraHeaders[k.trim()] = rest.join(':').trim();
+          }
+        }
+
+        if (!jsonOnly) {
+          const lease = cfg.leased_node;
+          console.log(chalk.dim(`→ ${method} ${targetUrl}`));
+          if (lease) console.log(chalk.dim(`  pinned to node: ${lease.domain}`));
+          else if (region) console.log(chalk.dim(`  region: ${region}`));
+        }
+
+        try {
+          const result = await proxyFetch({ fetchFn, config: cfg, targetUrl, method, headers: extraHeaders, region, cacheTtl, verbose });
+          if (jsonOnly) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            const statusColor = result.status < 400 ? chalk.green : chalk.red;
+            console.log(statusColor(`${result.status} ${result.statusText}`));
+            if (verbose && result.meta) {
+              console.log(chalk.dim('meta:'), JSON.stringify(result.meta));
+            }
+            console.log(typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2));
+          }
+        } catch (err) {
+          console.error(chalk.red('Proxy error:'), (err as Error).message);
+          process.exit(1);
+        }
+        break;
+      }
+
+      if (sub === 'start') {
+        const port     = Number(getFlagValue(args, '--port') ?? 8080);
+        const budget   = getFlagValue(args, '--budget') ? Number(getFlagValue(args, '--budget')) : undefined;
+        const region   = getFlagValue(args, '--region');
+        const cacheTtl = getFlagValue(args, '--cache-ttl') ? Number(getFlagValue(args, '--cache-ttl')) : undefined;
+        const lease    = cfg.leased_node;
+
+        console.log(chalk.blue.bold('Consensus Forward Proxy'));
+        console.log(chalk.dim('─'.repeat(40)));
+        console.log(`  Port:   ${chalk.white(port)}`);
+        if (lease) console.log(`  Node:   ${chalk.cyan(lease.domain)} ${chalk.dim('(leased)')}`);
+        else if (region) console.log(`  Region: ${chalk.white(region)}`);
+        if (budget !== undefined) console.log(`  Budget: ${chalk.white(fmtUsd(budget))}`);
+        console.log(chalk.dim('\nRouting outbound traffic through the consensus network.'));
+        console.log(chalk.dim(`Configure your HTTP client to use proxy http://127.0.0.1:${port}\n`));
+
+        const stats = { requests: 0, spend: 0, bytesSent: 0, bytesRecv: 0, startedAt: Date.now() };
+
+        let daemon: Awaited<ReturnType<typeof startProxyDaemon>>;
+        try {
+          daemon = await startProxyDaemon({
+            fetchFn, config: cfg, port, budget, region, cacheTtl,
+            onStats: (s) => Object.assign(stats, s),
+          });
+        } catch (err) {
+          console.error(chalk.red('Failed to start proxy:'), (err as Error).message);
+          process.exit(1);
+        }
+
+        const refreshLine = () => {
+          process.stdout.write(
+            `\r  ${chalk.dim('requests:')} ${chalk.white(stats.requests)}  ` +
+            `${chalk.dim('spend:')} ${chalk.white(fmtUsd(stats.spend))}  ` +
+            `${chalk.dim('sent:')} ${chalk.white(fmtBytes(stats.bytesSent))}  ` +
+            `${chalk.dim('uptime:')} ${chalk.white(fmtUptime(stats.startedAt))}   `
+          );
+        };
+
+        const ticker = setInterval(refreshLine, 1000);
+
+        process.on('SIGINT', async () => {
+          clearInterval(ticker);
+          console.log(chalk.dim('\n\nStopping proxy…'));
+          await daemon.close();
+          console.log(chalk.green('✓ Proxy stopped'));
+          process.exit(0);
+        });
+
+        // Keep alive
+        await new Promise<void>(() => { /* runs until SIGINT */ });
+        break;
+      }
+
+      console.error(chalk.red(`Unknown proxy subcommand: ${sub ?? '(none)'}`));
+      console.error(chalk.dim('  consensus proxy fetch <url>'));
+      console.error(chalk.dim('  consensus proxy start [--port N] [--budget N]'));
+      process.exit(1);
+      break;
+    }
+
+    // ── reverse-proxy ──────────────────────────────────────────────────────────
+    case 'reverse-proxy': {
+      console.log(chalk.yellow('⚠  Reverse proxy is not yet live on the consensus network.'));
+      console.log(chalk.dim('   This feature is coming soon. Stay tuned at canister.software.'));
+      break;
+    }
+
+    // ── ws ─────────────────────────────────────────────────────────────────────
+    case 'ws': {
+      const sub  = process.argv[3];
+      const args = process.argv.slice(4);
+      const cfg  = loadConfig();
+      const fetchFn = makeFetchWithPayment(cfg.api_key ?? '');
+
+      const model     = (getFlagValue(args, '--model') ?? 'hybrid') as 'hybrid' | 'time' | 'data';
+      const minutes   = Number(getFlagValue(args, '--minutes') ?? 5);
+      const megabytes = Number(getFlagValue(args, '--megabytes') ?? 50);
+      const region    = getFlagValue(args, '--region');
+      const lease     = cfg.leased_node;
+
+      if (sub === 'token') {
+        console.log(chalk.blue.bold('WebSocket Token'));
+        console.log(chalk.dim(`  model: ${model}  minutes: ${minutes}  MB: ${megabytes}`));
+        if (lease) console.log(chalk.dim(`  node: ${lease.domain} (leased)`));
+        else if (region) console.log(chalk.dim(`  region: ${region}`));
+        console.log(chalk.dim(`  estimated cost: ${fmtUsd(quoteWs(model, minutes, megabytes))}\n`));
+
+        try {
+          const auth = await getWsToken({ fetchFn, config: cfg, model, minutes, megabytes, region });
+          console.log(chalk.green('✓ Token obtained'));
+          console.log(`  ${chalk.dim('token:      ')} ${auth.token}`);
+          console.log(`  ${chalk.dim('connect_url:')} ${auth.connect_url}`);
+          console.log(`  ${chalk.dim('expires_in: ')} ${auth.expires_in}s`);
+        } catch (err) {
+          console.error(chalk.red('Token error:'), (err as Error).message);
+          process.exit(1);
+        }
+        break;
+      }
+
+      if (sub === 'connect') {
+        console.log(chalk.blue.bold('Consensus WebSocket'));
+        console.log(chalk.dim(`  model: ${model}  minutes: ${minutes}  MB: ${megabytes}  cost: ${fmtUsd(quoteWs(model, minutes, megabytes))}`));
+        if (lease) console.log(chalk.dim(`  node: ${lease.domain} (leased)`));
+        console.log(chalk.dim('  Messages from the server will appear below. Type to send, Ctrl+C to close.\n'));
+
+        let wsSession: Awaited<ReturnType<typeof connectWs>>;
+        try {
+          wsSession = await connectWs({
+            fetchFn, config: cfg, model, minutes, megabytes, region,
+            onOpen:    () => console.log(chalk.green('● connected')),
+            onMessage: (data) => console.log(chalk.cyan('←'), data),
+            onClose:   () => console.log(chalk.dim('\n● session closed')),
+            onError:   (e) => console.error(chalk.red('WS error:'), e),
+          });
+        } catch (err) {
+          console.error(chalk.red('Connect error:'), (err as Error).message);
+          process.exit(1);
+        }
+
+        // Relay stdin → ws
+        process.stdin.setEncoding('utf-8');
+        process.stdin.on('data', (chunk: string) => {
+          wsSession.send(chunk.replace(/\n$/, ''));
+        });
+
+        process.on('SIGINT', () => {
+          wsSession.close();
+          process.exit(0);
+        });
+
+        await new Promise<void>(() => { /* runs until SIGINT or server closes */ });
+        break;
+      }
+
+      console.error(chalk.red(`Unknown ws subcommand: ${sub ?? '(none)'}`));
+      console.error(chalk.dim('  consensus ws token [--model hybrid|time|data] [--minutes 5] [--megabytes 50]'));
+      console.error(chalk.dim('  consensus ws connect [--model hybrid|time|data] [--minutes 5] [--megabytes 50]'));
+      process.exit(1);
+      break;
+    }
+
+    // ── ip ─────────────────────────────────────────────────────────────────────
+    case 'ip': {
+      const sub  = process.argv[3];
+      const args = process.argv.slice(4);
+      const cfg  = loadConfig();
+
+      if (sub === 'list') {
+        const region = getFlagValue(args, '--region');
+        console.log(chalk.blue.bold('Consensus Nodes') + (region ? chalk.dim(`  (region: ${region})`) : ''));
+
+        let nodes: Awaited<ReturnType<typeof listNodes>>;
+        try {
+          nodes = await listNodes({ config: cfg, region });
+        } catch (err) {
+          console.error(chalk.red('Error:'), (err as Error).message);
+          process.exit(1);
+        }
+
+        if (!nodes.length) {
+          console.log(chalk.dim('  No nodes found.'));
+          break;
+        }
+
+        // Table header
+        const cols = [14, 38, 10, 7, 24];
+        const hdr  = [
+          'NODE ID'.padEnd(cols[0]),
+          'DOMAIN'.padEnd(cols[1]),
+          'REGION'.padEnd(cols[2]),
+          'SCORE'.padEnd(cols[3]),
+          'CAPABILITIES',
+        ].join('  ');
+        console.log(chalk.dim(hdr));
+        console.log(chalk.dim('─'.repeat(hdr.length)));
+
+        for (const n of nodes) {
+          const row = [
+            (n.node_id ?? '—').slice(0, cols[0] - 1).padEnd(cols[0]),
+            (n.domain ?? '—').slice(0, cols[1] - 1).padEnd(cols[1]),
+            (n.region ?? '—').padEnd(cols[2]),
+            String(n.benchmark_score?.toFixed(0) ?? '—').padEnd(cols[3]),
+            fmtCapabilities(n.capabilities),
+          ].join('  ');
+
+          const isLeased = cfg.leased_node?.domain === n.domain;
+          console.log(isLeased ? chalk.cyan(row) + chalk.dim(' ← leased') : row);
+        }
+        break;
+      }
+
+      if (sub === 'lease') {
+        const nodeArg = args.find((a) => !a.startsWith('-'));
+        if (!nodeArg) {
+          console.error(chalk.red('Usage: consensus ip lease <node-id-or-domain>'));
+          process.exit(1);
+        }
+
+        // Try to resolve against the node list to get the full record
+        let nodes: Awaited<ReturnType<typeof listNodes>> = [];
+        try {
+          nodes = await listNodes({ config: cfg });
+        } catch { /* non-fatal — lease with just the domain */ }
+
+        leaseNode({ config: cfg, nodeIdOrDomain: nodeArg, nodes });
+
+        const saved = loadConfig(); // re-read to confirm
+        console.log(chalk.green(`✓ Node leased: ${saved.leased_node?.domain}`));
+        console.log(chalk.dim('  All proxy, tunnel, and ws traffic will be pinned to this node.'));
+        console.log(chalk.dim('  Run `consensus ip release` to remove the lease.'));
+        break;
+      }
+
+      if (sub === 'active') {
+        const lease = cfg.leased_node;
+        if (!lease) {
+          console.log(chalk.dim('No node leased. Run `consensus ip lease <node>` to pin traffic to a specific node.'));
+        } else {
+          console.log(chalk.green('Leased node:'));
+          console.log(`  ${chalk.dim('domain:   ')} ${chalk.cyan(lease.domain)}`);
+          if (lease.node_id) console.log(`  ${chalk.dim('node_id:  ')} ${lease.node_id}`);
+          if (lease.region)  console.log(`  ${chalk.dim('region:   ')} ${lease.region}`);
+          console.log(`  ${chalk.dim('leased at:')} ${new Date(lease.leased_at).toLocaleString()}`);
+        }
+        break;
+      }
+
+      if (sub === 'release') {
+        const cfg2 = loadConfig();
+        if (!cfg2.leased_node) {
+          console.log(chalk.dim('No node is currently leased.'));
+        } else {
+          const prev = cfg2.leased_node.domain;
+          releaseNode(cfg2);
+          console.log(chalk.green(`✓ Released lease for ${prev}`));
+          console.log(chalk.dim('  Traffic will return to automatic node selection.'));
+        }
+        break;
+      }
+
+      console.error(chalk.red(`Unknown ip subcommand: ${sub ?? '(none)'}`));
+      console.error(chalk.dim('  consensus ip list [--region X]'));
+      console.error(chalk.dim('  consensus ip lease <node-id-or-domain>'));
+      console.error(chalk.dim('  consensus ip active'));
+      console.error(chalk.dim('  consensus ip release'));
+      process.exit(1);
+      break;
+    }
+
     case 'help':
     case '--help':
     case '-h':

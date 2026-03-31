@@ -10,46 +10,65 @@ export const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 
+// ─── Migration ────────────────────────────────────────────────────────────────
+
+// If the old schema exists (identifiable by the 'alg' column), drop everything
+// and start fresh. No nodes are stored so there is nothing to preserve.
+const oldColumns = db.prepare('PRAGMA table_info(nodes)').all().map((c) => c.name);
+if (oldColumns.includes('alg') || oldColumns.includes('tls_mode')) {
+  db.exec(`
+    DROP TABLE IF EXISTS heartbeats;
+    DROP TABLE IF EXISTS join_requests;
+    DROP TABLE IF EXISTS nodes;
+  `);
+}
+
+// ─── Schema ───────────────────────────────────────────────────────────────────
+
 db.exec(`
-CREATE TABLE IF NOT EXISTS nodes (
-  id TEXT PRIMARY KEY,
-  pubkey BLOB NOT NULL,
-  alg TEXT NOT NULL,
-  region TEXT,
-  capabilities TEXT,
-  contact TEXT,
-  evm_address TEXT,
-  solana_address TEXT,
-  status TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  domain TEXT,
-  tls_mode TEXT
-);
+  CREATE TABLE IF NOT EXISTS nodes (
+    id                TEXT PRIMARY KEY,
+    pubkey_secp256k1  BLOB,
+    pubkey_ed25519    BLOB,
+    region            TEXT NOT NULL,
+    contact           TEXT NOT NULL,
+    capabilities      TEXT,
+    evm_address       TEXT,
+    solana_address    TEXT,
+    icp_address       TEXT,
+    status            TEXT NOT NULL,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    domain            TEXT,
+    CHECK (pubkey_secp256k1 IS NOT NULL OR pubkey_ed25519 IS NOT NULL)
+  );
 
-CREATE INDEX IF NOT EXISTS nodes_evm_address_idx ON nodes(evm_address);
-CREATE INDEX IF NOT EXISTS nodes_solana_address_idx ON nodes(solana_address);
+  CREATE INDEX IF NOT EXISTS nodes_evm_address_idx      ON nodes(evm_address);
+  CREATE INDEX IF NOT EXISTS nodes_solana_address_idx   ON nodes(solana_address);
+  CREATE INDEX IF NOT EXISTS nodes_icp_address_idx      ON nodes(icp_address);
 
-CREATE TABLE IF NOT EXISTS heartbeats (
-  node_id TEXT NOT NULL,
-  rps INTEGER,
-  p95_ms INTEGER,
-  version TEXT,
-  created_at INTEGER NOT NULL,
-  FOREIGN KEY (node_id) REFERENCES nodes(id)
-);
+  CREATE TABLE IF NOT EXISTS heartbeats (
+    node_id     TEXT    NOT NULL,
+    rps         INTEGER,
+    p95_ms      INTEGER,
+    version     TEXT,
+    created_at  INTEGER NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES nodes(id)
+  );
 
-CREATE INDEX IF NOT EXISTS heartbeats_node_created_idx ON heartbeats(node_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS heartbeats_node_created_idx ON heartbeats(node_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS join_requests (
-  id TEXT PRIMARY KEY,
-  node_pubkey BLOB NOT NULL,
-  alg TEXT NOT NULL,
-  nonce BLOB NOT NULL,
-  expires_at INTEGER NOT NULL,
-  consumed_at INTEGER
-);
+  CREATE TABLE IF NOT EXISTS join_requests (
+    id          TEXT    PRIMARY KEY,
+    node_pubkey BLOB    NOT NULL,
+    alg         TEXT    NOT NULL,
+    nonce       BLOB    NOT NULL,
+    expires_at  INTEGER NOT NULL,
+    consumed_at INTEGER
+  );
 `);
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -74,28 +93,61 @@ function b64url(buffer) {
     .replace(/=+$/g, '');
 }
 
-const upsertNodeInsertStmt = db.prepare(`
-  INSERT INTO nodes (id, pubkey, alg, region, capabilities, contact, evm_address, solana_address, status, created_at, updated_at, domain, tls_mode)
-  VALUES (@id, @pubkey, @alg, @region, @capabilities, @contact, @evm_address, @solana_address, @status, @created_at, @updated_at, NULL, NULL)
+// ─── Prepared statements ──────────────────────────────────────────────────────
+
+const upsertNodeStmt = db.prepare(`
+  INSERT INTO nodes (
+    id, pubkey_secp256k1, pubkey_ed25519, region, contact,
+    capabilities, evm_address, solana_address, icp_address,
+    status, created_at, updated_at, domain
+  ) VALUES (
+    @id, @pubkey_secp256k1, @pubkey_ed25519, @region, @contact,
+    @capabilities, @evm_address, @solana_address, @icp_address,
+    @status, @created_at, @updated_at, NULL
+  )
   ON CONFLICT(id) DO UPDATE SET
-    pubkey=excluded.pubkey,
-    alg=excluded.alg,
-    region=excluded.region,
-    capabilities=excluded.capabilities,
-    contact=excluded.contact,
-    evm_address=excluded.evm_address,
-    solana_address=excluded.solana_address,
-    status=excluded.status,
-    updated_at=excluded.updated_at
+    pubkey_secp256k1 = excluded.pubkey_secp256k1,
+    pubkey_ed25519   = excluded.pubkey_ed25519,
+    region           = excluded.region,
+    contact          = excluded.contact,
+    capabilities     = excluded.capabilities,
+    evm_address      = excluded.evm_address,
+    solana_address   = excluded.solana_address,
+    icp_address      = excluded.icp_address,
+    status           = excluded.status,
+    updated_at       = excluded.updated_at
 `);
 
 const updateDomainStmt = db.prepare(`
-  UPDATE nodes SET domain = ?, tls_mode = ?, updated_at = ? WHERE id = ?
+  UPDATE nodes SET domain = ?, updated_at = ? WHERE id = ?
 `);
 
-const getNodeStmt = db.prepare(`
-  SELECT n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.evm_address, n.solana_address, n.status, n.created_at, n.updated_at, n.domain, n.tls_mode
-  FROM nodes n WHERE n.id = ?
+const getNodeWithHeartbeatStmt = db.prepare(`
+  SELECT
+    n.id, n.pubkey_secp256k1, n.pubkey_ed25519, n.region, n.contact,
+    n.capabilities, n.evm_address, n.solana_address, n.icp_address,
+    n.status, n.created_at, n.updated_at, n.domain,
+    hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
+  FROM nodes n
+  LEFT JOIN (
+    SELECT h.* FROM heartbeats h WHERE h.node_id = ? ORDER BY h.rowid DESC LIMIT 1
+  ) hb ON hb.node_id = n.id
+  WHERE n.id = ?
+`);
+
+const listNodesWithHeartbeatStmt = db.prepare(`
+  SELECT
+    n.id, n.pubkey_secp256k1, n.pubkey_ed25519, n.region, n.contact,
+    n.capabilities, n.evm_address, n.solana_address, n.icp_address,
+    n.status, n.created_at, n.updated_at, n.domain,
+    hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
+  FROM nodes n
+  LEFT JOIN (
+    SELECT h.* FROM heartbeats h WHERE h.rowid IN (
+      SELECT MAX(rowid) FROM heartbeats GROUP BY node_id
+    )
+  ) hb ON hb.node_id = n.id
+  ORDER BY n.created_at DESC
 `);
 
 const insertHeartbeatStmt = db.prepare(`
@@ -106,32 +158,9 @@ const touchNodeStmt = db.prepare(`
   UPDATE nodes SET updated_at = ? WHERE id = ?
 `);
 
-const listNodesWithLatestHeartbeatStmt = db.prepare(`
-  SELECT
-    n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.evm_address, n.solana_address, n.status,
-    n.created_at, n.updated_at, n.domain, n.tls_mode,
-    hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
-  FROM nodes n
-  LEFT JOIN (
-    SELECT h.* FROM heartbeats h WHERE h.rowid IN (SELECT MAX(rowid) FROM heartbeats GROUP BY node_id)
-  ) hb ON hb.node_id = n.id
-  ORDER BY n.created_at DESC
-`);
-
-const getNodeWithLatestHeartbeatStmt = db.prepare(`
-  SELECT
-    n.id, n.pubkey, n.alg, n.region, n.capabilities, n.contact, n.evm_address, n.solana_address, n.status,
-    n.created_at, n.updated_at, n.domain, n.tls_mode,
-    hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
-  FROM nodes n
-  LEFT JOIN (
-    SELECT h.* FROM heartbeats h WHERE h.node_id = ? ORDER BY h.rowid DESC LIMIT 1
-  ) hb ON hb.node_id = n.id
-  WHERE n.id = ?
-`);
-
 const insertJoinStmt = db.prepare(`
-  INSERT INTO join_requests (id, node_pubkey, alg, nonce, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, NULL)
+  INSERT INTO join_requests (id, node_pubkey, alg, nonce, expires_at, consumed_at)
+  VALUES (?, ?, ?, ?, ?, NULL)
 `);
 
 const getJoinStmt = db.prepare(`
@@ -142,66 +171,66 @@ const consumeJoinStmt = db.prepare(`
   UPDATE join_requests SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL
 `);
 
+// ─── Row mapper ───────────────────────────────────────────────────────────────
+
 function rowToNode(row) {
   if (!row) return null;
   return {
-    id: row.id,
-    pubkey: row.pubkey,
-    alg: row.alg,
-    region: row.region,
-    capabilities: fromJson(row.capabilities, {}),
-    contact: row.contact,
-    evm_address: row.evm_address,
-    solana_address: row.solana_address,
-    status: row.status,
-    created_at: row.created_at,
-    updated_at: row.updated_at,
-    domain: row.domain,
-    tls_mode: row.tls_mode,
+    id:               row.id,
+    pubkey_secp256k1: row.pubkey_secp256k1 ?? null,
+    pubkey_ed25519:   row.pubkey_ed25519   ?? null,
+    region:           row.region,
+    contact:          row.contact,
+    capabilities:     fromJson(row.capabilities, {}),
+    evm_address:      row.evm_address,
+    solana_address:   row.solana_address,
+    icp_address:      row.icp_address,
+    status:           row.status,
+    created_at:       row.created_at,
+    updated_at:       row.updated_at,
+    domain:           row.domain,
     heartbeat: row.hb_at
-      ? {
-          rps: row.hb_rps,
-          p95_ms: row.hb_p95_ms,
-          version: row.hb_version,
-          at: row.hb_at,
-        }
+      ? { rps: row.hb_rps, p95_ms: row.hb_p95_ms, version: row.hb_version, at: row.hb_at }
       : null,
   };
 }
 
+// ─── NodeStore ────────────────────────────────────────────────────────────────
+
 export const NodeStore = {
+  /**
+   * Insert or update a node. At least one of pubkey_secp256k1 / pubkey_ed25519
+   * must be provided (enforced by the schema CHECK constraint).
+   */
   upsertNode(input) {
     const ts = nowSec();
-    const payload = {
-      id: input.id,
-      pubkey: input.pubkey,
-      alg: input.alg,
-      region: input.region ?? null,
-      capabilities: toJson(input.capabilities ?? {}),
-      contact: input.contact ?? null,
-      evm_address: input.evm_address ?? null,
-      solana_address: input.solana_address ?? null,
-      status: input.status ?? 'provisioning',
-      created_at: ts,
-      updated_at: ts,
-    };
-    upsertNodeInsertStmt.run(payload);
+    upsertNodeStmt.run({
+      id:               input.id,
+      pubkey_secp256k1: input.pubkey_secp256k1 ?? null,
+      pubkey_ed25519:   input.pubkey_ed25519   ?? null,
+      region:           input.region,
+      contact:          input.contact,
+      capabilities:     toJson(input.capabilities ?? {}),
+      evm_address:      input.evm_address      ?? null,
+      solana_address:   input.solana_address   ?? null,
+      icp_address:      input.icp_address      ?? null,
+      status:           input.status           ?? 'provisioning',
+      created_at:       ts,
+      updated_at:       ts,
+    });
     return this.getNode(input.id);
   },
 
   getNode(id) {
-    const row = getNodeWithLatestHeartbeatStmt.get(id, id);
-    return rowToNode(row);
+    return rowToNode(getNodeWithHeartbeatStmt.get(id, id));
   },
 
   listNodes() {
-    const rows = listNodesWithLatestHeartbeatStmt.all();
-    return rows.map(rowToNode);
+    return listNodesWithHeartbeatStmt.all().map(rowToNode);
   },
 
-  setDomain(id, domain, tls_mode) {
-    const ts = nowSec();
-    const res = updateDomainStmt.run(domain, tls_mode, ts, id);
+  setDomain(id, domain) {
+    const res = updateDomainStmt.run(domain, nowSec(), id);
     if (res.changes === 0) throw new Error(`Node not found: ${id}`);
     return this.getNode(id);
   },
@@ -214,38 +243,30 @@ export const NodeStore = {
   },
 
   createJoinRequest({ pubkey, alg, ttlSeconds = 300 }) {
-    const id = crypto.randomBytes(8).toString('hex');
-    const nonce = crypto.randomBytes(32);
+    const id        = crypto.randomBytes(8).toString('hex');
+    const nonce     = crypto.randomBytes(32);
     const expires_at = nowSec() + Math.max(60, ttlSeconds);
     insertJoinStmt.run(id, pubkey, alg, nonce, expires_at);
-    return {
-      id,
-      nonce: b64url(nonce),
-      alg,
-      expires_at,
-    };
+    return { id, nonce: b64url(nonce), alg, expires_at };
   },
 
   getJoin(id) {
     const row = getJoinStmt.get(id);
     if (!row) return null;
     return {
-      id: row.id,
+      id:          row.id,
       node_pubkey: row.node_pubkey,
-      alg: row.alg,
-      nonce: row.nonce,
-      expires_at: row.expires_at,
+      alg:         row.alg,
+      nonce:       row.nonce,
+      expires_at:  row.expires_at,
       consumed_at: row.consumed_at ?? null,
-      nonce_b64: b64url(row.nonce),
+      nonce_b64:   b64url(row.nonce),
     };
   },
 
   consumeJoin(id) {
-    const ts = nowSec();
-    const res = consumeJoinStmt.run(ts, id);
-    if (res.changes === 0) {
-      throw new Error(`Join not found or already consumed: ${id}`);
-    }
+    const res = consumeJoinStmt.run(nowSec(), id);
+    if (res.changes === 0) throw new Error(`Join not found or already consumed: ${id}`);
     return this.getJoin(id);
   },
 };

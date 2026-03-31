@@ -17,6 +17,7 @@ import { registerWhitepaperSignup } from './data/whitepaperSignup.js';
 import { registerWebSocket } from './features/websocket/wss.ts';
 import { registerNodes } from './features/nodes/orchestrator.js';
 import { registerTunnel } from './features/tunnel/tunnel.ts';
+import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -225,14 +226,19 @@ app.post('/proxy', async (req, res) => {
     });
   }
 });
+let observerInterval;
+
 server.listen(PORT, '::', () => {
   console.log(`Consensus x402 Proxy Service`);
   console.log(`URL: http://consensus.canister.software:8888`);
+  observerInterval = startObservationScheduler();
+  upsertServerNode();
 });
 
 ['SIGTERM', 'SIGINT'].forEach((signal) => {
   process.on(signal, () => {
     console.log(`\n${signal} received, shutting down...`);
+    clearInterval(observerInterval);
     server.close(() => process.exit(0));
   });
 });
