@@ -1,7 +1,3 @@
-// ─── theme.ts — dark / light mode aware palette ──────────────────────────────
-// Detects macOS appearance via osascript. Falls back to dark on other platforms
-// or if detection fails.
-
 function detectDarkMode(): boolean {
   if (process.platform !== 'darwin') return true;
   try {
@@ -17,7 +13,6 @@ function detectDarkMode(): boolean {
 
 export const isDark = detectDarkMode();
 
-// ─── Accent colours — same in both modes ─────────────────────────────────────
 const ACCENT = {
   cyan:    '#06b6d4',
   sky:     '#0ea5e9',
@@ -26,7 +21,6 @@ const ACCENT = {
   red:     '#ef4444',
 } as const;
 
-// ─── Dark palette ─────────────────────────────────────────────────────────────
 const DARK = {
   ...ACCENT,
   white:  '#f8fafc',   // primary text
@@ -36,7 +30,6 @@ const DARK = {
   panel:  '#1e293b',   // card / box background
 } as const;
 
-// ─── Light palette ────────────────────────────────────────────────────────────
 const LIGHT = {
   ...ACCENT,
   white:  '#0f172a',   // primary text (inverted)
