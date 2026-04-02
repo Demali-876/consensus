@@ -1,7 +1,3 @@
-/**
- * config.ts — shared config helpers for CLI commands and TUI screens
- */
-
 import fs from 'fs';
 import path from 'path';
 
