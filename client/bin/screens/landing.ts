@@ -65,20 +65,25 @@ function timeAgo(ms: number): string {
 
 // ─── Command palette commands ─────────────────────────────────────────────────
 
-export type LandingAction = 'menu' | 'tunnels' | 'proxy' | 'reverse-proxy' | 'websockets' | 'ips' | 'quit';
+export type LandingAction = 'tunnels' | 'proxy' | 'proxy-forward' | 'proxy-reverse' | 'websockets' | 'ips' | 'settings' | 'quit';
 
-type Command = { label: string; hint: string; action: LandingAction };
+type Command = { label: string; hint: string; icon: string; action: LandingAction };
 
 const COMMANDS: Command[] = [
-  { label: 'new tunnel',    hint: 'HTTP/TCP → public URL',    action: 'tunnels'       },
-  { label: 'proxy',         hint: 'open proxy dashboard',     action: 'proxy'         },
-  { label: 'reverse proxy', hint: 'expose a remote service',  action: 'reverse-proxy' },
-  { label: 'websocket',     hint: 'WS tunnel',                action: 'websockets'    },
-  { label: 'join node',     hint: 'join node / IP allowlist', action: 'ips'           },
-  { label: 'view stats',    hint: 'network statistics',       action: 'menu'          },
+  { label: 'new tunnel',  hint: 'HTTP/TCP → public URL',    icon: '⇄', action: 'tunnels'    },
+  { label: 'proxy',       hint: 'forward / reverse proxy',  icon: '⟳', action: 'proxy'      },
+  { label: 'websocket',   hint: 'WS tunnel',                icon: '⚡', action: 'websockets' },
+  { label: 'ips',  hint: 'lease an ip to route traffic', icon: '⬡', action: 'ips'  },
+  { label: 'settings',    hint: 'environment and node configuration', icon: '⚙', action: 'settings'   },
 ];
 
-const MAX_PALETTE_ROWS = 6;
+const PROXY_SUB = [
+  { action: 'proxy-forward' as const, label: 'forward proxy', desc: 'Route outbound traffic through the consensus network' },
+  { action: 'proxy-reverse' as const, label: 'reverse proxy', desc: 'Protect a local server with a caching proxy'         },
+];
+
+// 5 commands + proxy expands to 3 rows (parent + 2 subs) = 7 rows total
+const MAX_PALETTE_ROWS = 8;
 
 // ─── Landing ──────────────────────────────────────────────────────────────────
 
@@ -281,13 +286,18 @@ export async function showLanding(): Promise<LandingAction> {
   // ── Status line ───────────────────────────────────────────────────────────
   const statusLine = new BoxRenderable(renderer, {
     width:           '100%',
+    flexDirection:   'column',
     alignItems:      'center',
     justifyContent:  'center',
     paddingBottom:   1,
     backgroundColor: C.dark,
   });
-  const statusText = new TextRenderable(renderer, { content: '●  STATUS: CHECKING', fg: C.dim, bg: C.dark });
+  const statusText  = new TextRenderable(renderer, { content: '●  STATUS: CHECKING', fg: C.dim,   bg: C.dark });
+  const legendLine1 = new TextRenderable(renderer, { content: '',                    fg: C.white,  bg: C.dark });
+  const legendLine2 = new TextRenderable(renderer, { content: '',                    fg: C.slate,  bg: C.dark });
   statusLine.add(statusText);
+  statusLine.add(legendLine1);
+  statusLine.add(legendLine2);
   root.add(statusLine);
 
   // ── Bottom bar ────────────────────────────────────────────────────────────
@@ -307,9 +317,15 @@ export async function showLanding(): Promise<LandingAction> {
   bottomBar.add(new TextRenderable(renderer, { content: 'canister.software', fg: C.dim, bg: C.panel }));
   root.add(bottomBar);
 
-  // ── Palette state + render ────────────────────────────────────────────────
-  let filter      = '';
-  let selectedIdx = 0;
+  // ── Palette state ─────────────────────────────────────────────────────────
+  let filter            = '';
+  let selectedIdx       = 0;
+  let proxyDropdownOpen = false;
+  let proxyCursor       = 0;
+
+  // Track last real server status so we can restore it when dropdown closes.
+  let savedStatusContent = '●  STATUS: CHECKING';
+  let savedStatusFg      = C.dim as string;
 
   const getFiltered = (): Command[] =>
     filter.trim() === ''
@@ -318,40 +334,106 @@ export async function showLanding(): Promise<LandingAction> {
           c.label.includes(filter.toLowerCase()) || c.hint.includes(filter.toLowerCase())
         );
 
+  // Build the flat row list for the proxy-expanded view.
+  // Returns: { label, hint, fg, isProxySub, subIdx? }
+  type FlatRow =
+    | { kind: 'cmd';    label: string; hint: string; selected: boolean }
+    | { kind: 'phead'                                                   }
+    | { kind: 'psub';   label: string; subIdx: number; selected: boolean };
+
+  const buildProxyRows = (): FlatRow[] => {
+    const rows: FlatRow[] = [];
+    for (const cmd of COMMANDS) {
+      if (cmd.action !== 'proxy') {
+          rows.push({ kind: 'cmd', label: `${cmd.icon}  ${cmd.label}`, hint: '', selected: false });
+      } else {
+        rows.push({ kind: 'phead' });
+        PROXY_SUB.forEach((sub, i) =>
+          rows.push({ kind: 'psub', label: sub.label, subIdx: i, selected: proxyCursor === i })
+        );
+      }
+    }
+    return rows;
+  };
+
+  const renderLegend = () => {
+    if (!proxyDropdownOpen) {
+      legendLine1.content = '';
+      legendLine2.content = '';
+      return;
+    }
+    legendLine1.content = `  ${PROXY_SUB[0]!.desc}`;
+    legendLine2.content = `  ${PROXY_SUB[1]!.desc}`;
+    legendLine1.fg = proxyCursor === 0 ? C.white : C.slate;
+    legendLine2.fg = proxyCursor === 1 ? C.white : C.slate;
+  };
+
   const renderPalette = () => {
     inputText.content = filter ? `> ${filter}_` : '> _';
+
+    if (proxyDropdownOpen) {
+      statusText.content = '';
+      const rows = buildProxyRows();
+      for (let i = 0; i < MAX_PALETTE_ROWS; i++) {
+        const row = rows[i];
+        const s   = slots[i]!;
+        if (!row) { s.label.content = ''; s.hint.content = ''; continue; }
+
+        if (row.kind === 'cmd') {
+          s.label.content = `     ${row.label}`;
+          s.label.fg      = C.slate;
+          s.hint.content  = '';
+        } else if (row.kind === 'phead') {
+          s.label.content = `  ▶  proxy`;
+          s.label.fg      = C.white;
+          s.hint.content  = '';
+        } else {
+          const sel       = row.selected;
+          s.label.content = sel ? `        ▶  ${row.label}` : `           ${row.label}`;
+          s.label.fg      = sel ? C.white                   : C.slate;
+          s.hint.content  = '';
+        }
+      }
+      renderLegend();
+      return;
+    }
+
+    // Normal mode
+    statusText.content = savedStatusContent;
+    statusText.fg      = savedStatusFg;
+    legendLine1.content = '';
+    legendLine2.content = '';
 
     const filtered = getFiltered();
     if (selectedIdx >= filtered.length) selectedIdx = Math.max(0, filtered.length - 1);
 
     for (let i = 0; i < MAX_PALETTE_ROWS; i++) {
       const cmd = filtered[i];
-      const s   = slots[i];
-      if (!cmd) {
-        s.label.content = '';
-        s.hint.content  = '';
-        continue;
-      }
-      const sel        = i === selectedIdx;
-      s.label.content  = sel ? `  ▶  ${cmd.label}` : `     ${cmd.label}`;
-      s.label.fg       = sel ? C.white              : C.slate;
-      s.hint.content   = sel ? cmd.hint             : '';
-      s.hint.fg        = C.dim;
+      const s   = slots[i]!;
+      if (!cmd) { s.label.content = ''; s.hint.content = ''; continue; }
+      const sel       = i === selectedIdx;
+      s.label.content = sel ? `  ▶  ${cmd.icon}  ${cmd.label}` : `     ${cmd.icon}  ${cmd.label}`;
+      s.label.fg      = sel ? C.white              : C.slate;
+      s.hint.content  = sel ? cmd.hint             : '';
+      s.hint.fg       = C.dim;
     }
   };
 
   renderPalette();
 
   // ── Background: server health ─────────────────────────────────────────────
+  const applyStatus = (content: string, fg: string) => {
+    savedStatusContent = content;
+    savedStatusFg      = fg;
+    if (!proxyDropdownOpen) { statusText.content = content; statusText.fg = fg; }
+  };
+
   fetch(`${SERVER}/health`, { signal: AbortSignal.timeout(4000) })
-    .then((r) => {
-      statusText.content = r.ok ? '●  STATUS: CONNECTED' : '●  STATUS: DEGRADED';
-      statusText.fg      = r.ok ? C.emerald               : C.amber;
-    })
-    .catch(() => {
-      statusText.content = '●  STATUS: DISCONNECTED';
-      statusText.fg      = C.red;
-    });
+    .then((r) => applyStatus(
+      r.ok ? '●  STATUS: CONNECTED' : '●  STATUS: DEGRADED',
+      r.ok ? C.emerald               : C.amber,
+    ))
+    .catch(() => applyStatus('●  STATUS: DISCONNECTED', C.red));
 
   // ── Background: network stats (poll every 5s) ─────────────────────────────
   const fetchStats = () => {
@@ -380,10 +462,33 @@ export async function showLanding(): Promise<LandingAction> {
     };
 
     renderer.keyInput.on('keypress', (key) => {
-      // Always-on exits
       if (key.ctrl && key.name === 'c') { done('quit'); return; }
 
-      // Navigation
+      // ── Proxy dropdown mode ──────────────────────────────────────────────
+      if (proxyDropdownOpen) {
+        if (key.name === 'up' || key.name === 'k') {
+          proxyCursor = (proxyCursor - 1 + PROXY_SUB.length) % PROXY_SUB.length;
+          renderPalette();
+          return;
+        }
+        if (key.name === 'down' || key.name === 'j') {
+          proxyCursor = (proxyCursor + 1) % PROXY_SUB.length;
+          renderPalette();
+          return;
+        }
+        if (key.name === 'return' || key.name === 'enter') {
+          done(PROXY_SUB[proxyCursor]!.action);
+          return;
+        }
+        if (key.name === 'escape') {
+          proxyDropdownOpen = false;
+          renderPalette();
+          return;
+        }
+        return; // swallow all other keys while dropdown is open
+      }
+
+      // ── Normal palette mode ──────────────────────────────────────────────
       if (key.name === 'up') {
         const len = getFiltered().length;
         selectedIdx = (selectedIdx - 1 + len) % len;
@@ -397,15 +502,21 @@ export async function showLanding(): Promise<LandingAction> {
         return;
       }
 
-      // Execute selected
       if (key.name === 'return' || key.name === 'enter') {
         const filtered = getFiltered();
         const cmd = filtered[selectedIdx];
-        if (cmd) done(cmd.action);
+        if (!cmd) return;
+        if (cmd.action === 'proxy') {
+          proxyDropdownOpen = true;
+          proxyCursor       = 0;
+          filter            = '';
+          renderPalette();
+        } else {
+          done(cmd.action);
+        }
         return;
       }
 
-      // Clear filter
       if (key.name === 'escape') {
         filter      = '';
         selectedIdx = 0;
@@ -413,7 +524,6 @@ export async function showLanding(): Promise<LandingAction> {
         return;
       }
 
-      // Backspace
       if (key.name === 'backspace') {
         filter      = filter.slice(0, -1);
         selectedIdx = 0;
