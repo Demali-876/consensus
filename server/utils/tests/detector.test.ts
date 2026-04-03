@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { classifyDeviceIps, type DeviceIpObservation } from '../../features/ip-pool/detector.js';
-import { depositObservation } from '../../features/ip-pool/pool.js';
+import { classifyDeviceIps, type DeviceIpObservation } from '../../features/ip-pool/detector.ts';
+import { depositObservation } from '../../features/ip-pool/pool.ts';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;

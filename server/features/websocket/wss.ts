@@ -1,5 +1,5 @@
 import crypto                         from 'crypto';
-import Router                          from '../../router.js';
+import Router                          from '../../router.ts';
 import { WebSocketServer, WebSocket }  from 'ws';
 import { paymentMiddleware }           from '@x402/express';
 import type { Express, Request }       from 'express';

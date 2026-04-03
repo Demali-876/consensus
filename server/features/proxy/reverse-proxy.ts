@@ -1,6 +1,6 @@
 import http  from 'node:http';
 import https from 'node:https';
-import Router from '../../router.js';
+import Router from '../../router.ts';
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 

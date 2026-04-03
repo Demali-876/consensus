@@ -3,7 +3,7 @@ import axios                             from 'axios';
 import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
 import crypto                            from 'node:crypto';
-import Router                            from '../../router.js';
+import Router                            from '../../router.ts';
 
 const gunzipAsync           = promisify(gunzip);
 const inflateAsync          = promisify(inflate);

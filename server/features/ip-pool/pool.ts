@@ -9,7 +9,7 @@ import {
   type DeviceIpClue,
   type DeviceIpObservation,
   type IpFamily,
-} from './detector.js';
+} from './detector.ts';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 

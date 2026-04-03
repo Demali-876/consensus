@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import NodeStore from '../../data/node_store.js';
-import { observeRemoteIp, resolvePublicIps, type DeviceIpClue, type DeviceIpObservation } from './detector.js';
-import { loadPoolHistory, savePoolHistory, depositIp, removeIp } from './pool.js';
+import { observeRemoteIp, resolvePublicIps, type DeviceIpClue, type DeviceIpObservation } from './detector.ts';
+import { loadPoolHistory, savePoolHistory, depositIp, removeIp } from './pool.ts';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 

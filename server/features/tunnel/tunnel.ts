@@ -3,7 +3,7 @@ import net                            from 'net';
 import WebSocket, { WebSocketServer } from 'ws';
 import type { Express, Request }      from 'express';
 import type { Server }                from 'http';
-import { generateSlug }               from './slug.js';
+import { generateSlug }               from './slug.ts';
 // -----------------------------------------------------------------------------
 // Frame protocol — SSH channel framing (RFC 4254), stripped to minimal subset
 // [1 byte: type][4 bytes: stream ID][...payload]
