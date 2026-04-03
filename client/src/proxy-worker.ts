@@ -1,6 +1,5 @@
-import http  from 'node:http';
-import https from 'node:https';
-import net   from 'node:net';
+import http from 'node:http';
+import net  from 'node:net';
 
 import { ProxyClient }                        from './proxy-client.js';
 import { createPaymentFetch }                 from './payment-fetch.js';
@@ -35,27 +34,19 @@ export type ProxyWorkerHandle = {
   stop:  () => Promise<void>;
 };
 
-// ─── Hop-by-hop headers (RFC 7230 §6.1) ─────────────────────────────────────
-
-const HOP_BY_HOP = new Set([
-  'transfer-encoding', 'connection', 'keep-alive',
-  'proxy-connection',  'proxy-authenticate', 'proxy-authorization',
-  'te', 'trailer', 'upgrade',
-]);
-
-// ─── Local response cache ─────────────────────────────────────────────────────
+// ─── Local response cache (reverse proxy only) ───────────────────────────────
 
 interface CacheEntry {
   statusCode: number;
-  headers:    http.IncomingHttpHeaders;
-  body:       Buffer;
+  headers:    Record<string, string>;
+  body:       string;
   expiresAt:  number;
   hits:       number;
 }
 
 class ResponseCache {
   private store = new Map<string, CacheEntry>();
-  hits  = 0;
+  hits   = 0;
   misses = 0;
 
   constructor(private readonly ttl: number, private readonly maxSize: number) {}
@@ -69,7 +60,7 @@ class ResponseCache {
     return e;
   }
 
-  set(key: string, statusCode: number, headers: http.IncomingHttpHeaders, body: Buffer): void {
+  set(key: string, statusCode: number, headers: Record<string, string>, body: string): void {
     if (this.store.size >= this.maxSize)
       this.store.delete(this.store.keys().next().value!);
     this.store.set(key, { statusCode, headers, body, expiresAt: Date.now() + this.ttl, hits: 0 });
@@ -93,36 +84,53 @@ function bindServer(server: http.Server, preferred?: number): Promise<number> {
 export type ReverseRequestCtx = {
   method:  string;
   url:     string;
-  headers: http.OutgoingHttpHeaders;
-  /** Mutate target fields to reroute the request at hook time. */
+  headers: Record<string, string>;
+  /** Mutate target fields to reroute the request to a different upstream. */
   target:  { host: string; port: number; protocol: 'http' | 'https' };
 };
 
 export type ReverseResponseCtx = {
   statusCode: number;
-  headers:    http.IncomingHttpHeaders;
+  headers:    Record<string, string>;
   cached:     boolean;
 };
 
 export type ReverseWorkerOptions = {
   type:     'reverse';
-  /** The already-running server to protect. */
+  /** The upstream server to protect — cache misses are deduplicated via the consensus network before being forwarded here. */
   upstream: { host: string; port: number; protocol?: 'http' | 'https' };
   /** Proxy listen port. Omit to auto-assign. */
   port?:    number;
+  /**
+   * Payment-capable fetch function.
+   * If omitted, createPaymentFetch() resolves credentials from env:
+   *   CONSENSUS_EVM_KEY | CONSENSUS_SVM_KEY | CONSENSUS_PEM_PATH
+   */
+  fetchFn?: FetchFn;
+  /**
+   * Pre-resolved wallet — alternative to `fetchFn`.
+   * Passed to createPaymentFetch() internally; ignored if `fetchFn` is set.
+   */
+  wallet?:  ResolvedWallet;
   cache?: {
-    /** Response TTL in milliseconds (default 30 000). */
+    /** Local response TTL in milliseconds (default 30 000). Cache hits skip the consensus network entirely. */
     ttl?:     number;
-    /** Max cached entries (default 1 000). */
+    /** Max locally cached entries (default 1 000). */
     maxSize?: number;
   };
+  /** Cache TTL in seconds forwarded to the consensus node on cache misses. */
+  cacheTtl?: number;
+  /** Max proxy spend in USD before stand-down. */
+  budget?:   number;
   hooks?: {
-    /** Return `false` to block the request with 403. */
+    /** Return `false` to block the request with 403. Mutate ctx to rewrite URL, headers, or reroute to a different upstream. */
     onRequest?:  (ctx: ReverseRequestCtx)  => void | false | Promise<void | false>;
-    /** Mutate `ctx.headers` to inject or strip response headers. */
+    /** Mutate ctx.headers to inject or strip response headers. Fires on both cache hits and consensus responses. */
     onResponse?: (ctx: ReverseResponseCtx) => void | Promise<void>;
     onError?:    (err: Error, req: http.IncomingMessage, res: http.ServerResponse) => void;
   };
+  /** Called after every request with updated stats. */
+  onStats?:  (stats: WorkerStats) => void;
 };
 
 // ─── Forward proxy option types ───────────────────────────────────────────────
@@ -169,11 +177,19 @@ export type DispatchProxyOptions = ReverseWorkerOptions | ForwardWorkerOptions;
 // ─── Reverse proxy worker ─────────────────────────────────────────────────────
 
 async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorkerHandle> {
-  const protocol  = opts.upstream.protocol ?? 'http';
-  const transport = protocol === 'https' ? https : http;
-  const cache     = new ResponseCache(opts.cache?.ttl ?? 30_000, opts.cache?.maxSize ?? 1_000);
   const startedAt = Date.now();
-  const counters  = { requests: 0, bytesSent: 0, bytesRecv: 0 };
+  const counters  = { requests: 0, bytesSent: 0, bytesRecv: 0, spend: 0 };
+  const cache     = new ResponseCache(opts.cache?.ttl ?? 30_000, opts.cache?.maxSize ?? 1_000);
+
+  const fetchFn = opts.fetchFn ?? await createPaymentFetch({ signers: opts.wallet });
+
+  const client = ProxyClient(fetchFn as Parameters<typeof ProxyClient>[0], {
+    strategy:         'manual',
+    cache_ttl:        opts.cacheTtl,
+    limit_usd:        opts.budget,
+    on_limit_reached: () =>
+      opts.onStats?.({ ...counters, uptime: Date.now() - startedAt }),
+  });
 
   function defaultCacheable(req: http.IncomingMessage): boolean {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
@@ -182,45 +198,35 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
     return true;
   }
 
-  function defaultCacheableResponse(h: http.IncomingHttpHeaders): boolean {
-    const cc = String(h['cache-control'] ?? '');
-    if (cc.includes('no-store') || cc.includes('private')) return false;
-    if (h['set-cookie'])                                    return false;
-    return true;
-  }
-
   const server = http.createServer(async (req, res) => {
     counters.requests++;
     const cacheKey = `${req.method}:${req.url}`;
     const tryCache = defaultCacheable(req);
 
-    // ── Cache HIT ───────────────────────────────────────────────────────────
+    // ── Local cache HIT — no payment, no network call ───────────────────────
     if (tryCache) {
       const entry = cache.get(cacheKey);
       if (entry) {
-        const rctx: ReverseResponseCtx = {
-          statusCode: entry.statusCode,
-          headers:    { ...entry.headers },
-          cached:     true,
-        };
+        const rctx: ReverseResponseCtx = { statusCode: entry.statusCode, headers: { ...entry.headers }, cached: true };
         try { await opts.hooks?.onResponse?.(rctx); } catch { /* never drop cached responses */ }
-        res.writeHead(rctx.statusCode, {
-          ...rctx.headers,
-          'x-cache':      'HIT',
-          'x-cache-hits': String(entry.hits),
-        });
-        res.end(entry.body);
+        res.writeHead(rctx.statusCode, { ...rctx.headers, 'x-cache': 'HIT', 'x-cache-hits': String(entry.hits) });
         counters.bytesSent += entry.body.length;
+        res.end(entry.body);
+        opts.onStats?.({ ...counters, cacheHits: cache.hits, uptime: Date.now() - startedAt });
         return;
       }
     }
 
-    // ── Request hook ────────────────────────────────────────────────────────
+    // ── onRequest hook — block, rewrite, or reroute before consensus ────────
+    const rawHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers))
+      if (typeof v === 'string') rawHeaders[k] = v;
+
     const ctx: ReverseRequestCtx = {
-      method:  req.method ?? 'GET',
-      url:     req.url    ?? '/',
-      headers: { ...req.headers } as http.OutgoingHttpHeaders,
-      target:  { host: opts.upstream.host, port: opts.upstream.port, protocol },
+      method:  req.method  ?? 'GET',
+      url:     req.url     ?? '/',
+      headers: rawHeaders,
+      target:  { host: opts.upstream.host, port: opts.upstream.port, protocol: opts.upstream.protocol ?? 'http' },
     };
 
     try {
@@ -231,89 +237,60 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
         return;
       }
     } catch (err) {
+      if (opts.hooks?.onError) { opts.hooks.onError(err as Error, req, res); return; }
       res.writeHead(500);
       res.end(`Hook error: ${(err as Error).message}`);
       return;
     }
 
-    // Strip hop-by-hop headers before forwarding upstream.
-    for (const h of HOP_BY_HOP) delete ctx.headers[h];
+    // ── Cache MISS — route through consensus network ─────────────────────────
+    try {
+      const targetUrl = `${ctx.target.protocol}://${ctx.target.host}:${ctx.target.port}${ctx.url}`;
 
-    // ── Upstream request ────────────────────────────────────────────────────
-    const upstreamReq = transport.request(
-      {
-        host:    ctx.target.host,
-        port:    ctx.target.port,
-        path:    ctx.url,
-        method:  ctx.method,
-        headers: ctx.headers,
-      },
-      async (upstreamRes) => {
-        // Build clean response header map — strip hop-by-hop.
-        const responseHeaders: http.IncomingHttpHeaders = {};
-        for (const [k, v] of Object.entries(upstreamRes.headers))
-          if (!HOP_BY_HOP.has(k)) responseHeaders[k] = v;
+      const result = await client.request({
+        target_url: targetUrl,
+        method:     ctx.method,
+        headers:    ctx.headers,
+      });
 
-        const willCache =
-          tryCache &&
-          upstreamRes.statusCode! >= 200 &&
-          upstreamRes.statusCode! <  300 &&
-          defaultCacheableResponse(upstreamRes.headers);
+      const responseHeaders: Record<string, string> = {};
+      for (const [k, v] of Object.entries(result.headers ?? {}))
+        if (typeof v === 'string') responseHeaders[k] = v;
 
-        const rctx: ReverseResponseCtx = {
-          statusCode: upstreamRes.statusCode!,
-          headers:    responseHeaders,
-          cached:     false,
-        };
-        try { await opts.hooks?.onResponse?.(rctx); } catch { /* ignore hook errors */ }
+      const body = typeof result.data === 'string'
+        ? result.data
+        : JSON.stringify(result.data);
 
-        if (!willCache) {
-          res.writeHead(rctx.statusCode, { ...rctx.headers, 'x-cache': 'SKIP' });
-          upstreamRes.pipe(res);
-          return;
-        }
+      // ── onResponse hook ─────────────────────────────────────────────────
+      const rctx: ReverseResponseCtx = { statusCode: result.status, headers: responseHeaders, cached: false };
+      try { await opts.hooks?.onResponse?.(rctx); } catch { /* ignore hook errors on miss path */ }
 
-        // Buffer cacheable response so we can store it and send a known content-length.
-        const chunks: Buffer[] = [];
-        upstreamRes.on('data', (c: Buffer) => { chunks.push(c); counters.bytesRecv += c.length; });
-        upstreamRes.on('end', () => {
-          const body = Buffer.concat(chunks);
-          cache.set(cacheKey, rctx.statusCode, rctx.headers, body);
-          res.writeHead(rctx.statusCode, {
-            ...rctx.headers,
-            'x-cache':        'MISS',
-            'content-length': String(body.length),
-          });
-          res.end(body);
-          counters.bytesSent += body.length;
-        });
-      },
-    );
+      if (tryCache && result.status >= 200 && result.status < 300) {
+        cache.set(cacheKey, rctx.statusCode, rctx.headers, body);
+      }
 
-    upstreamReq.on('error', (err) => {
-      if (opts.hooks?.onError) { opts.hooks.onError(err, req, res); return; }
-      if (!res.headersSent)    { res.writeHead(502); res.end(`Bad Gateway: ${err.message}`); }
-    });
+      res.writeHead(rctx.statusCode, { ...rctx.headers, 'x-cache': tryCache ? 'MISS' : 'SKIP' });
+      counters.bytesSent += body.length;
+      counters.spend      = client.getBudget().spent_usd;
+      res.end(body);
 
-    req.pipe(upstreamReq);
+      opts.onStats?.({ ...counters, cacheHits: cache.hits, uptime: Date.now() - startedAt });
+    } catch (err) {
+      if (opts.hooks?.onError) { opts.hooks.onError(err as Error, req, res); return; }
+      if (!res.headersSent) { res.writeHead(502); res.end(`Bad Gateway: ${(err as Error).message}`); }
+    }
   });
 
   const port = await bindServer(server, opts.port);
   console.log(
-    `[ReverseProxy] :${port} → ${protocol}://${opts.upstream.host}:${opts.upstream.port}`,
+    `[ReverseProxy] :${port} → consensus → ${opts.upstream.protocol ?? 'http'}://${opts.upstream.host}:${opts.upstream.port}`,
   );
 
   return {
     type: 'reverse',
     port,
-    stats: () => ({
-      requests:  counters.requests,
-      cacheHits: cache.hits,
-      bytesSent: counters.bytesSent,
-      bytesRecv: counters.bytesRecv,
-      uptime:    Date.now() - startedAt,
-    }),
-    stop: () => new Promise((resolve, reject) =>
+    stats: () => ({ ...counters, cacheHits: cache.hits, uptime: Date.now() - startedAt }),
+    stop:  () => new Promise((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
     ),
   };

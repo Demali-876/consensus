@@ -4,16 +4,15 @@
  */
 
 import chalk                                       from 'chalk';
-import { loadConfig, makeFetchWithPayment,
-         fmtUsd, fmtBytes, fmtUptime }            from '../lib/config.ts';
-import { proxyFetch, startProxyDaemon }            from '../lib/proxy.ts';
+import { loadConfig, fmtUsd, fmtBytes, fmtUptime } from '../lib/config.ts';
+import { proxyFetch }                              from '../lib/proxy.ts';
 import { getFlagValue, hasFlag }                   from '../lib/flags.ts';
 import { dispatchProxy }                           from '../../src/proxy-worker.js';
+import { createPaymentFetch }                      from '../../src/payment-fetch.js';
 
 export async function runProxyCommand(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
-  const cfg    = loadConfig();
-  const fetchFn = makeFetchWithPayment(cfg.api_key ?? '');
+  const cfg = loadConfig();
 
   // ── proxy fetch ─────────────────────────────────────────────────────────────
   if (sub === 'fetch') {
@@ -44,6 +43,7 @@ export async function runProxyCommand(args: string[]): Promise<void> {
     }
 
     try {
+      const fetchFn = await createPaymentFetch();
       const result = await proxyFetch({ fetchFn, config: cfg, targetUrl, method, headers: extraHeaders, region, cacheTtl, verbose });
       if (jsonOnly) {
         console.log(JSON.stringify(result, null, 2));
@@ -74,13 +74,24 @@ export async function runProxyCommand(args: string[]): Promise<void> {
     if (budget !== undefined)    console.log(`  Budget: ${chalk.white(fmtUsd(budget))}`);
     console.log(chalk.dim(`\nSet HTTP_PROXY=http://127.0.0.1:${port} in your client.\n`));
 
-    const stats = { requests: 0, spend: 0, bytesSent: 0, bytesRecv: 0, startedAt: Date.now() };
+    const stats = { requests: 0, spend: 0, bytesSent: 0, bytesRecv: 0 };
+    const startedAt = Date.now();
 
-    let daemon: Awaited<ReturnType<typeof startProxyDaemon>>;
+    let worker: Awaited<ReturnType<typeof dispatchProxy>>;
     try {
-      daemon = await startProxyDaemon({
-        fetchFn, config: cfg, port, budget, region, cacheTtl,
-        onStats: (s) => Object.assign(stats, s),
+      worker = await dispatchProxy({
+        type:       'forward',
+        port,
+        budget,
+        nodeRegion: region ?? cfg.leased_node?.region,
+        nodeDomain: cfg.leased_node?.domain,
+        cacheTtl,
+        onStats: (s) => Object.assign(stats, {
+          requests:  s.requests,
+          spend:     s.spend ?? 0,
+          bytesSent: s.bytesSent,
+          bytesRecv: s.bytesRecv,
+        }),
       });
     } catch (err) {
       console.error(chalk.red('Failed to start proxy:'), (err as Error).message);
@@ -92,14 +103,14 @@ export async function runProxyCommand(args: string[]): Promise<void> {
         `\r  ${chalk.dim('req:')} ${chalk.white(stats.requests)}  ` +
         `${chalk.dim('spend:')} ${chalk.white(fmtUsd(stats.spend))}  ` +
         `${chalk.dim('sent:')} ${chalk.white(fmtBytes(stats.bytesSent))}  ` +
-        `${chalk.dim('up:')} ${chalk.white(fmtUptime(stats.startedAt))}   `,
+        `${chalk.dim('up:')} ${chalk.white(fmtUptime(startedAt))}   `,
       );
     }, 1000);
 
     process.on('SIGINT', async () => {
       clearInterval(tick);
       console.log(chalk.dim('\n\nStopping proxy…'));
-      await daemon.close();
+      await worker.stop();
       console.log(chalk.green('✓ Stopped'));
       process.exit(0);
     });
@@ -150,7 +161,8 @@ export async function runProxyCommand(args: string[]): Promise<void> {
       const s = worker.stats();
       process.stdout.write(
         `\r  ${chalk.dim('req:')} ${chalk.white(s.requests)}  ` +
-        `${chalk.dim('hits:')} ${chalk.white(s.cacheHits)}  ` +
+        `${chalk.dim('hits:')} ${chalk.white(s.cacheHits ?? 0)}  ` +
+        `${chalk.dim('spend:')} ${chalk.white(fmtUsd(s.spend ?? 0))}  ` +
         `${chalk.dim('sent:')} ${chalk.white(fmtBytes(s.bytesSent))}  ` +
         `${chalk.dim('up:')} ${chalk.white(fmtUptime(Date.now() - s.uptime))}   `,
       );
