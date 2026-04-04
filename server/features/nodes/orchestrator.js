@@ -5,6 +5,20 @@ import { provisionNodeDNS } from '../../utils/dns.js';
 import NodeStore from '../../data/node_store.js';
 import { observeNode } from '../ip-pool/observer.ts';
 
+function requireLoopback(req, res, next) {
+  const remote = req.socket.remoteAddress ?? '';
+
+  const isLoopback =
+    remote === '127.0.0.1'        ||
+    remote === '::1'              ||
+    remote === '::ffff:127.0.0.1';
+
+  if (isLoopback) return next();
+
+  console.warn(`[Nodes] Blocked unauthorised DELETE attempt from ${remote}`);
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
 const BASE_PRICE = 100;
 const INCREMENT  = 50;
 const MAX_PRICE  = 1000;
@@ -298,6 +312,23 @@ export function registerNodes(app, httpsServer, x402Server, config) {
     } catch (error) {
       console.error('List nodes error:', error);
       res.status(500).json({ error: 'Failed to list nodes', message: error.message });
+    }
+  });
+
+  // ── Delete ──────────────────────────────────────────────────────────────────
+
+  app.delete('/node/:node_id', requireLoopback, (req, res) => {
+    try {
+      const { node_id } = req.params;
+      const deleted = NodeStore.deleteNode(node_id);
+      if (!deleted) {
+        return res.status(404).json({ error: 'Node not found', node_id });
+      }
+      console.log(`[Nodes] Deleted node: ${node_id}`);
+      res.json({ deleted: true, node_id });
+    } catch (error) {
+      console.error('Delete node error:', error);
+      res.status(500).json({ error: 'Failed to delete node', message: error.message });
     }
   });
 

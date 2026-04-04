@@ -171,6 +171,14 @@ const consumeJoinStmt = db.prepare(`
   UPDATE join_requests SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL
 `);
 
+const deleteNodeStmt = db.prepare(`
+  DELETE FROM nodes WHERE id = ?
+`);
+
+const deleteNodeHeartbeatsStmt = db.prepare(`
+  DELETE FROM heartbeats WHERE node_id = ?
+`);
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 function rowToNode(row) {
@@ -268,6 +276,12 @@ export const NodeStore = {
     const res = consumeJoinStmt.run(nowSec(), id);
     if (res.changes === 0) throw new Error(`Join not found or already consumed: ${id}`);
     return this.getJoin(id);
+  },
+
+  deleteNode(id) {
+    deleteNodeHeartbeatsStmt.run(id);
+    const res = deleteNodeStmt.run(id);
+    return res.changes > 0;
   },
 };
 
