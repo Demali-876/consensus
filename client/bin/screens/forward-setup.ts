@@ -3,6 +3,8 @@ import { C } from '../theme';
 import { loadConfig } from '../lib/config.ts';
 import { type FieldDef, type FormState, renderField, handleKey } from '../lib/form.ts';
 import { scanPorts, HTTP_PORTS, SPINNER } from '../lib/ports.ts';
+import type { PreferNetwork } from '../../src/payment-fetch.js';
+import { NETWORK_CAIP2S, NETWORK_LABELS } from '../lib/networks.ts';
 
 export type ForwardSetupResult = {
   listenPort?:     number;
@@ -15,6 +17,7 @@ export type ForwardSetupResult = {
   cacheTtl?:       number;
   verbose?:        boolean;
   budget?:         number;
+  preferNetwork?:  PreferNetwork;
 };
 
 const MAX_SHOWN = 5;
@@ -78,6 +81,8 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
     { id: 'cacheTtl',       label: 'Cache TTL',       hint: 'seconds, 0 = off',             type: 'text',   value: '0' },
     { id: 'verbose',        label: 'Verbose',         hint: 'include meta in responses',    type: 'toggle', value: 'off',       options: ['off', 'on'] },
     { id: 'budget',         label: 'Spend limit',     hint: 'USD, blank = unlimited',       type: 'text',   value: '' },
+    { id: 'network', label: 'Pay network', hint: '←/→ or ↵ to select', type: 'toggle',
+      value: '', options: NETWORK_CAIP2S, optionLabels: NETWORK_LABELS },
   ];
 
   const state: FormState = { cursor: 0, editing: false, editBuf: '' };
@@ -158,6 +163,11 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
   fields[9]!.ref = ln('');
   ln(' ');
 
+  ln('NETWORK  ' + '─'.repeat(43), C.dim);
+  ln(' ');
+  fields[10]!.ref = ln('');
+  ln(' ');
+
   ln('WALLET  ' + '─'.repeat(44), C.dim);
   ln(' ');
   const walletRef = ln('');
@@ -221,7 +231,7 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
     const shortcut  = shown.length > 0 ? `[1-${shown.length}  select]  ` : '';
     hintsRef.content = state.editing
       ? '[↵  confirm]  [esc  cancel]'
-      : `${shortcut}[R  rescan]  [↑↓  navigate]  [↵  edit]  [S  start]  [B  back]`;
+      : `${shortcut}[R  rescan]  [↑↓  navigate]  [↵/←/→  edit·toggle]  [S  start]  [B  back]`;
   }
 
   renderAll();
@@ -244,6 +254,8 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
     if (get('verbose') === 'on') result.verbose = true;
     const b = parseFloat(get('budget'));
     if (!isNaN(b) && b > 0) result.budget = b;
+    const net = get('network');
+    if (net !== '') result.preferNetwork = net as PreferNetwork;
     return result;
   }
 

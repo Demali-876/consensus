@@ -23,6 +23,7 @@ async function runForward(): Promise<void> {
       cacheTtl:       setup.cacheTtl,
       verbose:        setup.verbose,
       budget:         setup.budget,
+      preferNetwork:  setup.preferNetwork,
     });
   } catch (err) {
     console.error(chalk.red('Failed to start forward proxy:'), (err as Error).message);
@@ -43,10 +44,11 @@ async function runReverse(): Promise<void> {
   let handle;
   try {
     handle = await dispatchProxy({
-      type:     'reverse',
-      upstream: setup.upstream,
-      port:     setup.listenPort || undefined,
-      cache:    { ttl: setup.cacheTtl, maxSize: setup.cacheMaxSize },
+      type:          'reverse',
+      upstream:      setup.upstream,
+      port:          setup.listenPort || undefined,
+      cache:         { ttl: setup.cacheTtl, maxSize: setup.cacheMaxSize },
+      preferNetwork: setup.preferNetwork,
     });
   } catch (err) {
     console.error(chalk.red('Failed to start reverse proxy:'), (err as Error).message);

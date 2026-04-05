@@ -1,0 +1,38 @@
+{
+  "observations": [
+    {
+      "observedAt": 1774812561551,
+      "publicIps": {
+        "ipv4": "69.201.60.251",
+        "ipv6": "2603:7081:7a3e:ba00:b91c:3dd4:8c80:236c"
+      },
+      "reverseDns": {
+        "ipv4": [
+          "syn-069-201-060-251.res.spectrum.com"
+        ],
+        "ipv6": [
+          "syn-2603-7081-7a3e-ba00-b91c-3dd4-8c80-236c.res6.spectrum.com"
+        ]
+      },
+      "localAssignment": "dhcp",
+      "source": "detector"
+    },
+    {
+      "observedAt": 1774815498308,
+      "publicIps": {
+        "ipv4": "69.201.60.251",
+        "ipv6": "2603:7081:7a3e:ba00:b91c:3dd4:8c80:236c"
+      },
+      "reverseDns": {
+        "ipv4": [
+          "syn-069-201-060-251.res.spectrum.com"
+        ],
+        "ipv6": [
+          "syn-2603-7081-7a3e-ba00-b91c-3dd4-8c80-236c.res6.spectrum.com"
+        ]
+      },
+      "localAssignment": "dhcp",
+      "source": "detector"
+    }
+  ]
+}

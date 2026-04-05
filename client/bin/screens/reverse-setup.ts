@@ -2,12 +2,15 @@ import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core'
 import { C } from '../theme';
 import { type FieldDef, type FormState, renderField, handleKey } from '../lib/form.ts';
 import { scanPorts, HTTP_PORTS, SPINNER } from '../lib/ports.ts';
+import type { PreferNetwork } from '../../src/payment-fetch.js';
+import { NETWORK_CAIP2S, NETWORK_LABELS } from '../lib/networks.ts';
 
 export type ReverseSetupResult = {
-  upstream:     { host: string; port: number; protocol: 'http' | 'https' };
-  listenPort:   number;
-  cacheTtl:     number;   // ms
-  cacheMaxSize: number;
+  upstream:       { host: string; port: number; protocol: 'http' | 'https' };
+  listenPort:     number;
+  cacheTtl:       number;   // ms
+  cacheMaxSize:   number;
+  preferNetwork?: PreferNetwork;
 };
 
 const MAX_SHOWN = 5;
@@ -62,6 +65,8 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
     { id: 'listenPort', label: 'Listen port', hint: '0 = auto-assign',       type: 'text',   value: '0' },
     { id: 'cacheTtl',   label: 'Cache TTL',   hint: 'seconds, 0 = off',      type: 'text',   value: '30' },
     { id: 'maxSize',    label: 'Max entries', hint: 'max cached responses',   type: 'text',   value: '1000' },
+    { id: 'network', label: 'Pay network', hint: '←/→ or ↵ to select', type: 'toggle',
+      value: '', options: NETWORK_CAIP2S, optionLabels: NETWORK_LABELS },
   ];
 
   const state: FormState = { cursor: 0, editing: false, editBuf: '' };
@@ -132,6 +137,12 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
   ln(' ');
   fields[4]!.ref = ln('');   // Cache TTL
   fields[5]!.ref = ln('');   // Max entries
+  ln(' ');
+
+  // NETWORK section
+  ln('NETWORK  ' + '─'.repeat(43), C.dim);
+  ln(' ');
+  fields[6]!.ref = ln('');   // Pay network
 
   // DETECTED state
   let detectedPorts = openPorts;
@@ -176,7 +187,7 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
     const shortcut = shown.length > 0 ? `[1-${shown.length}  select]  ` : '';
     hintsRef.content = state.editing
       ? '[↵  confirm]  [esc  cancel]'
-      : `${shortcut}[R  rescan]  [↑↓  navigate]  [↵  edit]  [S  start]  [B  back]`;
+      : `${shortcut}[R  rescan]  [↑↓  navigate]  [↵/←/→  edit·toggle]  [S  start]  [B  back]`;
   }
 
   renderAll();
@@ -184,15 +195,17 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
   function collect(): ReverseSetupResult {
     const get = (id: string) => fields.find(f => f.id === id)?.value.trim() ?? '';
     const ttlSec = parseInt(get('cacheTtl') || '0', 10);
+    const net    = get('network');
     return {
       upstream: {
         host:     get('host')     || 'localhost',
         port:     parseInt(get('port') || '3000', 10),
         protocol: get('protocol') as 'http' | 'https',
       },
-      listenPort:   parseInt(get('listenPort') || '0', 10),
-      cacheTtl:     (isNaN(ttlSec) ? 30 : ttlSec) * 1000,
-      cacheMaxSize: parseInt(get('maxSize') || '1000', 10),
+      listenPort:     parseInt(get('listenPort') || '0', 10),
+      cacheTtl:       (isNaN(ttlSec) ? 30 : ttlSec) * 1000,
+      cacheMaxSize:   parseInt(get('maxSize') || '1000', 10),
+      preferNetwork:  net !== '' ? net as PreferNetwork : undefined,
     };
   }
 

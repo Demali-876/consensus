@@ -8,7 +8,7 @@ import { loadConfig, fmtUsd, fmtBytes, fmtUptime } from '../lib/config.ts';
 import { proxyFetch }                              from '../lib/proxy.ts';
 import { getFlagValue, hasFlag }                   from '../lib/flags.ts';
 import { dispatchProxy }                           from '../../src/proxy-worker.js';
-import { createPaymentFetch }                      from '../../src/payment-fetch.js';
+import { createPaymentFetch, type PreferNetwork }  from '../../src/payment-fetch.js';
 
 export async function runProxyCommand(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
@@ -61,10 +61,12 @@ export async function runProxyCommand(args: string[]): Promise<void> {
 
   // ── proxy start ─────────────────────────────────────────────────────────────
   if (sub === 'start') {
-    const port     = Number(getFlagValue(rest, '--port') ?? 8080);
-    const budget   = getFlagValue(rest, '--budget') ? Number(getFlagValue(rest, '--budget')) : undefined;
-    const region   = getFlagValue(rest, '--region');
-    const cacheTtl = getFlagValue(rest, '--cache-ttl') ? Number(getFlagValue(rest, '--cache-ttl')) : undefined;
+    const port          = Number(getFlagValue(rest, '--port') ?? 8080);
+    const budget        = getFlagValue(rest, '--budget') ? Number(getFlagValue(rest, '--budget')) : undefined;
+    const region        = getFlagValue(rest, '--region');
+    const cacheTtl      = getFlagValue(rest, '--cache-ttl') ? Number(getFlagValue(rest, '--cache-ttl')) : undefined;
+    const networkRaw    = getFlagValue(rest, '--network');
+    const preferNetwork = networkRaw ? networkRaw as PreferNetwork : undefined;
 
     console.log(chalk.blue.bold('Consensus Forward Proxy'));
     console.log(chalk.dim('─'.repeat(40)));
@@ -72,6 +74,7 @@ export async function runProxyCommand(args: string[]): Promise<void> {
     if (cfg.leased_node)         console.log(`  Node:   ${chalk.cyan(cfg.leased_node.domain)} ${chalk.dim('(leased)')}`);
     else if (region)             console.log(`  Region: ${chalk.white(region)}`);
     if (budget !== undefined)    console.log(`  Budget: ${chalk.white(fmtUsd(budget))}`);
+    if (preferNetwork)           console.log(`  Network: ${chalk.white(preferNetwork)}`);
     console.log(chalk.dim(`\nSet HTTP_PROXY=http://127.0.0.1:${port} in your client.\n`));
 
     const stats = { requests: 0, spend: 0, bytesSent: 0, bytesRecv: 0 };
@@ -80,12 +83,13 @@ export async function runProxyCommand(args: string[]): Promise<void> {
     let worker: Awaited<ReturnType<typeof dispatchProxy>>;
     try {
       worker = await dispatchProxy({
-        type:       'forward',
+        type:          'forward',
         port,
         budget,
-        nodeRegion: region ?? cfg.leased_node?.region,
-        nodeDomain: cfg.leased_node?.domain,
+        nodeRegion:    region ?? cfg.leased_node?.region,
+        nodeDomain:    cfg.leased_node?.domain,
         cacheTtl,
+        preferNetwork,
         onStats: (s) => Object.assign(stats, {
           requests:  s.requests,
           spend:     s.spend ?? 0,
@@ -135,20 +139,24 @@ export async function runProxyCommand(args: string[]): Promise<void> {
       process.exit(1);
     }
 
-    const listenPort = getFlagValue(rest, '--port') ? Number(getFlagValue(rest, '--port')) : undefined;
+    const listenPort    = getFlagValue(rest, '--port') ? Number(getFlagValue(rest, '--port')) : undefined;
+    const networkRaw2   = getFlagValue(rest, '--network');
+    const preferNetwork = networkRaw2 ? networkRaw2 as PreferNetwork : undefined;
 
     console.log(chalk.blue.bold('Consensus Reverse Proxy'));
     console.log(chalk.dim('─'.repeat(40)));
     console.log(`  Upstream: ${chalk.white(`${upstreamHost}:${upstreamPort}`)}`);
-    if (listenPort) console.log(`  Listen:   ${chalk.white(listenPort)}`);
+    if (listenPort)    console.log(`  Listen:   ${chalk.white(listenPort)}`);
+    if (preferNetwork) console.log(`  Network:  ${chalk.white(preferNetwork)}`);
     console.log(chalk.dim('\n  Press Ctrl+C to stop\n'));
 
     let worker: Awaited<ReturnType<typeof dispatchProxy>>;
     try {
       worker = await dispatchProxy({
-        type:     'reverse',
-        upstream: { host: upstreamHost, port: upstreamPort },
-        port:     listenPort,
+        type:          'reverse',
+        upstream:      { host: upstreamHost, port: upstreamPort },
+        port:          listenPort,
+        preferNetwork,
       });
     } catch (err) {
       console.error(chalk.red('Failed to start reverse proxy:'), (err as Error).message);

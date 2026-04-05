@@ -1,12 +1,15 @@
 import { privateKeyToAccount }          from 'viem/accounts';
 import { createKeyPairSignerFromBytes } from '@solana/signers';
 import { base58 }                       from '@scure/base';
-import { pemToSigner }                  from '@canister-software/x402-icp/client';
+import { createIdentitySigner, type IcpSigner } from '@canister-software/x402-icp/client';
+import { readFileSync }                 from 'node:fs';
+import { resolve }                      from 'node:path';
+import { homedir }                      from 'node:os';
 
 export type ResolvedSigners = {
   evm?: ReturnType<typeof privateKeyToAccount>;
   svm?: Awaited<ReturnType<typeof createKeyPairSignerFromBytes>>;
-  icp?: Awaited<ReturnType<typeof pemToSigner>>;
+  icp?: IcpSigner;
 };
 
 /**
@@ -30,7 +33,12 @@ export async function resolveSigners(): Promise<ResolvedSigners> {
   }
 
   if (process.env.CONSENSUS_PEM_PATH) {
-    signers.icp = await pemToSigner(process.env.CONSENSUS_PEM_PATH);
+    const pemPath  = process.env.CONSENSUS_PEM_PATH;
+    const resolved = resolve(pemPath.replace(/^~/, homedir()));
+    const pem      = readFileSync(resolved, 'utf8');
+    const { Secp256k1KeyIdentity } = await import('@dfinity/identity-secp256k1');
+    const identity = Secp256k1KeyIdentity.fromPem(pem);
+    signers.icp    = await createIdentitySigner({ identity });
   }
 
   if (!signers.evm && !signers.svm && !signers.icp) {

@@ -269,10 +269,28 @@ export class ConsensusSDK {
     const svmSigner = await createKeyPairSignerFromBytes(base58.decode(svmKey));
     console.log(chalk.dim(`  ✓ Solana address: ${svmSigner.address}`));
 
-    const writtenTo = writeToShellProfile({
+    const { pemPath } = await inquirer.prompt<{ pemPath: string }>([{
+      type:    'input',
+      name:    'pemPath',
+      message: 'ICP PEM file path (leave blank to skip):',
+      validate: (v: string) => {
+        if (!v.trim()) return true;
+        const resolved = path.resolve(v.trim().replace(/^~/, os.homedir()));
+        return fs.existsSync(resolved) || `File not found: ${resolved}`;
+      },
+    }]);
+    const resolvedPem = pemPath.trim()
+      ? path.resolve(pemPath.trim().replace(/^~/, os.homedir()))
+      : null;
+    if (resolvedPem) console.log(chalk.dim(`  ✓ ICP PEM:     ${resolvedPem}`));
+
+    const profileExports: Record<string, string> = {
       CONSENSUS_EVM_KEY: evmKey.startsWith('0x') ? evmKey : `0x${evmKey}`,
       CONSENSUS_SVM_KEY: svmKey,
-    });
+    };
+    if (resolvedPem) profileExports['CONSENSUS_PEM_PATH'] = resolvedPem;
+
+    const writtenTo = writeToShellProfile(profileExports);
 
     this.saveConfig({
       wallet_name:    'self-managed',
@@ -286,6 +304,7 @@ export class ConsensusSDK {
     console.log(chalk.green.bold('\n✅ Self-managed setup complete!\n'));
     console.log(chalk.cyan('EVM address:   '), evmAccount.address);
     console.log(chalk.cyan('Solana address:'), svmSigner.address);
+    if (resolvedPem) console.log(chalk.cyan('ICP PEM:       '), resolvedPem);
     console.log(chalk.cyan('Keys written to:'));
     writtenTo.forEach((p) => console.log(chalk.dim(`  ${p}`)));
     console.log(chalk.yellow('\n⚠️  Activate in current session:'));
