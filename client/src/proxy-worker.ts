@@ -1,9 +1,9 @@
 import http from 'node:http';
 import net  from 'node:net';
 
-import { ProxyClient }                        from './proxy-client.js';
-import { createPaymentFetch }                 from './payment-fetch.js';
-import type { ResolvedSigners as ResolvedWallet  }                from './wallet.js';
+import { ProxyClient }                          from './proxy-client.js';
+import { createPaymentFetch, type PreferNetwork } from './payment-fetch.js';
+import type { ResolvedSigners as ResolvedWallet }  from './wallet.js';
 
 type FetchFn = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -112,6 +112,11 @@ export type ReverseWorkerOptions = {
    * Passed to createPaymentFetch() internally; ignored if `fetchFn` is set.
    */
   wallet?:  ResolvedWallet;
+  /**
+   * Preferred payment network family when multiple signers are available.
+   * 'eip155' | 'solana' | 'icp' — falls back to server ordering if omitted.
+   */
+  preferNetwork?: PreferNetwork;
   cache?: {
     /** Local response TTL in milliseconds (default 30 000). Cache hits skip the consensus network entirely. */
     ttl?:     number;
@@ -168,6 +173,11 @@ export type ForwardWorkerOptions = {
   nodeExclude?:    string;
   /** Enable verbose proxy response payload. */
   verbose?:        boolean;
+  /**
+   * Preferred payment network when multiple signers are available.
+   * 'eip155' | 'solana' | 'icp' — falls back to server ordering if omitted.
+   */
+  preferNetwork?:  PreferNetwork;
   /** Called after every request with updated stats. */
   onStats?:     (stats: WorkerStats) => void;
 };
@@ -181,7 +191,10 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
   const counters  = { requests: 0, bytesSent: 0, bytesRecv: 0, spend: 0 };
   const cache     = new ResponseCache(opts.cache?.ttl ?? 30_000, opts.cache?.maxSize ?? 1_000);
 
-  const fetchFn = opts.fetchFn ?? await createPaymentFetch({ signers: opts.wallet });
+  const fetchFn = opts.fetchFn ?? await createPaymentFetch({
+    signers:       opts.wallet,
+    preferNetwork: opts.preferNetwork,
+  });
 
   const client = ProxyClient(fetchFn as Parameters<typeof ProxyClient>[0], {
     strategy:         'manual',
@@ -303,7 +316,10 @@ async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorke
   const counters  = { requests: 0, bytesSent: 0, bytesRecv: 0, spend: 0 };
 
   // Resolve fetch: explicit > auto-built from env (wallet key consumed, never stored).
-  const fetchFn = opts.fetchFn ?? await createPaymentFetch({ signers: opts.wallet  });
+  const fetchFn = opts.fetchFn ?? await createPaymentFetch({
+    signers:       opts.wallet,
+    preferNetwork: opts.preferNetwork,
+  });
 
   const client = ProxyClient(fetchFn as Parameters<typeof ProxyClient>[0], {
     strategy:         'manual',
