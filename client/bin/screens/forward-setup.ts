@@ -227,11 +227,9 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
   function renderAll(): void {
     fields.forEach((f, i) => renderField(f, i, state));
     renderWallet();
-    const shown     = detectedPorts.slice(0, MAX_SHOWN);
-    const shortcut  = shown.length > 0 ? `[1-${shown.length}  select]  ` : '';
     hintsRef.content = state.editing
       ? '[↵  confirm]  [esc  cancel]'
-      : `${shortcut}[R  rescan]  [↑↓  navigate]  [↵/←/→  edit·toggle]  [S  start]  [B  back]`;
+      : '[R  rescan]  [↑↓  navigate]  [↵/←/→  edit·toggle]  [S  start]  [B  back]';
   }
 
   renderAll();
@@ -264,13 +262,6 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
       if (!state.editing) {
         if (key.name === 'r' || key.name === 'R') { rescan(); return; }
 
-        const num   = parseInt(key.name ?? '');
-        const shown = detectedPorts.slice(0, MAX_SHOWN);
-        if (!isNaN(num) && num >= 1 && num <= shown.length) {
-          fields.find(f => f.id === 'listenPort')!.value = String(shown[num - 1]!);
-          renderAll();
-          return;
-        }
       }
 
       const action = handleKey(key, fields, state, renderAll);
