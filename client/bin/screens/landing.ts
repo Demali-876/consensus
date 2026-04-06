@@ -422,7 +422,12 @@ export async function showLanding(): Promise<LandingAction> {
   renderPalette();
 
   // ── Background: server health ─────────────────────────────────────────────
+  // `live` guards every async callback — set to false in done() before
+  // renderer.destroy() so nothing writes to a dead TextBuffer.
+  let live = true;
+
   const applyStatus = (content: string, fg: string) => {
+    if (!live) return;
     savedStatusContent = content;
     savedStatusFg      = fg;
     if (!proxyDropdownOpen) { statusText.content = content; statusText.fg = fg; }
@@ -439,8 +444,10 @@ export async function showLanding(): Promise<LandingAction> {
   const fetchStats = () => {
     fetch(`${SERVER}/stats`, { signal: AbortSignal.timeout(4000) })
       .then(async (r) => {
+        if (!live) return;
         if (!r.ok) return;
         const d = await r.json() as Record<string, unknown>;
+        if (!live) return;
         if (typeof d.nodes    === 'number') netNodes.content   = String(d.nodes);
         if (typeof d.healthy  === 'number') netHealthy.content = String(d.healthy);
         if (typeof d.latency  === 'number') netLatency.content = `${d.latency}ms`;
@@ -456,12 +463,14 @@ export async function showLanding(): Promise<LandingAction> {
   // ── Key input ─────────────────────────────────────────────────────────────
   return new Promise<LandingAction>((resolve) => {
     const done = (action: LandingAction) => {
+      live = false;
       clearInterval(statsTimer);
       renderer.destroy();
       resolve(action);
     };
 
     renderer.keyInput.on('keypress', (key) => {
+      if (!live) return;
       if (key.ctrl && key.name === 'c') { done('quit'); return; }
 
       // ── Proxy dropdown mode ──────────────────────────────────────────────
