@@ -1,17 +1,29 @@
 {
   "name": "@canister-software/consensus-cli",
-  "version": "0.1.0-beta.5",
+  "version": "0.1.0-beta.6",
   "description": "Consensus SDK for interacting with the Consensus protocol",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "bun":     "./src/index.ts",
+      "import":  "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types":   "./dist/index.d.ts"
+    },
     "./cli": "./bin/consensus.ts"
   },
   "bin": {
     "consensus": "./bin/consensus.ts"
   },
   "scripts": {
+    "clean":       "rm -rf dist",
+    "build":       "bun run clean && bun run build:esm && bun run build:cjs && bun run build:types",
+    "build:esm":   "bun build src/index.ts --outfile dist/index.js  --format esm --target node --packages=external",
+    "build:cjs":   "bun build src/index.ts --outfile dist/index.cjs --format cjs --target node --packages=external",
+    "build:types": "tsc -p tsconfig.build.json",
     "consensus": "bun bin/consensus.ts",
     "setup": "bun bin/consensus.ts setup",
     "reset": "bun bin/consensus.ts setup --force",
@@ -36,7 +48,9 @@
   "devDependencies": {
     "@types/inquirer": "^9.0.9",
     "@types/ws": "^8.18.1",
-    "bun-types": "latest"
+    "@types/node": "^20.0.0",
+    "bun-types": "latest",
+    "typescript": "^5.0.0"
   },
   "keywords": [
     "consensus",
@@ -50,11 +64,13 @@
   "author": "Demali Gregg",
   "license": "MIT",
   "engines": {
-    "bun": ">=1.3.0"
+    "bun":  ">=1.3.0",
+    "node": ">=18.0.0"
   },
   "files": [
     "src/",
     "bin/",
+    "dist/",
     "README.md",
     "LICENSE",
     "assets/"

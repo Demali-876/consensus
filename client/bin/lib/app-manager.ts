@@ -188,7 +188,7 @@ export async function launchManagedApp(
   if (state.process) await stopManagedApp(state);
   if (opts.appPort) await stopExistingListener(opts.appPort, logPath);
 
-  const proc = Bun.spawn(['zsh', '-lc', state.command], {
+  const proc = Bun.spawn([process.env.SHELL ?? 'zsh', '-lc', state.command], {
     cwd: opts.cwd ?? state.cwd ?? process.cwd(),
     env: {
       ...process.env,

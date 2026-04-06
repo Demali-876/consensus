@@ -52,15 +52,14 @@ export type PaymentFetchOptions = {
  * will always attempt to pay on that chain family first.
  */
 export async function createPaymentFetch(opts: PaymentFetchOptions = {}): Promise<FetchFn> {
-  console.log(`[PaymentFetch] resolving signers${opts.preferNetwork ? ` for ${opts.preferNetwork}` : ''}`);
   const signers   = opts.signers ?? await resolveSigners({ preferNetwork: opts.preferNetwork });
   const baseFetch = opts.fetch   ?? globalThis.fetch;
 
   const selector = opts.preferNetwork
-    ? (_version: number, accepts: Array<{ network: string }>) => {
+    ? ((_version: number, accepts: Array<{ network: string }>) => {
         const preferred = accepts.find(r => r.network.startsWith(opts.preferNetwork!));
         return (preferred ?? accepts[0]) as typeof accepts[0];
-      }
+      }) as unknown as ConstructorParameters<typeof x402Client>[0]
     : undefined;
 
   const client = new x402Client(selector);
@@ -68,12 +67,6 @@ export async function createPaymentFetch(opts: PaymentFetchOptions = {}): Promis
   if (signers.evm) registerExactEvmScheme(client, { signer: signers.evm });
   if (signers.svm) registerExactSvmScheme(client, { signer: signers.svm });
   if (signers.icp) registerExactIcpScheme(client, { signer: signers.icp });
-
-  console.log(`[PaymentFetch] ready with signers: ${[
-    signers.evm && 'evm',
-    signers.svm && 'solana',
-    signers.icp && 'icp',
-  ].filter(Boolean).join(', ')}`);
 
   return wrapFetchWithPayment(baseFetch, client) as FetchFn;
 }

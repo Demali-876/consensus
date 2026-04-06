@@ -10,6 +10,10 @@ import inquirer                              from 'inquirer';
 import ora                                   from 'ora';
 import chalk                                 from 'chalk';
 
+const PKG_VERSION: string = (
+  JSON.parse(fs.readFileSync(path.join(import.meta.dir, '../../package.json'), 'utf8')) as { version: string }
+).version;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type WalletConfig = {
@@ -349,7 +353,7 @@ export class ConsensusSDK {
         api_key,
         x402_proxy_url: this.x402ProxyUrl,
         setup_date:     new Date().toISOString(),
-        version:        '2.0.0',
+        version:        PKG_VERSION,
       });
 
       console.log(chalk.green.bold('\n✅ Setup complete!\n'));
