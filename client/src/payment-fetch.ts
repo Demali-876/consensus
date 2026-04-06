@@ -52,7 +52,8 @@ export type PaymentFetchOptions = {
  * will always attempt to pay on that chain family first.
  */
 export async function createPaymentFetch(opts: PaymentFetchOptions = {}): Promise<FetchFn> {
-  const signers   = opts.signers ?? await resolveSigners();
+  console.log(`[PaymentFetch] resolving signers${opts.preferNetwork ? ` for ${opts.preferNetwork}` : ''}`);
+  const signers   = opts.signers ?? await resolveSigners({ preferNetwork: opts.preferNetwork });
   const baseFetch = opts.fetch   ?? globalThis.fetch;
 
   const selector = opts.preferNetwork
@@ -67,6 +68,12 @@ export async function createPaymentFetch(opts: PaymentFetchOptions = {}): Promis
   if (signers.evm) registerExactEvmScheme(client, { signer: signers.evm });
   if (signers.svm) registerExactSvmScheme(client, { signer: signers.svm });
   if (signers.icp) registerExactIcpScheme(client, { signer: signers.icp });
+
+  console.log(`[PaymentFetch] ready with signers: ${[
+    signers.evm && 'evm',
+    signers.svm && 'solana',
+    signers.icp && 'icp',
+  ].filter(Boolean).join(', ')}`);
 
   return wrapFetchWithPayment(baseFetch, client) as FetchFn;
 }

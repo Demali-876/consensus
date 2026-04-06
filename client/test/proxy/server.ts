@@ -6,6 +6,15 @@ const somedata = "here's some data!";
 const server = Bun.serve({
   port: 3012,
   routes: {
+    "/": {
+      async GET() {
+        return Response.json({
+          ok: true,
+          service: "proxy-test-server",
+          routes: ["/", "/dataplease", "/geticpprice"],
+        });
+      },
+    },
     "/geticpprice": {
       async GET() {
         const upstreamResponse = await fetch(ICP_PRICE_URL);

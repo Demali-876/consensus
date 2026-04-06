@@ -30,6 +30,8 @@ const DEV_PROCESSES = new Set([
 ]);
 
 export const SPINNER = ['◐', '◓', '◑', '◒'] as const;
+export const PROXY_PORT_CANDIDATES = [8080, 8081, 8787, 8888, 9000, 9090] as const;
+export const REVERSE_PROXY_PORT_CANDIDATES = [8081, 8080, 8788, 8889, 9001, 9091] as const;
 
 export type ScannedPort = {
   port:      number;
@@ -153,4 +155,13 @@ export async function scanAll(): Promise<ScannedPort[]> {
   }
 
   return result;
+}
+
+export function chooseDefaultPort(
+  usedPorts: number[],
+  candidates: readonly number[],
+  fallback: number,
+): number {
+  const used = new Set(usedPorts);
+  return candidates.find((port) => !used.has(port)) ?? fallback;
 }

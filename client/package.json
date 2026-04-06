@@ -14,7 +14,8 @@
   "scripts": {
     "consensus": "bun bin/consensus.ts",
     "setup": "bun bin/consensus.ts setup",
-    "reset": "bun bin/consensus.ts setup --force"
+    "reset": "bun bin/consensus.ts setup --force",
+    "startproxyserver": "bun test/proxy/server.ts"
   },
   "dependencies": {
     "@canister-software/x402-icp": "^0.1.1",

@@ -1,11 +1,3 @@
-/**
- * WebSockets screen — interactive WebSocket session manager
- *
- * Keys:
- *   1  Get token (displays token + connect_url)
- *   2  Connect session (interactive stdin ↔ ws relay)
- *   B  Back to landing
- */
 import inquirer from 'inquirer';
 import chalk    from 'chalk';
 import {

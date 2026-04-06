@@ -2,6 +2,7 @@
 
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { C }                     from '../theme';
+import type { AppState } from '../lib/app-manager.js';
 import type { ProxyWorkerHandle } from '../../src/proxy-worker.js';
 
 export type WorkerEntry = {
@@ -9,6 +10,11 @@ export type WorkerEntry = {
   startedAt: number;
   label:     string;
   budget?:   number;
+  appPort?:  number;
+  appCommand?: string;
+  appCheckPath?: string;
+  autoLaunch?: boolean;
+  managedApp?: AppState;
 };
 
 // Persists across screen navigations

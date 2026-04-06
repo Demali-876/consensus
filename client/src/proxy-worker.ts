@@ -22,6 +22,18 @@ export type WorkerStats = {
   uptime:    number;
   /** Total USD spent on x402 payments (forward mode only). */
   spend?:    number;
+  /** Last request latency in milliseconds. */
+  currentLatencyMs?: number;
+  /** Average latency across recent requests. */
+  avgLatencyMs?: number;
+  /** 95th percentile latency across recent requests. */
+  p95LatencyMs?: number;
+  /** Rolling recent latency samples. */
+  recentLatencies?: number[];
+  /** Rolling recent request outcomes (true = success). */
+  recentOutcomes?: boolean[];
+  /** Last observed upstream/downstream HTTP status code. */
+  lastStatusCode?: number;
 };
 
 export type ProxyWorkerHandle = {
@@ -42,6 +54,25 @@ interface CacheEntry {
   body:       string;
   expiresAt:  number;
   hits:       number;
+}
+
+const MAX_HISTORY = 40;
+
+function pushRecent<T>(items: T[], value: T): void {
+  items.push(value);
+  if (items.length > MAX_HISTORY) items.shift();
+}
+
+function average(values: number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function percentile(values: number[], pct: number): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((pct / 100) * sorted.length) - 1));
+  return sorted[idx];
 }
 
 class ResponseCache {
@@ -69,13 +100,40 @@ class ResponseCache {
 
 // ─── Bind helper — auto-assigns OS port when preferred is undefined ───────────
 
-function bindServer(server: http.Server, preferred?: number): Promise<number> {
+function bindServer(server: http.Server, preferred?: number, label = 'proxy'): Promise<number> {
   return new Promise((resolve, reject) => {
-    server.listen(preferred ?? 0, () => {
-      const addr = server.address();
-      resolve(addr && typeof addr === 'object' ? addr.port : 0);
-    });
-    server.once('error', reject);
+    const requestedPort = preferred ?? 0;
+    const timeout = setTimeout(() => {
+      server.off('error', onError);
+      reject(new Error(`[${label}] listen() timed out before binding port ${requestedPort}`));
+    }, 5000);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      server.off('error', onError);
+    };
+
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+
+    server.once('error', onError);
+
+    try {
+      server.listen(requestedPort, () => {
+        cleanup();
+        const addr = server.address();
+        if (!addr || typeof addr !== 'object') {
+          reject(new Error(`[${label}] listen() completed without a usable address`));
+          return;
+        }
+        resolve(addr.port);
+      });
+    } catch (err) {
+      cleanup();
+      reject(err);
+    }
   });
 }
 
@@ -190,6 +248,29 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
   const startedAt = Date.now();
   const counters  = { requests: 0, bytesSent: 0, bytesRecv: 0, spend: 0 };
   const cache     = new ResponseCache(opts.cache?.ttl ?? 30_000, opts.cache?.maxSize ?? 1_000);
+  const recentLatencies: number[] = [];
+  const recentOutcomes: boolean[] = [];
+  let lastStatusCode: number | undefined;
+
+  console.log(`[ReverseProxy] startup requested on :${opts.port ?? 'auto'}`);
+
+  const recordResult = (latencyMs: number, ok: boolean, statusCode?: number) => {
+    pushRecent(recentLatencies, latencyMs);
+    pushRecent(recentOutcomes, ok);
+    if (statusCode !== undefined) lastStatusCode = statusCode;
+  };
+
+  const snapshot = (): WorkerStats => ({
+    ...counters,
+    cacheHits: cache.hits,
+    uptime: Date.now() - startedAt,
+    currentLatencyMs: recentLatencies.at(-1),
+    avgLatencyMs: average(recentLatencies),
+    p95LatencyMs: percentile(recentLatencies, 95),
+    recentLatencies: [...recentLatencies],
+    recentOutcomes: [...recentOutcomes],
+    lastStatusCode,
+  });
 
   const fetchFn = opts.fetchFn ?? await createPaymentFetch({
     signers:       opts.wallet,
@@ -200,8 +281,7 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
     strategy:         'manual',
     cache_ttl:        opts.cacheTtl,
     limit_usd:        opts.budget,
-    on_limit_reached: () =>
-      opts.onStats?.({ ...counters, uptime: Date.now() - startedAt }),
+    on_limit_reached: () => opts.onStats?.(snapshot()),
   });
 
   function defaultCacheable(req: http.IncomingMessage): boolean {
@@ -212,6 +292,7 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
   }
 
   const server = http.createServer(async (req, res) => {
+    const requestStartedAt = Date.now();
     counters.requests++;
     const cacheKey = `${req.method}:${req.url}`;
     const tryCache = defaultCacheable(req);
@@ -225,7 +306,8 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
         res.writeHead(rctx.statusCode, { ...rctx.headers, 'x-cache': 'HIT', 'x-cache-hits': String(entry.hits) });
         counters.bytesSent += entry.body.length;
         res.end(entry.body);
-        opts.onStats?.({ ...counters, cacheHits: cache.hits, uptime: Date.now() - startedAt });
+        recordResult(Date.now() - requestStartedAt, true, rctx.statusCode);
+        opts.onStats?.(snapshot());
         return;
       }
     }
@@ -287,22 +369,25 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
       counters.spend      = client.getBudget().spent_usd;
       res.end(body);
 
-      opts.onStats?.({ ...counters, cacheHits: cache.hits, uptime: Date.now() - startedAt });
+      recordResult(Date.now() - requestStartedAt, true, rctx.statusCode);
+      opts.onStats?.(snapshot());
     } catch (err) {
       if (opts.hooks?.onError) { opts.hooks.onError(err as Error, req, res); return; }
-      if (!res.headersSent) { res.writeHead(502); res.end(`Bad Gateway: ${(err as Error).message}`); }
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end(`Bad Gateway: ${(err as Error).message}`);
+      }
+      recordResult(Date.now() - requestStartedAt, false, 502);
     }
   });
 
-  const port = await bindServer(server, opts.port);
-  console.log(
-    `[ReverseProxy] :${port} → consensus → ${opts.upstream.protocol ?? 'http'}://${opts.upstream.host}:${opts.upstream.port}`,
-  );
+  const port = await bindServer(server, opts.port, 'reverse proxy');
+  console.log(`[ReverseProxy] listening on :${port}`);
 
   return {
     type: 'reverse',
     port,
-    stats: () => ({ ...counters, cacheHits: cache.hits, uptime: Date.now() - startedAt }),
+    stats: snapshot,
     stop:  () => new Promise((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
     ),
@@ -314,6 +399,29 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
 async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorkerHandle> {
   const startedAt = Date.now();
   const counters  = { requests: 0, bytesSent: 0, bytesRecv: 0, spend: 0 };
+  const recentLatencies: number[] = [];
+  const recentOutcomes: boolean[] = [];
+  let lastStatusCode: number | undefined;
+
+  console.log(`[ForwardProxy] startup requested on :${opts.port ?? 'auto'}`);
+
+  const recordResult = (latencyMs: number, ok: boolean, statusCode?: number) => {
+    pushRecent(recentLatencies, latencyMs);
+    pushRecent(recentOutcomes, ok);
+    if (statusCode !== undefined) lastStatusCode = statusCode;
+  };
+
+  const snapshot = (): WorkerStats => ({
+    ...counters,
+    uptime: Date.now() - startedAt,
+    spend: counters.spend,
+    currentLatencyMs: recentLatencies.at(-1),
+    avgLatencyMs: average(recentLatencies),
+    p95LatencyMs: percentile(recentLatencies, 95),
+    recentLatencies: [...recentLatencies],
+    recentOutcomes: [...recentOutcomes],
+    lastStatusCode,
+  });
 
   // Resolve fetch: explicit > auto-built from env (wallet key consumed, never stored).
   const fetchFn = opts.fetchFn ?? await createPaymentFetch({
@@ -332,12 +440,12 @@ async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorke
     routes:           opts.routes,
     matchSubroutes:   opts.matchSubroutes,
     verbose:          opts.verbose,
-    on_limit_reached: () =>
-      opts.onStats?.({ ...counters, uptime: Date.now() - startedAt }),
+    on_limit_reached: () => opts.onStats?.(snapshot()),
 
   });
 
   const server = http.createServer(async (req, res) => {
+    const requestStartedAt = Date.now();
     counters.requests++;
 
     try {
@@ -361,13 +469,16 @@ async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorke
         : JSON.stringify(result.data);
 
       counters.bytesSent       += body.length;
+      counters.bytesRecv       += body.length;
       counters.spend            = client.getBudget().spent_usd;
       res.end(body);
 
-      opts.onStats?.({ ...counters, uptime: Date.now() - startedAt });
+      recordResult(Date.now() - requestStartedAt, true, result.status);
+      opts.onStats?.(snapshot());
     } catch (err) {
       res.writeHead(502);
       res.end(err instanceof Error ? err.message : 'Proxy error');
+      recordResult(Date.now() - requestStartedAt, false, 502);
     }
   });
 
@@ -388,13 +499,13 @@ async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorke
     clientSocket.on('error', () => serverSocket.destroy());
   });
 
-  const port = await bindServer(server, opts.port);
-  console.log(`[ForwardProxy] :${port} → consensus network`);
+  const port = await bindServer(server, opts.port, 'forward proxy');
+  console.log(`[ForwardProxy] listening on :${port}`);
 
   return {
     type: 'forward',
     port,
-    stats: () => ({ ...counters, uptime: Date.now() - startedAt }),
+    stats: snapshot,
     stop:  () => new Promise((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
     ),

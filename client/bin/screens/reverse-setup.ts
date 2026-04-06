@@ -1,7 +1,8 @@
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { C } from '../theme';
+import { writeTraceLog } from '../lib/crash-log';
 import { type FieldDef, type FormState, renderField, handleKey } from '../lib/form.ts';
-import { scanPorts, HTTP_PORTS, SPINNER } from '../lib/ports.ts';
+import { chooseDefaultPort, REVERSE_PROXY_PORT_CANDIDATES, scanPorts, HTTP_PORTS, SPINNER } from '../lib/ports.ts';
 import type { PreferNetwork } from '../../src/payment-fetch.js';
 import { NETWORK_CAIP2S, NETWORK_LABELS } from '../lib/networks.ts';
 
@@ -57,12 +58,13 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
 
   // ── Form phase ────────────────────────────────────────────────────────────────
   const firstPort = openPorts[0];
+  const defaultListenPort = chooseDefaultPort(openPorts, REVERSE_PROXY_PORT_CANDIDATES, 8081);
 
   const fields: FieldDef[] = [
     { id: 'host',       label: 'Host',        hint: 'upstream host',         type: 'text',   value: firstPort ? 'localhost' : '' },
     { id: 'port',       label: 'Port',        hint: 'upstream port',         type: 'text',   value: firstPort ? String(firstPort) : '' },
     { id: 'protocol',   label: 'Protocol',    hint: 'http / https',          type: 'toggle', value: 'http', options: ['http', 'https'] },
-    { id: 'listenPort', label: 'Listen port', hint: '0 = auto-assign',       type: 'text',   value: '0' },
+    { id: 'listenPort', label: 'Listen port', hint: 'local proxy bind port', type: 'text',   value: String(defaultListenPort) },
     { id: 'cacheTtl',   label: 'Cache TTL',   hint: 'seconds, 0 = off',      type: 'text',   value: '30' },
     { id: 'maxSize',    label: 'Max entries', hint: 'max cached responses',   type: 'text',   value: '1000' },
     { id: 'network', label: 'Pay network', hint: '←/→ or ↵ to select', type: 'toggle',
@@ -147,8 +149,10 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
   // DETECTED state
   let detectedPorts = openPorts;
   let scanning      = false;
+  let live          = true;
 
   function renderDetected(): void {
+    if (!live) return;
     const shown = detectedPorts.slice(0, MAX_SHOWN);
     for (let i = 0; i < MAX_SHOWN; i++) {
       if (shown[i] != null) {
@@ -169,6 +173,7 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
     detectedRefs[0]!.fg      = C.slate;
     let si = 0;
     const t = setInterval(() => {
+      if (!live) { clearInterval(t); return; }
       si = (si + 1) % SPINNER.length;
       detectedRefs[0]!.content = `  ${SPINNER[si]}  scanning…`;
     }, 150);
@@ -202,15 +207,26 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
         port:     parseInt(get('port') || '3000', 10),
         protocol: get('protocol') as 'http' | 'https',
       },
-      listenPort:     parseInt(get('listenPort') || '0', 10),
+      listenPort:     (() => {
+        const listenPort = parseInt(get('listenPort'), 10);
+        return !isNaN(listenPort) && listenPort > 0 ? listenPort : defaultListenPort;
+      })(),
       cacheTtl:       (isNaN(ttlSec) ? 30 : ttlSec) * 1000,
       cacheMaxSize:   parseInt(get('maxSize') || '1000', 10),
       preferNetwork:  net !== '' ? net as PreferNetwork : undefined,
     };
   }
 
+  const done = (result: ReverseSetupResult | null) => {
+    writeTraceLog('reverseSetup.done', { result });
+    live = false;
+    renderer.destroy();
+    return result;
+  };
+
   return new Promise<ReverseSetupResult | null>((resolve) => {
     renderer.keyInput.on('keypress', (key) => {
+      if (!live) return;
       if (!state.editing) {
         if (key.name === 'r' || key.name === 'R') { rescan(); return; }
 
@@ -225,8 +241,14 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
       }
 
       const action = handleKey(key, fields, state, renderAll);
-      if (action === 'start') { renderer.destroy(); resolve(collect()); }
-      if (action === 'back')  { renderer.destroy(); resolve(null); }
+      if (action === 'start') {
+        writeTraceLog('reverseSetup.action', { action, key: key.name });
+        resolve(done(collect()));
+      }
+      if (action === 'back')  {
+        writeTraceLog('reverseSetup.action', { action, key: key.name });
+        resolve(done(null));
+      }
     });
   });
 }
