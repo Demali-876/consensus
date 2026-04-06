@@ -66,16 +66,49 @@ function classifyProcess(raw: string): { label: string; isSystem: boolean } {
   return { label: raw.split('/').pop() ?? raw, isSystem: true };
 }
 
-export async function scanPorts(ports: number[], timeoutMs = 200): Promise<number[]> {
+export async function scanPorts(fallbackPorts: number[] = HTTP_PORTS, timeoutMs = 300): Promise<number[]> {
+  // ── lsof discovery ─────────────────────────────────────────────────────────
+  // Finds every dev server regardless of port number. Falls back to TCP probe.
+  try {
+    const raw = execSync(
+      'lsof -iTCP -sTCP:LISTEN -n -P 2>/dev/null',
+      { encoding: 'utf8', timeout: 3000 },
+    );
+
+    const ports: number[] = [];
+    for (const line of raw.split('\n').slice(1)) {
+      const cols    = line.trim().split(/\s+/);
+      const command = cols[0] ?? '';
+      const nameCol = cols[8] ?? '';
+      const base    = command.split('/').pop()?.toLowerCase().replace(/[\d.]+$/, '') ?? '';
+      const isDev   = DEV_PROCESSES.has(base)
+        || base.startsWith('bun')
+        || base.startsWith('node')
+        || base.startsWith('python')
+        || base.startsWith('deno')
+        || base.startsWith('java');
+      if (!isDev) continue;
+
+      const portStr = nameCol.split(':').pop();
+      if (!portStr || portStr === '*') continue;
+      const port = parseInt(portStr, 10);
+      if (!isNaN(port) && port > 1024 && port < 65535) ports.push(port);
+    }
+
+    const unique = [...new Set(ports)].sort((a, b) => a - b);
+    if (unique.length > 0) return unique;
+  } catch { /* lsof unavailable — fall through */ }
+
+  // ── TCP probe fallback ──────────────────────────────────────────────────────
   const results = await Promise.all(
-    ports.map(port =>
+    fallbackPorts.map(port =>
       new Promise<number | null>(resolve => {
         const sock  = net.createConnection({ host: '127.0.0.1', port });
         const timer = setTimeout(() => { sock.destroy(); resolve(null); }, timeoutMs);
         sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(port); });
         sock.once('error',   () => { clearTimeout(timer); resolve(null); });
-      })
-    )
+      }),
+    ),
   );
   return results.filter((p): p is number => p !== null);
 }
