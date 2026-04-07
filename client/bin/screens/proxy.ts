@@ -3,10 +3,20 @@ import { showForwardSetup }   from './forward-setup.js';
 import { showReverseSetup }   from './reverse-setup.js';
 import { showProxyDashboard } from './proxy-dashboard.js';
 import { dispatchProxy }      from '../../src/proxy-worker.js';
+import type { ProxyWorkerHandle, WorkerStats } from '../../src/proxy-worker.js';
 import { createAppState } from '../lib/app-manager.js';
 import { writeCrashLog, writeTraceLog } from '../lib/crash-log';
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { C }                  from '../theme';
+
+function createPreloadHandle(): ProxyWorkerHandle {
+  const startedAt = Date.now();
+  const stats = (): WorkerStats => ({
+    requests: 0, bytesSent: 0, bytesRecv: 0,
+    uptime: Date.now() - startedAt, spend: 0,
+  });
+  return { type: 'forward', port: 0, stats, stop: async () => {} };
+}
 
 async function runForward(): Promise<void> {
   writeTraceLog('proxy.runForward.enter');
@@ -14,28 +24,7 @@ async function runForward(): Promise<void> {
   writeTraceLog('proxy.runForward.afterSetup', { setup });
   if (!setup) return;
 
-  let handle;
-  try {
-    handle = await dispatchProxy({
-      type:           'forward',
-      port:           setup.proxyPort,
-      nodeRegion:     setup.nodeRegion,
-      nodeDomain:     setup.nodeDomain,
-      nodeExclude:    setup.nodeExclude,
-      routes:         setup.routes,
-      mode:           setup.mode,
-      matchSubroutes: setup.matchSubroutes,
-      cacheTtl:       setup.cacheTtl,
-      verbose:        setup.verbose,
-      budget:         setup.budget,
-      preferNetwork:  setup.preferNetwork,
-    });
-  } catch (err) {
-    const logPath = writeCrashLog('forward proxy start', err, { setup });
-    writeTraceLog('proxy.runForward.startError', { message: err instanceof Error ? err.message : String(err), logPath });
-    await showError('FORWARD PROXY', (err as Error).message, logPath);
-    return;
-  }
+  const handle = createPreloadHandle();
 
   const routeLabel = setup.nodeDomain ?? setup.nodeRegion ?? 'auto';
   const label = setup.appPort ? `app:${setup.appPort} → ${routeLabel}` : routeLabel;
@@ -43,12 +32,21 @@ async function runForward(): Promise<void> {
     handle,
     startedAt: Date.now(),
     label,
-    budget: setup.budget,
-    appPort: setup.appPort,
-    appCommand: setup.appCommand,
-    appCheckPath: setup.appCheckPath,
-    autoLaunch: setup.autoLaunch,
-    managedApp: createAppState(setup.appCommand, setup.appCheckPath),
+    budget:         setup.budget,
+    appPort:        setup.appPort,
+    appEntry:       setup.appEntry,
+    appCheckPath:   setup.appCheckPath,
+    autoLaunch:     setup.autoLaunch,
+    cacheTtl:       setup.cacheTtl,
+    verbose:        setup.verbose,
+    nodeRegion:     setup.nodeRegion,
+    nodeDomain:     setup.nodeDomain,
+    nodeExclude:    setup.nodeExclude,
+    preferNetwork:  setup.preferNetwork,
+    mode:           setup.mode,
+    routes:         setup.routes,
+    matchSubroutes: setup.matchSubroutes,
+    managedApp:     createAppState(setup.appEntry, setup.appCheckPath),
   };
   registerWorker(entry);
   writeTraceLog('proxy.runForward.dashboard.enter', { port: handle.port, label, appPort: setup.appPort });

@@ -4,6 +4,59 @@ import path from 'node:path';
 
 const decoder = new TextDecoder();
 
+const PRELOAD_FILENAME = '.consensus-preload.ts';
+
+type PreloadOpts = {
+  cacheTtl?:      number;
+  verbose?:       boolean;
+  nodeRegion?:    string;
+  nodeDomain?:    string;
+  nodeExclude?:   string;
+  budget?:        number;
+  preferNetwork?: string;
+  mode?:          'inclusive' | 'exclusive';
+  routes?:        string[];
+  matchSubroutes?: boolean;
+};
+
+function writePreloadFile(cwd: string, opts: PreloadOpts): string {
+  const preloadPath = path.join(cwd, PRELOAD_FILENAME);
+
+  const clientOpts: string[] = ['  strategy: "auto",'];
+  if (opts.cacheTtl      != null)  clientOpts.push(`  cache_ttl:      ${opts.cacheTtl},`);
+  if (opts.verbose)                clientOpts.push(`  verbose:        true,`);
+  if (opts.nodeRegion)             clientOpts.push(`  node_region:    "${opts.nodeRegion}",`);
+  if (opts.nodeDomain)             clientOpts.push(`  node_domain:    "${opts.nodeDomain}",`);
+  if (opts.nodeExclude)            clientOpts.push(`  node_exclude:   "${opts.nodeExclude}",`);
+  if (opts.budget        != null)  clientOpts.push(`  limit_usd:      ${opts.budget},`);
+  if (opts.mode)                   clientOpts.push(`  mode:           "${opts.mode}",`);
+  if (opts.routes?.length)         clientOpts.push(`  routes:         ${JSON.stringify(opts.routes)},`);
+  if (opts.matchSubroutes)         clientOpts.push(`  matchSubroutes: true,`);
+
+  const fetchOpts: string[] = [];
+  if (opts.preferNetwork) fetchOpts.push(`  preferNetwork: "${opts.preferNetwork}",`);
+
+  const lines = [
+    'import { ProxyClient, createPaymentFetch } from "@canister-software/consensus-cli";',
+    '',
+    'const paymentFetch = await createPaymentFetch({',
+    ...fetchOpts,
+    '});',
+    '',
+    'const client = ProxyClient(paymentFetch, {',
+    ...clientOpts,
+    '});',
+    '',
+    'globalThis.fetch = client.fetch as typeof fetch;',
+  ];
+  fs.writeFileSync(preloadPath, lines.join('\n') + '\n', 'utf8');
+  return preloadPath;
+}
+
+function buildLaunchCommand(entryFile: string, preloadAbsPath: string): string {
+  return `bun --preload ${preloadAbsPath} ${entryFile}`;
+}
+
 export type AppProbe = {
   at: number;
   ok: boolean;
@@ -24,13 +77,26 @@ export type AppState = {
   lastMessage?: string;
   lastProbe?: AppProbe;
   process?: ReturnType<typeof Bun.spawn>;
+  /** Absolute path to the generated preload file. */
+  preloadPath?: string;
 };
 
 type LaunchAppOptions = {
-  proxyPort: number;
-  appPort?: number;
-  label: string;
-  cwd?: string;
+  proxyPort:       number;
+  appPort?:        number;
+  label:           string;
+  cwd?:            string;
+  // Consensus ProxyClient options — serialised into the generated preload file
+  cacheTtl?:       number;
+  verbose?:        boolean;
+  nodeRegion?:     string;
+  nodeDomain?:     string;
+  nodeExclude?:    string;
+  budget?:         number;
+  preferNetwork?:  string;
+  mode?:           'inclusive' | 'exclusive';
+  routes?:         string[];
+  matchSubroutes?: boolean;
 };
 
 function stamp(): string {
@@ -172,35 +238,28 @@ export async function launchManagedApp(
   state: AppState,
   opts: LaunchAppOptions,
 ): Promise<void> {
-  if (!state.command) throw new Error('No app command configured');
+  if (!state.command) throw new Error('No entry file configured');
 
-  const logPath = makeLogPath(opts.label);
-  const proxyUrl = `http://127.0.0.1:${opts.proxyPort}`;
-  const noProxy = [process.env.NO_PROXY, process.env.no_proxy, '127.0.0.1,localhost']
-    .filter(Boolean)
-    .join(',');
+  const logPath  = makeLogPath(opts.label);
+  const appCwd   = opts.cwd ?? state.cwd ?? process.cwd();
 
-  state.status = 'launching';
-  state.logPath = logPath;
+  state.status      = 'launching';
+  state.logPath     = logPath;
   state.lastMessage = 'launching app';
-  append(logPath, `\n[${stamp()}] launch command=${state.command} cwd=${opts.cwd ?? state.cwd ?? process.cwd()} proxy=${proxyUrl}\n`);
 
   if (state.process) await stopManagedApp(state);
   if (opts.appPort) await stopExistingListener(opts.appPort, logPath);
 
-  const proc = Bun.spawn([process.env.SHELL ?? 'zsh', '-lc', state.command], {
-    cwd: opts.cwd ?? state.cwd ?? process.cwd(),
-    env: {
-      ...process.env,
-      HTTP_PROXY: proxyUrl,
-      HTTPS_PROXY: proxyUrl,
-      http_proxy: proxyUrl,
-      https_proxy: proxyUrl,
-      ALL_PROXY: proxyUrl,
-      all_proxy: proxyUrl,
-      NO_PROXY: noProxy,
-      no_proxy: noProxy,
-    },
+  const preloadPath   = writePreloadFile(appCwd, opts);
+  state.preloadPath   = preloadPath;
+  const launchCommand = buildLaunchCommand(state.command, preloadPath);
+
+  append(logPath, `\n[${stamp()}] launch command=${launchCommand} cwd=${appCwd}\n`);
+  append(logPath, `[${stamp()}] preload written=${preloadPath}\n`);
+
+  const proc = Bun.spawn([process.env.SHELL ?? 'zsh', '-lc', launchCommand], {
+    cwd: appCwd,
+    env: { ...process.env as Record<string, string> },
     stdout: 'pipe',
     stderr: 'pipe',
   });

@@ -166,14 +166,24 @@ export async function showProxyDashboard(
   };
 
   const autoManageApp = async (): Promise<void> => {
-    if (!isForward || !entry.managedApp || !entry.appCommand || !entry.autoLaunch) return;
+    if (!isForward || !entry.managedApp || !entry.appEntry || !entry.autoLaunch) return;
     actionBusy = true;
     try {
       writeTraceLog('proxyDashboard.autoLaunch.start', { port: entry.handle.port, appPort: entry.appPort });
       await launchManagedApp(entry.managedApp, {
-        proxyPort: entry.handle.port,
-        appPort: entry.appPort,
-        label: `app-${entry.appPort ?? entry.handle.port}`,
+        proxyPort:      entry.handle.port,
+        appPort:        entry.appPort,
+        label:          `app-${entry.appPort ?? entry.handle.port}`,
+        cacheTtl:       entry.cacheTtl,
+        verbose:        entry.verbose,
+        nodeRegion:     entry.nodeRegion,
+        nodeDomain:     entry.nodeDomain,
+        nodeExclude:    entry.nodeExclude,
+        budget:         entry.budget,
+        preferNetwork:  entry.preferNetwork,
+        mode:           entry.mode,
+        routes:         entry.routes,
+        matchSubroutes: entry.matchSubroutes,
       });
       render();
       await ensureManagedAppRunning();
@@ -218,7 +228,7 @@ export async function showProxyDashboard(
     statusRef.content = `● ${exhausted ? 'EXHAUSTED' : 'RUNNING'}    :${entry.handle.port}    ${entry.label}`;
     uptimeRef.content = `  uptime ${fmtMs(stats.uptime)}    last status ${stats.lastStatusCode ?? '—'}`;
     subtitleRef.content = isForward
-      ? `  app ${entry.appPort ? `:${entry.appPort}` : '—'} routed through local proxy :${entry.handle.port}`
+      ? `  app ${entry.appPort ? `:${entry.appPort}` : '—'} → consensus (preload)`
       : `  upstream traffic protected on local proxy :${entry.handle.port}`;
 
     requestsRef.content = `  requests      ${String(stats.requests).padEnd(8)} ${reqRate.toFixed(1)} / min`;
@@ -260,13 +270,16 @@ export async function showProxyDashboard(
         ? `  last probe     ${probe.ok ? 'reachable' : 'failed'}   ${probe.message}   ${fmtLatency(probe.latencyMs)}   ${fmtAgo(probe.at)} ago`
         : `  last probe     ${entry.appPort ? `http://127.0.0.1:${entry.appPort}${entry.appCheckPath ?? '/'}` : 'no app port configured'}`;
       appCmdRef.fg = probe ? (probe.ok ? C.emerald : C.amber) : C.slate;
-      appEnvRef1.content = entry.appCommand
-        ? `  launch cmd     ${entry.appCommand}`
-        : '  launch cmd     configure an app command in forward setup to automate relaunch';
-      appEnvRef2.content = `  export HTTP_PROXY=http://127.0.0.1:${entry.handle.port}`;
-      appLogRef.content = managed.logPath
-        ? `  export HTTPS_PROXY=http://127.0.0.1:${entry.handle.port}   log ${managed.logPath}`
-        : `  export HTTPS_PROXY=http://127.0.0.1:${entry.handle.port}${entry.autoLaunch ? '   auto restart enabled' : ''}`;
+      const launchCmd = entry.appEntry
+        ? `bun --preload ${managed.preloadPath ?? '.consensus-preload.ts'} ${entry.appEntry}`
+        : undefined;
+      appEnvRef1.content = launchCmd
+        ? `  launch cmd     ${launchCmd}`
+        : '  launch cmd     set an entry file in forward setup to enable auto-launch';
+      appEnvRef2.content = `  fetch mode     preload → globalThis.fetch → consensus`;
+      appLogRef.content  = managed.preloadPath
+        ? `  preload        ${managed.preloadPath}${managed.logPath ? `   log ${managed.logPath}` : ''}`
+        : `  preload        .consensus-preload.ts${entry.autoLaunch ? '   auto restart enabled' : ''}`;
     }
   };
 
@@ -280,14 +293,24 @@ export async function showProxyDashboard(
       if (Date.now() < inputReadyAt || actionBusy) return;
 
       if (isForward && (key.name === 'l' || key.name === 'L') && entry.managedApp) {
-        if (!entry.appCommand) return;
+        if (!entry.appEntry) return;
         actionBusy = true;
         try {
           writeTraceLog('proxyDashboard.key', { key: key.name, action: 'launch', port: entry.handle.port });
           await launchManagedApp(entry.managedApp, {
-            proxyPort: entry.handle.port,
-            appPort: entry.appPort,
-            label: `app-${entry.appPort ?? entry.handle.port}`,
+            proxyPort:      entry.handle.port,
+            appPort:        entry.appPort,
+            label:          `app-${entry.appPort ?? entry.handle.port}`,
+            cacheTtl:       entry.cacheTtl,
+            verbose:        entry.verbose,
+            nodeRegion:     entry.nodeRegion,
+            nodeDomain:     entry.nodeDomain,
+            nodeExclude:    entry.nodeExclude,
+            budget:         entry.budget,
+            preferNetwork:  entry.preferNetwork,
+            mode:           entry.mode,
+            routes:         entry.routes,
+            matchSubroutes: entry.matchSubroutes,
           });
           await ensureManagedAppRunning();
         } catch (err) {

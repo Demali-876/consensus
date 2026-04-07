@@ -3,16 +3,15 @@ import { C } from '../theme';
 import { loadConfig } from '../lib/config.ts';
 import { writeTraceLog } from '../lib/crash-log';
 import { type FieldDef, type FormState, renderField, handleKey } from '../lib/form.ts';
-import { chooseDefaultPort, PROXY_PORT_CANDIDATES, scanPorts, HTTP_PORTS, SPINNER } from '../lib/ports.ts';
+import { scanPorts, HTTP_PORTS, SPINNER } from '../lib/ports.ts';
 import type { PreferNetwork } from '../../src/payment-fetch.js';
 import { NETWORK_CAIP2S, NETWORK_LABELS } from '../lib/networks.ts';
 
 export type ForwardSetupResult = {
   appPort?:        number;
-  appCommand?:     string;
+  appEntry?:       string;
   appCheckPath?:   string;
   autoLaunch?:     boolean;
-  proxyPort?:      number;
   nodeRegion?:     string;
   nodeDomain?:     string;
   nodeExclude?:    string;
@@ -72,14 +71,12 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
   const evmKey  = process.env.CONSENSUS_EVM_KEY;
   const svmKey  = process.env.CONSENSUS_SVM_KEY;
   const pemPath = process.env.CONSENSUS_PEM_PATH;
-  const defaultProxyPort = chooseDefaultPort(openPorts, PROXY_PORT_CANDIDATES, 8080);
 
   const fields: FieldDef[] = [
-    { id: 'appPort',        label: 'App port',        hint: 'service to protect with HTTP_PROXY', type: 'text',   value: openPorts[0] ? String(openPorts[0]) : '' },
-    { id: 'appCommand',     label: 'App command',     hint: 'optional, e.g. bun run startproxyserver', type: 'text', value: '' },
+    { id: 'appPort',        label: 'App port',        hint: 'port your server runs on — used for health checks', type: 'text',   value: openPorts[0] ? String(openPorts[0]) : '' },
+    { id: 'appEntry',       label: 'Entry file',      hint: 'e.g. server.ts — run as: bun --preload .consensus-preload.ts <file>', type: 'text', value: '' },
     { id: 'appCheckPath',   label: 'Check path',      hint: '/health, /dataplease, /', type: 'text', value: '/' },
-    { id: 'autoLaunch',     label: 'Auto restart',    hint: 'launch app and probe it after proxy starts', type: 'toggle', value: 'off', options: ['off', 'on'] },
-    { id: 'proxyPort',      label: 'Proxy port',      hint: 'local proxy bind port',             type: 'text',   value: String(defaultProxyPort) },
+    { id: 'autoLaunch',     label: 'Auto restart',    hint: 'launch app and probe it after setup starts', type: 'toggle', value: 'off', options: ['off', 'on'] },
     { id: 'nodeRegion',     label: 'Region',          hint: 'us-east / eu-west / auto',           type: 'text',   value: cfg.leased_node?.region ?? '' },
     { id: 'nodeDomain',     label: 'Domain',          hint: 'force specific node',                type: 'text',   value: cfg.leased_node?.domain ?? '' },
     { id: 'nodeExclude',    label: 'Exclude',         hint: 'skip this node',                     type: 'text',   value: '' },
@@ -143,6 +140,8 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
   // APP section
   ln('APP  ' + '─'.repeat(47), C.dim);
   ln(' ');
+  ln(`  cwd  ${process.cwd()}`, C.dim);
+  ln(' ');
   fields[0]!.ref = ln('');
   fields[1]!.ref = ln('');
   fields[2]!.ref = ln('');
@@ -151,40 +150,34 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
   const validationRef = ln('');
   ln(' ');
 
-  // PROXY section
-  ln('PROXY  ' + '─'.repeat(45), C.dim);
-  ln(' ');
-  fields[4]!.ref = ln('');
-  ln(' ');
-
   ln('NODE  ' + '─'.repeat(46), C.dim);
   ln(' ');
+  fields[4]!.ref = ln('');
   fields[5]!.ref = ln('');
   fields[6]!.ref = ln('');
-  fields[7]!.ref = ln('');
   ln(' ');
 
   ln('ROUTING  ' + '─'.repeat(43), C.dim);
   ln(' ');
+  fields[7]!.ref = ln('');
   fields[8]!.ref = ln('');
   fields[9]!.ref = ln('');
-  fields[10]!.ref = ln('');
   ln(' ');
 
   ln('PERFORMANCE  ' + '─'.repeat(39), C.dim);
   ln(' ');
+  fields[10]!.ref = ln('');
   fields[11]!.ref = ln('');
-  fields[12]!.ref = ln('');
   ln(' ');
 
   ln('BUDGET  ' + '─'.repeat(44), C.dim);
   ln(' ');
-  fields[13]!.ref = ln('');
+  fields[12]!.ref = ln('');
   ln(' ');
 
   ln('NETWORK  ' + '─'.repeat(43), C.dim);
   ln(' ');
-  fields[14]!.ref = ln('');
+  fields[13]!.ref = ln('');
   ln(' ');
 
   ln('WALLET  ' + '─'.repeat(44), C.dim);
@@ -256,9 +249,10 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
       appHintRef.content = '  Auto restart needs an app command so the CLI knows what to relaunch';
       appHintRef.fg = C.amber;
     } else {
+      const appEntry = fields.find(f => f.id === 'appEntry')?.value.trim() ?? '';
       appHintRef.content = appPort
-        ? `  App on :${appPort}${appCommand ? (autoLaunch ? ' will relaunch automatically after startup' : ' can be relaunched from the dashboard') : ' should use the proxy env vars shown after startup'}`
-        : '  Pick the app port you want to restart behind this proxy';
+        ? `  App on :${appPort}${appEntry ? (autoLaunch ? ' will launch as: bun --preload .consensus-preload.ts ' + appEntry : ' can be launched from the dashboard') : ' — add an entry file to enable auto-launch'}`
+        : '  Enter the port your server runs on for health checks';
       appHintRef.fg = appPort ? C.dim : C.slate;
     }
     validationRef.content = validationMessage ? `  ✕   ${validationMessage}` : ' ';
@@ -276,11 +270,9 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
     const result: ForwardSetupResult = {};
     const appPort = parseInt(get('appPort'), 10);
     if (!isNaN(appPort) && appPort > 0) result.appPort = appPort;
-    if (get('appCommand')) result.appCommand = get('appCommand');
+    if (get('appEntry'))     result.appEntry     = get('appEntry');
     if (get('appCheckPath')) result.appCheckPath = get('appCheckPath');
     if (get('autoLaunch') === 'on') result.autoLaunch = true;
-    const proxyPort = parseInt(get('proxyPort'), 10);
-    result.proxyPort = !isNaN(proxyPort) && proxyPort > 0 ? proxyPort : defaultProxyPort;
     if (get('nodeRegion'))  result.nodeRegion  = get('nodeRegion');
     if (get('nodeDomain'))  result.nodeDomain  = get('nodeDomain');
     if (get('nodeExclude')) result.nodeExclude = get('nodeExclude');
@@ -308,8 +300,8 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
 
   function validateBeforeStart(): string | null {
     const get = (id: string) => fields.find(f => f.id === id)?.value.trim() ?? '';
-    if (get('autoLaunch') === 'on' && get('appCommand') === '') {
-      return 'Auto restart requires an app command';
+    if (get('autoLaunch') === 'on' && get('appEntry') === '') {
+      return 'Auto restart requires an entry file (e.g. server.ts)';
     }
     return null;
   }

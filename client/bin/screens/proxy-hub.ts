@@ -10,11 +10,21 @@ export type WorkerEntry = {
   startedAt: number;
   label:     string;
   budget?:   number;
-  appPort?:  number;
-  appCommand?: string;
+  appPort?:      number;
+  appEntry?:     string;
   appCheckPath?: string;
   autoLaunch?: boolean;
   managedApp?: AppState;
+  // Consensus ProxyClient options threaded into the preload file on launch
+  cacheTtl?:       number;
+  verbose?:        boolean;
+  nodeRegion?:     string;
+  nodeDomain?:     string;
+  nodeExclude?:    string;
+  preferNetwork?:  string;
+  mode?:           'inclusive' | 'exclusive';
+  routes?:         string[];
+  matchSubroutes?: boolean;
 };
 
 // Persists across screen navigations

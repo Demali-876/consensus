@@ -1,6 +1,6 @@
 {
   "name": "@canister-software/consensus-cli",
-  "version": "0.1.0-beta.6",
+  "version": "0.1.0-beta.7",
   "description": "Consensus SDK for interacting with the Consensus protocol",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -16,7 +16,7 @@
     "./cli": "./bin/consensus.ts"
   },
   "bin": {
-    "consensus": "./bin/consensus.ts"
+    "consensus": "./bin/consensus"
   },
   "scripts": {
     "clean":       "rm -rf dist",
@@ -27,7 +27,7 @@
     "consensus": "bun bin/consensus.ts",
     "setup": "bun bin/consensus.ts setup",
     "reset": "bun bin/consensus.ts setup --force",
-    "startproxyserver": "bun test/proxy/server.ts"
+    "start-server": "bun test/proxy/server.ts"
   },
   "dependencies": {
     "@canister-software/x402-icp": "^0.1.1",
