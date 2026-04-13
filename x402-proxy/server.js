@@ -35,11 +35,23 @@ const consensusServerUrl =
 const walletStore = new WalletStore();
 const registeredWallets = new Map();
 const walletClients = new Map();
+app.set('trust proxy', 1);
 
 app.use(helmet());
 app.use(cors());
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 1000 }));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, standardHeaders: true, legacyHeaders: false }));
 app.use(express.json({ limit: '10mb' }));
+
+function requireLoopback(req, res, next) {
+  const remote = req.socket.remoteAddress ?? '';
+  const isLoopback =
+    remote === '127.0.0.1' ||
+    remote === '::1'       ||
+    remote === '::ffff:127.0.0.1';
+  if (isLoopback) return next();
+  console.warn(`[Security] Blocked remote attempt from ${remote}`);
+  return res.status(403).json({ error: 'Forbidden' });
+}
 
 function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
@@ -107,7 +119,7 @@ async function restoreWallets() {
   return loaded;
 }
 
-app.post('/register-wallet', async (req, res) => {
+app.post('/register-wallet', requireLoopback, async (req, res) => {
   try {
     const { wallet_name, evm, solana } = req.body;
 
