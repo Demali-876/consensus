@@ -5,6 +5,7 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import crypto from 'crypto';
+import rateLimit from 'express-rate-limit';
 import ConsensusProxy from './features/proxy/proxy.ts';
 import Router from './router.ts';
 import { fileURLToPath } from 'url';
@@ -20,6 +21,14 @@ import { registerTunnel } from './features/tunnel/tunnel.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const publicLimiter = rateLimit({
+  windowMs:          60_000,
+  max:               120,
+  standardHeaders:   true,
+  legacyHeaders:     false,
+  message:           { error: 'Too Many Requests' },
+});
 
 const PORT = 8080;
 const FACILITATOR_URL = process.env.FACILITATOR_URL;
@@ -44,6 +53,8 @@ const router = new Router();
 const proxy = new ConsensusProxy({ router: router });
 
 const app = express();
+app.set('trust proxy', 1);
+
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -69,7 +80,7 @@ const nodeStats = registerNodes(app, server, x402Server, {
 });
 const tunnelStats = registerTunnel(app, server);
 
-app.get('/', (req, res) => {
+app.get('/', publicLimiter, (req, res) => {
   res.json({
     name: 'Consensus x402 Server',
     version: '2.0.0',
@@ -83,7 +94,7 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {
+app.get('/health', publicLimiter, (req, res) => {
   const stats = proxy.getStats();
   const ws = wsStats.getStats();
   const nodes = nodeStats.getStats();
@@ -102,7 +113,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.get('/stats', (_req, res) => {
+app.get('/stats', publicLimiter, (_req, res) => {
   const stats = proxy.getStats();
   res.json({
     ...stats,
