@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -110,10 +111,21 @@ export interface PoolStats {
 
 type HistoryStore = Record<string, DeviceIpObservation[]>;
 
+const POOL_READ_CACHE_TTL = 5_000;
+
+interface ReadCache<T> { value: T; path: string; at: number; }
+let _poolCache:    ReadCache<PoolStore>    | null = null;
+let _historyCache: ReadCache<HistoryStore> | null = null;
+
 function readHistoryStore(historyPath: string): HistoryStore {
+  if (_historyCache && _historyCache.path === historyPath && Date.now() - _historyCache.at < POOL_READ_CACHE_TTL) {
+    return _historyCache.value;
+  }
   try {
     const raw = fs.readFileSync(historyPath, 'utf8');
-    return JSON.parse(raw) as HistoryStore;
+    const value = JSON.parse(raw) as HistoryStore;
+    _historyCache = { value, path: historyPath, at: Date.now() };
+    return value;
   } catch {
     return {};
   }
@@ -135,26 +147,37 @@ export function savePoolHistory(
   const normalized = dedupeAndTrimHistory(observations);
   const store = readHistoryStore(historyPath);
   store[nodeId] = normalized;
+  _historyCache = { value: store, path: historyPath, at: Date.now() };
   fs.mkdirSync(path.dirname(historyPath), { recursive: true });
-  fs.writeFileSync(historyPath, JSON.stringify(store, null, 2), 'utf8');
+  fsp.writeFile(historyPath, JSON.stringify(store, null, 2), 'utf8').catch((err) =>
+    console.error('[Pool] savePoolHistory write failed:', err.message),
+  );
   return normalized;
 }
 
 // ─── Pool-store persistence ───────────────────────────────────────────────────
 
 export function loadPool(poolPath = DEFAULT_POOL_PATH): PoolStore {
+  if (_poolCache && _poolCache.path === poolPath && Date.now() - _poolCache.at < POOL_READ_CACHE_TTL) {
+    return _poolCache.value;
+  }
   try {
-    const raw = fs.readFileSync(poolPath, 'utf8');
+    const raw    = fs.readFileSync(poolPath, 'utf8');
     const parsed = JSON.parse(raw) as PoolStore;
-    return parsed ?? { entries: {} };
+    const value  = parsed ?? { entries: {} };
+    _poolCache = { value, path: poolPath, at: Date.now() };
+    return value;
   } catch {
     return { entries: {} };
   }
 }
 
 export function savePool(store: PoolStore, poolPath = DEFAULT_POOL_PATH): void {
+  _poolCache = { value: store, path: poolPath, at: Date.now() };
   fs.mkdirSync(path.dirname(poolPath), { recursive: true });
-  fs.writeFileSync(poolPath, JSON.stringify(store, null, 2), 'utf8');
+  fsp.writeFile(poolPath, JSON.stringify(store, null, 2), 'utf8').catch((err) =>
+    console.error('[Pool] savePool write failed:', err.message),
+  );
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -385,13 +408,14 @@ export function listPool(
 
 export function getPoolStats(poolPath = DEFAULT_POOL_PATH): PoolStats {
   const entries = listPool(undefined, poolPath);
-  return {
-    total: entries.filter((e) => e.status !== 'removed').length,
-    available: entries.filter((e) => e.status === 'available').length,
-    atCapacity: entries.filter((e) => e.status === 'at_capacity').length,
-    removed: entries.filter((e) => e.status === 'removed').length,
-    activeRentals: entries.reduce((sum, e) => sum + e.rentals.length, 0),
-  };
+  const stats: PoolStats = { total: 0, available: 0, atCapacity: 0, removed: 0, activeRentals: 0 };
+  for (const e of entries) {
+    stats.activeRentals += e.rentals.length;
+    if (e.status === 'available')    { stats.total++; stats.available++; }
+    else if (e.status === 'at_capacity') { stats.total++; stats.atCapacity++; }
+    else if (e.status === 'removed') { stats.removed++; }
+  }
+  return stats;
 }
 
 // ─── High-level: detect → classify → deposit ──────────────────────────────────
