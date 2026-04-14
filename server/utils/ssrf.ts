@@ -2,6 +2,11 @@ import dns from 'node:dns/promises';
 
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 
+interface DnsCacheEntry { isPrivate: boolean; expiresAt: number; }
+const DNS_CACHE     = new Map<string, DnsCacheEntry>();
+const DNS_TTL_MS    = 30_000;
+const DNS_NEG_TTL   = 5_000;
+
 function normalizeToIPv4(raw: string): string | null {
   const s = raw.replace(/^\[|\]$/g, '').toLowerCase();
 
@@ -77,23 +82,29 @@ export async function isPrivateTarget(urlString: string): Promise<boolean> {
     return isPrivateIPv4(normalized);
   }
 
+  const cached = DNS_CACHE.get(hostname);
+  if (cached && Date.now() < cached.expiresAt) return cached.isPrivate;
+
   try {
     const records = await dns.lookup(hostname, { all: true, verbatim: true });
+    let isPrivate = false;
     for (const { address, family } of records) {
       if (family === 4) {
-        if (isPrivateIPv4(address)) return true;
+        if (isPrivateIPv4(address)) { isPrivate = true; break; }
       } else if (family === 6) {
         const addr = address.toLowerCase();
-        if (addr === '::1')                    return true;
-        if (/^fe80:/i.test(addr))              return true;
-        if (/^f[cd][0-9a-f]{2}:/i.test(addr)) return true;
-        const v4 = normalizeToIPv4(addr);
-        if (v4 && isPrivateIPv4(v4))           return true;
+        if (
+          addr === '::1'                    ||
+          /^fe80:/i.test(addr)              ||
+          /^f[cd][0-9a-f]{2}:/i.test(addr) ||
+          (normalizeToIPv4(addr) !== null && isPrivateIPv4(normalizeToIPv4(addr)!))
+        ) { isPrivate = true; break; }
       }
     }
+    DNS_CACHE.set(hostname, { isPrivate, expiresAt: Date.now() + DNS_TTL_MS });
+    return isPrivate;
   } catch {
+    DNS_CACHE.set(hostname, { isPrivate: true, expiresAt: Date.now() + DNS_NEG_TTL });
     return true;
   }
-
-  return false;
 }
