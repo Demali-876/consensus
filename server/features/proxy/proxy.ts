@@ -1,10 +1,15 @@
 import NodeCache                          from 'node-cache';
 import axios                             from 'axios';
+import http                              from 'node:http';
+import https                             from 'node:https';
 import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
 import crypto                            from 'node:crypto';
 import Router                            from '../../router.ts';
 import { isPrivateTarget }               from '../../utils/ssrf.ts';
+
+const httpAgent  = new http.Agent ({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
 
 const gunzipAsync           = promisify(gunzip);
 const inflateAsync          = promisify(inflate);
@@ -266,11 +271,12 @@ export default class ConsensusProxy {
       }
 
       const response = await axios({
-        method:  'POST',
-        url:     `https://${node.domain}/proxy`,
-        headers: { 'Content-Type': 'application/json' },
-        data:    { target_url, method, headers: forwardHeaders, body },
-        timeout: 35_000,
+        method:     'POST',
+        url:        `https://${node.domain}/proxy`,
+        headers:    { 'Content-Type': 'application/json' },
+        data:       { target_url, method, headers: forwardHeaders, body },
+        timeout:    35_000,
+        httpsAgent,
       });
 
       const result = response.data as ProxyResponse;
@@ -301,9 +307,15 @@ export default class ConsensusProxy {
     ttl:        number,
   ): Promise<ProxyResponse> {
     let settle!: (r: ProxyResponse) => void;
-    let reject!:  (e: unknown) => void;
+    let reject!: (e: unknown) => void;
     const promise = new Promise<ProxyResponse>((res, rej) => { settle = res; reject = rej; });
     this.pendingRequests.set(dedupeKey, promise);
+    const leakGuard = setTimeout(() => {
+      if (this.pendingRequests.has(dedupeKey)) {
+        this.pendingRequests.delete(dedupeKey);
+        reject(new Error('executeDirect timed out — pending request evicted'));
+      }
+    }, 65_000);
 
     try {
       const response = await this.makeRequest(target_url, method, headers, body);
@@ -318,6 +330,7 @@ export default class ConsensusProxy {
       reject(error);
       throw error;
     } finally {
+      clearTimeout(leakGuard);
       this.pendingRequests.delete(dedupeKey);
     }
   }
@@ -355,6 +368,8 @@ export default class ConsensusProxy {
         responseType:     'arraybuffer',
         maxContentLength: MAX_RESPONSE_BYTES,
         maxBodyLength:    MAX_BODY_BYTES,
+        httpAgent,
+        httpsAgent,
       });
 
       let raw: Buffer = Buffer.isBuffer(response.data)
