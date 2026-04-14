@@ -390,7 +390,7 @@ export function registerWebSocket(
       const minutes   = parseInt((req.query.minutes   ?? '5').toString(),  10);
       const megabytes = parseInt((req.query.megabytes ?? '50').toString(), 10);
 
-      const token   = crypto.randomBytes(32).toString('hex');
+      const token   = crypto.randomUUID();
       const expires = Date.now() + TOKEN_TTL_MS;
 
       pendingSessions.set(token, { model, minutes, megabytes, expires });
@@ -460,10 +460,20 @@ export function registerWebSocket(
     }
   });
 
+  const SESSION_GRACE_MS = 5 * 60 * 1000;
+
   const cleanupInterval = setInterval(() => {
     const now = Date.now();
     for (const [token, p] of pendingSessions) {
       if (p.expires < now) pendingSessions.delete(token);
+    }
+    for (const [id, session] of sessions) {
+      const deadline = session.usage.connectedAt + session.limits.timeLimit + SESSION_GRACE_MS;
+      if (now > deadline) {
+        clearTimeout(session.timer);
+        session.active = false;
+        sessions.delete(id);
+      }
     }
   }, 10_000);
 
