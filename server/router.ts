@@ -9,21 +9,33 @@ interface RouterStats {
 /**
  * Router - Routes requests to available instances
  */
+const STICKY_TTL_MS    = 10 * 60 * 1000;
+const STICKY_SWEEP_MS  = 60 * 1000;
+const STATS_CACHE_MS   = 1_000;
+
 export default class Router {
-  private activeRequests: Map<string, number>; // nodeId → count of HTTP requests
-  private activeSessions: Map<string, number>; // nodeId → count of open WebSockets
-  private requestToNode: Map<string, string>; // dedupeKey → nodeId
+  private activeRequests: Map<string, number>;           // nodeId → HTTP request count
+  private activeSessions: Map<string, number>;           // nodeId → WebSocket session count
+  private requestToNode:  Map<string, { nodeId: string; at: number }>; // dedupeKey → sticky
   private stats: RouterStats;
+  private statsCache: { value: ReturnType<Router['_buildStats']>; at: number } | null = null;
+  private sweepTimer: ReturnType<typeof setInterval>;
 
   constructor() {
     this.activeRequests = new Map();
     this.activeSessions = new Map();
-    this.requestToNode = new Map();
-    this.stats = {
-      total_selections: 0,
-      sticky_hits: 0,
-      fallbacks: 0,
-    };
+    this.requestToNode  = new Map();
+    this.stats = { total_selections: 0, sticky_hits: 0, fallbacks: 0 };
+
+    this.sweepTimer = setInterval(() => this.sweepSticky(), STICKY_SWEEP_MS);
+    this.sweepTimer.unref();
+  }
+
+  private sweepSticky(): void {
+    const cutoff = Date.now() - STICKY_TTL_MS;
+    for (const [key, { at }] of this.requestToNode) {
+      if (at < cutoff) this.requestToNode.delete(key);
+    }
   }
 
   /**
@@ -35,16 +47,14 @@ export default class Router {
   selectNode(dedupeKey: string, preferenceHeaders: Record<string, string> = {}): any | null {
     this.stats.total_selections++;
 
-    const stickyNodeId = this.requestToNode.get(dedupeKey);
-    if (stickyNodeId) {
-      const node = NodeStore.getNode(stickyNodeId);
+    const sticky = this.requestToNode.get(dedupeKey);
+    if (sticky) {
+      const node = NodeStore.getNode(sticky.nodeId);
       if (node && node.status === 'active') {
         this.stats.sticky_hits++;
-        console.log(`[Sticky Route] ${dedupeKey.substring(0, 12)}... → ${stickyNodeId}`);
         return node;
-      } else {
-        this.requestToNode.delete(dedupeKey);
       }
+      this.requestToNode.delete(dedupeKey);
     }
 
     const allNodes = NodeStore.listNodes();
@@ -58,8 +68,7 @@ export default class Router {
     }
 
     const selectedNode = this.powerOfTwoChoices(eligibleNodes);
-    this.requestToNode.set(dedupeKey, selectedNode.id);
-
+    this.requestToNode.set(dedupeKey, { nodeId: selectedNode.id, at: Date.now() });
     return selectedNode;
   }
   /**
@@ -93,20 +102,14 @@ export default class Router {
    * Parse preference headers
    */
   private parsePreferences(headers: Record<string, string>) {
-    const getHeader = (name: string) => {
-      const value = headers[name] || headers[name.toLowerCase()];
-      return value
-        ? String(value)
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean)
-        : null;
+    const get = (name: string) => {
+      const value = headers[name] ?? headers[name.toLowerCase()];
+      return value ? String(value).split(',').map((s) => s.trim()).filter(Boolean) : null;
     };
-
     return {
-      regions: getHeader('x-node-region') || getHeader('X-Node-Region'),
-      domains: getHeader('x-node-domain') || getHeader('X-Node-Domain'),
-      exclude: getHeader('x-node-exclude') || getHeader('X-Node-Exclude'),
+      regions: get('x-node-region'),
+      domains: get('x-node-domain'),
+      exclude: get('x-node-exclude'),
     };
   }
 
@@ -138,75 +141,63 @@ export default class Router {
    * Increment HTTP request count for a node
    */
   incrementRequest(nodeId: string): void {
-    const current = this.activeRequests.get(nodeId) || 0;
-    this.activeRequests.set(nodeId, current + 1);
+    this.activeRequests.set(nodeId, (this.activeRequests.get(nodeId) ?? 0) + 1);
+    this.statsCache = null;
   }
 
-  /**
-   * Decrement HTTP request count for a node
-   */
   decrementRequest(nodeId: string): void {
-    const current = this.activeRequests.get(nodeId) || 0;
-    this.activeRequests.set(nodeId, Math.max(0, current - 1));
+    this.activeRequests.set(nodeId, Math.max(0, (this.activeRequests.get(nodeId) ?? 0) - 1));
+    this.statsCache = null;
   }
 
-  /**
-   * Increment WebSocket session count for a node
-   */
   incrementSession(nodeId: string): void {
-    const current = this.activeSessions.get(nodeId) || 0;
-    this.activeSessions.set(nodeId, current + 1);
+    this.activeSessions.set(nodeId, (this.activeSessions.get(nodeId) ?? 0) + 1);
+    this.statsCache = null;
   }
 
-  /**
-   * Decrement WebSocket session count for a node
-   */
   decrementSession(nodeId: string): void {
-    const current = this.activeSessions.get(nodeId) || 0;
-    this.activeSessions.set(nodeId, Math.max(0, current - 1));
+    this.activeSessions.set(nodeId, Math.max(0, (this.activeSessions.get(nodeId) ?? 0) - 1));
+    this.statsCache = null;
   }
 
-  /**
-   * Get router statistics
-   */
-  getStats() {
-    const allNodes = NodeStore.listNodes();
+  // Separated so the return type can be inferred for statsCache typing.
+  private _buildStats() {
+    const allNodes    = NodeStore.listNodes();
     const activeNodes = allNodes.filter((n: any) => n.status === 'active');
 
-    return {
-      total_nodes: allNodes.length,
-      active_nodes: activeNodes.length,
-      total_active_requests: Array.from(this.activeRequests.values()).reduce(
-        (sum, v) => sum + v,
-        0
-      ),
-      total_active_sessions: Array.from(this.activeSessions.values()).reduce(
-        (sum, v) => sum + v,
-        0
-      ),
-      sticky_mappings: this.requestToNode.size,
+    let totalReqs = 0; for (const v of this.activeRequests.values()) totalReqs += v;
+    let totalSess = 0; for (const v of this.activeSessions.values()) totalSess += v;
 
+    return {
+      total_nodes:            allNodes.length,
+      active_nodes:           activeNodes.length,
+      total_active_requests:  totalReqs,
+      total_active_sessions:  totalSess,
+      sticky_mappings:        this.requestToNode.size,
       selection_stats: {
         total_selections: this.stats.total_selections,
-        sticky_hits: this.stats.sticky_hits,
-        fallbacks: this.stats.fallbacks,
-        sticky_hit_rate:
-          this.stats.total_selections > 0
-            ? ((this.stats.sticky_hits / this.stats.total_selections) * 100).toFixed(2) + '%'
-            : '0%',
+        sticky_hits:      this.stats.sticky_hits,
+        fallbacks:        this.stats.fallbacks,
+        sticky_hit_rate:  this.stats.total_selections > 0
+          ? ((this.stats.sticky_hits / this.stats.total_selections) * 100).toFixed(2) + '%'
+          : '0%',
       },
-
       load_distribution: Array.from(this.activeRequests.keys()).map((nodeId) => {
         const node = NodeStore.getNode(nodeId);
-        return {
-          node_id: nodeId,
-          requests: this.activeRequests.get(nodeId) || 0,
-          sessions: this.activeSessions.get(nodeId) || 0,
-          total: (this.activeRequests.get(nodeId) || 0) + (this.activeSessions.get(nodeId) || 0),
-          region: node?.region,
-          status: node?.status,
-        };
+        const reqs = this.activeRequests.get(nodeId) ?? 0;
+        const sess = this.activeSessions.get(nodeId) ?? 0;
+        return { node_id: nodeId, requests: reqs, sessions: sess, total: reqs + sess, region: node?.region, status: node?.status };
       }),
     };
+  }
+
+  getStats() {
+    const now = Date.now();
+    if (this.statsCache && (now - this.statsCache.at) < STATS_CACHE_MS) {
+      return this.statsCache.value;
+    }
+    const value = this._buildStats();
+    this.statsCache = { value, at: now };
+    return value;
   }
 }
