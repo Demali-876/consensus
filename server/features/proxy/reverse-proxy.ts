@@ -22,27 +22,43 @@ export interface CacheStats {
 class ResponseCache {
   private store   = new Map<string, CacheEntry>();
   private stats_  = { hits: 0, misses: 0 };
+  private sweeper: ReturnType<typeof setInterval>;
 
-  constructor(private ttl: number, private maxSize: number) {}
+  constructor(private ttl: number, private maxSize: number) {
+    this.sweeper = setInterval(() => this.sweep(), 60_000);
+    this.sweeper.unref();
+  }
 
   get(key: string): CacheEntry | null {
     const entry = this.store.get(key);
-    if (!entry)                    { this.stats_.misses++; return null; }
+    if (!entry) { this.stats_.misses++; return null; }
     if (Date.now() > entry.expiresAt) {
       this.store.delete(key);
       this.stats_.misses++;
       return null;
     }
+    this.store.delete(key);
     entry.hits++;
+    this.store.set(key, entry);
     this.stats_.hits++;
     return entry;
   }
 
   set(key: string, statusCode: number, headers: http.IncomingHttpHeaders, body: Buffer): void {
+    this.store.delete(key);
     if (this.store.size >= this.maxSize)
-      this.store.delete(this.store.keys().next().value!);
+      this.store.delete(this.store.keys().next().value!); // evict LRU (head)
     this.store.set(key, { statusCode, headers, body, expiresAt: Date.now() + this.ttl, hits: 0 });
   }
+
+  private sweep(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.store) {
+      if (now > entry.expiresAt) this.store.delete(key);
+    }
+  }
+
+  destroy(): void { clearInterval(this.sweeper); }
 
   stats(): CacheStats {
     return { hits: this.stats_.hits, misses: this.stats_.misses, size: this.store.size, maxSize: this.maxSize };
