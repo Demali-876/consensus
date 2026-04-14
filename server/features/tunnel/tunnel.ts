@@ -4,16 +4,12 @@ import WebSocket, { WebSocketServer } from 'ws';
 import type { Express, Request }      from 'express';
 import type { Server }                from 'http';
 import { generateSlug }               from './slug.ts';
-// -----------------------------------------------------------------------------
-// Frame protocol — SSH channel framing (RFC 4254), stripped to minimal subset
-// [1 byte: type][4 bytes: stream ID][...payload]
-// -----------------------------------------------------------------------------
 
 export const FRAME = {
-  STREAM_OPEN:  0x01,  // server → client: new incoming connection
-  STREAM_DATA:  0x02,  // both directions: raw bytes
-  STREAM_END:   0x03,  // both directions: half-close (no more data this side)
-  STREAM_RESET: 0x04,  // both directions: abort stream immediately
+  STREAM_OPEN:  0x01,
+  STREAM_DATA:  0x02,
+  STREAM_END:   0x03,
+  STREAM_RESET: 0x04,
   PING:         0x05,
   PONG:         0x06,
 } as const;
@@ -28,17 +24,13 @@ export function encodeFrame(type: FrameType, streamId: number, payload: Buffer =
 }
 
 export function decodeFrame(data: Buffer): { type: FrameType; streamId: number; payload: Buffer } {
+  if (data.length < 5) throw new RangeError(`Frame too short: ${data.length} bytes`);
   return {
     type:     data.readUInt8(0) as FrameType,
     streamId: data.readUInt32BE(1),
     payload:  data.subarray(5),
   };
 }
-
-// -----------------------------------------------------------------------------
-// -----------------------------------------------------------------------------
-// State
-// -----------------------------------------------------------------------------
 
 interface PendingToken {
   tunnelId: string;
@@ -65,13 +57,7 @@ let   streamCounter = 0;
 
 const TCP_PORT = 20_000;
 
-// -----------------------------------------------------------------------------
-// HTTP helpers
-// -----------------------------------------------------------------------------
-
-// Headers that reveal the original caller's identity — never forward to IoT device
 const STRIP_HEADERS = new Set([
-  'x-real-ip', 'x-forwarded-for', 'x-forwarded-proto',
   'x-forwarded-host', 'forwarded', 'via',
 ]);
 
@@ -84,8 +70,15 @@ function buildRawRequest(req: Request): Buffer {
     else if (value)           lines.push(`${key}: ${value}`);
   }
 
-  let body: Buffer = (req as any).rawBody ?? Buffer.alloc(0);
+  const clientIp = req.ip ?? req.socket.remoteAddress ?? '';
+  if (clientIp) {
+    lines.push(`x-real-ip: ${clientIp}`);
+    const existingXff = req.headers['x-forwarded-for'];
+    lines.push(`x-forwarded-for: ${existingXff ? `${existingXff}, ${clientIp}` : clientIp}`);
+  }
+  lines.push(`x-forwarded-proto: ${req.protocol}`);
 
+  let body: Buffer = (req as any).rawBody ?? Buffer.alloc(0);
   if (!body.length && req.body) {
     const ct = req.headers['content-type'] ?? '';
     body = ct.includes('application/json')
@@ -101,8 +94,10 @@ function buildRawRequest(req: Request): Buffer {
 
 function parseRawResponse(buf: Buffer): { status: number; headers: Record<string, string>; body: Buffer } {
   const headerEnd = buf.indexOf('\r\n\r\n');
-  const lines     = buf.subarray(0, headerEnd).toString().split('\r\n');
-  const status    = parseInt(lines[0].split(' ')[1]);
+  if (headerEnd === -1) return { status: 502, headers: {}, body: Buffer.alloc(0) };
+
+  const lines  = buf.subarray(0, headerEnd).toString().split('\r\n');
+  const status = parseInt(lines[0].split(' ')[1]);
   const headers: Record<string, string> = {};
 
   for (let i = 1; i < lines.length; i++) {
@@ -115,44 +110,24 @@ function parseRawResponse(buf: Buffer): { status: number; headers: Record<string
   return { status, headers, body: buf.subarray(headerEnd + 4) };
 }
 
-// -----------------------------------------------------------------------------
-// TCP gateway — single port, all tunnels share it, routed by tunnel ID handshake
-//
-// Handshake protocol (client speaks first):
-//   → "<tunnelId>\n"         IoT device sends tunnel ID as first line
-//   ← "OK\n"                 server confirms tunnel is active
-//   ← "ERR <reason>\n"       server rejects and closes
-//   → <raw bytes>            from this point, raw bytes flow both ways
-// -----------------------------------------------------------------------------
-
 function startTcpGateway(): void {
   const server = net.createServer((socket) => {
     let headerBuf = Buffer.alloc(0);
     let routed    = false;
 
-    // Drop connection if no tunnel ID arrives within 10s
     socket.setTimeout(10_000);
-    socket.on('timeout', () => {
-      if (!routed) socket.destroy();
-    });
-
-    socket.on('error', (err: Error) => {
-      if (!routed) console.error('[TCP Gateway] pre-route error:', err.message);
-    });
+    socket.on('timeout', () => { if (!routed) socket.destroy(); });
+    socket.on('error',   (err: Error) => { if (!routed) console.error('[TCP Gateway] pre-route error:', err.message); });
 
     socket.on('data', (chunk: Buffer) => {
       if (routed) return;
 
       headerBuf = Buffer.concat([headerBuf, chunk]);
 
-      // Guard against oversized headers
-      if (headerBuf.length > 256) {
-        socket.destroy();
-        return;
-      }
+      if (headerBuf.length > 256) { socket.destroy(); return; }
 
       const newline = headerBuf.indexOf('\n');
-      if (newline === -1) return; // wait for full tunnel ID line
+      if (newline === -1) return;
 
       const tunnelId = headerBuf.subarray(0, newline).toString().replace(/\r$/, '').trim();
       const rest     = headerBuf.subarray(newline + 1);
@@ -177,63 +152,37 @@ function startTcpGateway(): void {
         onReset: () => { tunnel.streams.delete(streamId); socket.destroy(); },
       });
 
-      // Signal new TCP stream to the tunnel client
       tunnel.ws.send(encodeFrame(FRAME.STREAM_OPEN, streamId));
+      if (rest.length > 0) tunnel.ws.send(encodeFrame(FRAME.STREAM_DATA, streamId, rest));
 
-      // Forward any bytes that arrived in the same chunk as the tunnel ID
-      if (rest.length > 0) {
-        tunnel.ws.send(encodeFrame(FRAME.STREAM_DATA, streamId, rest));
-      }
-
-      // Switch from routing handler to forwarding handler
       socket.removeAllListeners('data');
 
       socket.on('data', (data: Buffer) => {
-        if (tunnel.ws.readyState === WebSocket.OPEN) {
-          tunnel.ws.send(encodeFrame(FRAME.STREAM_DATA, streamId, data));
-        }
+        if (tunnel.ws.readyState === WebSocket.OPEN) tunnel.ws.send(encodeFrame(FRAME.STREAM_DATA, streamId, data));
       });
 
       socket.on('end', () => {
         tunnel.streams.delete(streamId);
-        if (tunnel.ws.readyState === WebSocket.OPEN) {
-          tunnel.ws.send(encodeFrame(FRAME.STREAM_END, streamId));
-        }
+        if (tunnel.ws.readyState === WebSocket.OPEN) tunnel.ws.send(encodeFrame(FRAME.STREAM_END, streamId));
       });
 
-      socket.on('close', () => {
-        tunnel.streams.delete(streamId);
-      });
+      socket.on('close', () => { tunnel.streams.delete(streamId); });
 
       socket.on('error', (err: Error) => {
         console.error(`[TCP] ${tunnelId}:${streamId}:`, err.message);
         tunnel.streams.delete(streamId);
-        if (tunnel.ws.readyState === WebSocket.OPEN) {
-          tunnel.ws.send(encodeFrame(FRAME.STREAM_RESET, streamId));
-        }
+        if (tunnel.ws.readyState === WebSocket.OPEN) tunnel.ws.send(encodeFrame(FRAME.STREAM_RESET, streamId));
       });
     });
   });
 
-  server.listen(TCP_PORT, () => {
-    console.log(`[TCP Gateway] listening on :${TCP_PORT}`);
-  });
-
-  server.on('error', (err: Error) => {
-    console.error('[TCP Gateway] error:', err.message);
-  });
+  server.listen(TCP_PORT, () => console.log(`[TCP Gateway] listening on :${TCP_PORT}`));
+  server.on('error', (err: Error) => console.error('[TCP Gateway] error:', err.message));
 }
 
-// -----------------------------------------------------------------------------
-// Register
-// -----------------------------------------------------------------------------
-
 export function registerTunnel(app: Express, server: Server) {
-
-  // Start the single shared TCP gateway
   startTcpGateway();
 
-  // Register a new tunnel — returns token and URLs
   app.post('/tunnel', (req, res) => {
     const type = (req.body?.type === 'tcp') ? 'tcp' : 'http';
 
@@ -258,24 +207,17 @@ export function registerTunnel(app: Express, server: Server) {
     });
   });
 
-  // Incoming HTTP requests on *.tunnel.canister.software
   app.use((req, res, next) => {
-    const host     = req.headers.host ?? '';
-    const isTunnel = host.endsWith('.tunnel.canister.software');
-
-    if (!isTunnel) return next();
+    const host = req.headers.host ?? '';
+    if (!host.endsWith('.tunnel.canister.software')) return next();
 
     const subdomain = host.split('.')[0];
+    const ct        = req.headers['content-type'] ?? '';
 
-    // For non-JSON content types express.json() left the stream unconsumed — collect raw bytes
-    const ct = req.headers['content-type'] ?? '';
     if (!ct.includes('application/json') && req.body === undefined) {
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
-      req.on('end', () => {
-        (req as any).rawBody = Buffer.concat(chunks);
-        handleTunnelRequest();
-      });
+      req.on('end',  () => { (req as any).rawBody = Buffer.concat(chunks); handleTunnelRequest(); });
       return;
     }
 
@@ -359,7 +301,6 @@ export function registerTunnel(app: Express, server: Server) {
 
   tunnelWss.on('connection', (ws: WebSocket) => {
     const tunnelId = (ws as any).tunnelId as string;
-
     const tunnel: TunnelEntry = { tunnelId, ws, streams: new Map() };
     activeTunnels.set(tunnelId, tunnel);
     console.log(`[Tunnel Connected] ${tunnelId}`);
@@ -367,7 +308,9 @@ export function registerTunnel(app: Express, server: Server) {
     ws.send(JSON.stringify({ type: 'tunnel_open', tunnelId }));
 
     ws.on('message', (data: Buffer) => {
-      const frame  = decodeFrame(data);
+      let frame: ReturnType<typeof decodeFrame>;
+      try { frame = decodeFrame(data); } catch { return; }
+
       const stream = tunnel.streams.get(frame.streamId);
       if (!stream) return;
 
@@ -382,12 +325,9 @@ export function registerTunnel(app: Express, server: Server) {
       console.log(`[Tunnel Disconnected] ${tunnelId}`);
     });
 
-    ws.on('error', (err: Error) => {
-      console.error(`[Tunnel Error] ${tunnelId}:`, err.message);
-    });
+    ws.on('error', (err: Error) => console.error(`[Tunnel Error] ${tunnelId}:`, err.message));
   });
 
-  // Clean up expired tokens
   setInterval(() => {
     const now = Date.now();
     for (const [token, p] of pendingTokens) {

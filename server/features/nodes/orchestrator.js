@@ -1,21 +1,18 @@
-import crypto from 'crypto';
+import crypto                from 'crypto';
+import { isIPv4, isIPv6 }   from 'node:net';
+import { isPrivateTarget }   from '../../utils/ssrf.ts';
 import { paymentMiddleware } from '@x402/express';
-import { benchmarkNode } from '../../utils/benchmark.js';
-import { provisionNodeDNS } from '../../utils/dns.js';
-import NodeStore from '../../data/node_store.js';
-import { observeNode } from '../ip-pool/observer.ts';
+import { benchmarkNode }     from '../../utils/benchmark.js';
+import { provisionNodeDNS }  from '../../utils/dns.js';
+import NodeStore             from '../../data/node_store.js';
+import { observeNode }       from '../ip-pool/observer.ts';
+
 
 function requireLoopback(req, res, next) {
   const remote = req.socket.remoteAddress ?? '';
-
-  const isLoopback =
-    remote === '127.0.0.1'        ||
-    remote === '::1'              ||
-    remote === '::ffff:127.0.0.1';
-
-  if (isLoopback) return next();
-
-  console.warn(`[Nodes] Blocked unauthorised DELETE attempt from ${remote}`);
+  const ok = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  if (ok) return next();
+  console.warn(`[Nodes] Blocked unauthorised DELETE from ${remote}`);
   return res.status(403).json({ error: 'Forbidden' });
 }
 
@@ -24,8 +21,7 @@ const INCREMENT  = 50;
 const MAX_PRICE  = 1000;
 
 function calculateJoinPrice() {
-  const nodeCount = NodeStore.listNodes().length;
-  return Math.min(BASE_PRICE + nodeCount * INCREMENT, MAX_PRICE);
+  return Math.min(BASE_PRICE + NodeStore.listNodes().length * INCREMENT, MAX_PRICE);
 }
 
 export function registerNodes(app, httpsServer, x402Server, config) {
@@ -37,18 +33,8 @@ export function registerNodes(app, httpsServer, x402Server, config) {
       {
         'POST /node/join': {
           accepts: [
-            {
-              scheme:  'exact',
-              price:   () => `$${calculateJoinPrice()}`,
-              network: 'eip155:84532',
-              payTo:   EVM_PAY_TO,
-            },
-            {
-              scheme:  'exact',
-              price:   () => `$${calculateJoinPrice()}`,
-              network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
-              payTo:   SOLANA_PAY_TO,
-            },
+            { scheme: 'exact', price: () => `$${calculateJoinPrice()}`, network: 'eip155:84532',                          payTo: EVM_PAY_TO    },
+            { scheme: 'exact', price: () => `$${calculateJoinPrice()}`, network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', payTo: SOLANA_PAY_TO },
           ],
           description: 'Join the Consensus Network',
           mimeType:    'application/json',
@@ -58,6 +44,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
     ),
     async (req, res) => {
       const startTime = Date.now();
+      const paidPrice = calculateJoinPrice();
 
       try {
         const {
@@ -75,30 +62,31 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           capabilities: declaredCapabilities,
         } = req.body;
 
-        // ── Required field validation ─────────────────────────────────────────
-
         if (!ipv6 || !port || !test_endpoint || !region || !contact ||
             !evm_address || !solana_address || !icp_address) {
           return res.status(400).json({
-            error: 'Missing required fields',
-            required: [
-              'ipv6', 'port', 'test_endpoint', 'region', 'contact',
-              'evm_address', 'solana_address', 'icp_address',
-            ],
+            error:    'Missing required fields',
+            required: ['ipv6', 'port', 'test_endpoint', 'region', 'contact', 'evm_address', 'solana_address', 'icp_address'],
           });
         }
+
+        if (String(region).length  > 64)  return res.status(400).json({ error: 'region too long (max 64)'   });
+        if (String(contact).length > 256) return res.status(400).json({ error: 'contact too long (max 256)' });
 
         if (!pubkey_secp256k1_pem && !pubkey_ed25519_pem) {
-          return res.status(400).json({
-            error: 'At least one public key is required',
-            fields: ['pubkey_secp256k1_pem', 'pubkey_ed25519_pem'],
-          });
+          return res.status(400).json({ error: 'At least one public key is required', fields: ['pubkey_secp256k1_pem', 'pubkey_ed25519_pem'] });
         }
 
-        // ── Address format validation ─────────────────────────────────────────
-
-        if (!ipv6.includes(':')) {
+        if (!isIPv6(ipv6)) {
           return res.status(400).json({ error: 'Invalid IPv6 address format' });
+        }
+        if (ipv4 != null && ipv4 !== '' && !isIPv4(String(ipv4))) {
+          return res.status(400).json({ error: 'Invalid IPv4 address format' });
+        }
+
+        const portNum = Number(port);
+        if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+          return res.status(400).json({ error: 'Invalid port: must be an integer 1-65535' });
         }
         if (!evm_address.startsWith('0x') || evm_address.length !== 42) {
           return res.status(400).json({ error: 'Invalid EVM address format' });
@@ -107,44 +95,32 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           return res.status(400).json({ error: 'Invalid Solana address format' });
         }
 
-        // ── Parse public keys ─────────────────────────────────────────────────
+        try { new URL(test_endpoint); } catch {
+          return res.status(400).json({ error: 'Invalid test_endpoint URL' });
+        }
+        if (await isPrivateTarget(test_endpoint)) {
+          return res.status(400).json({ error: 'test_endpoint must be a public address' });
+        }
 
         let pubkeySecp256k1 = null;
         let pubkeyEd25519   = null;
 
         try {
-          if (pubkey_secp256k1_pem) {
-            pubkeySecp256k1 = crypto
-              .createPublicKey(pubkey_secp256k1_pem)
-              .export({ format: 'der', type: 'spki' });
-          }
-          if (pubkey_ed25519_pem) {
-            pubkeyEd25519 = crypto
-              .createPublicKey(pubkey_ed25519_pem)
-              .export({ format: 'der', type: 'spki' });
-          }
+          if (pubkey_secp256k1_pem) pubkeySecp256k1 = crypto.createPublicKey(pubkey_secp256k1_pem).export({ format: 'der', type: 'spki' });
+          if (pubkey_ed25519_pem)   pubkeyEd25519   = crypto.createPublicKey(pubkey_ed25519_pem).export({ format: 'der', type: 'spki' });
         } catch {
           return res.status(400).json({ error: 'Invalid public key PEM format' });
         }
-
-        // ── Duplicate check ───────────────────────────────────────────────────
 
         console.log('\nPayment verified — processing node registration');
         console.log(`   IPv6: ${ipv6}:${port}`);
         console.log(`   Region: ${region}`);
         console.log(`   Keys: ${[pubkey_secp256k1_pem && 'secp256k1', pubkey_ed25519_pem && 'ed25519'].filter(Boolean).join(', ')}`);
 
-        const duplicate = NodeStore.listNodes().find(
-          (n) => n.capabilities?.ipv6 === ipv6,
-        );
+        const duplicate = NodeStore.listNodes().find((n) => n.capabilities?.ipv6 === ipv6);
         if (duplicate) {
-          return res.status(409).json({
-            error:            'IPv6 already registered',
-            existing_node_id: duplicate.id,
-          });
+          return res.status(409).json({ error: 'IPv6 already registered', existing_node_id: duplicate.id });
         }
-
-        // ── Benchmark ─────────────────────────────────────────────────────────
 
         console.log('\nRunning benchmark tests...');
         const benchmarkResult = await benchmarkNode(test_endpoint);
@@ -159,8 +135,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           });
         }
         console.log(` Benchmark passed: ${benchmarkResult.score}/100`);
-
-        // ── DNS ───────────────────────────────────────────────────────────────
 
         const nodeId    = crypto.randomBytes(6).toString('hex');
         const subdomain = `${nodeId}.consensus.canister.software`;
@@ -177,8 +151,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           return res.status(500).json({ error: 'DNS provisioning failed', message: dnsError.message });
         }
 
-        // ── Store ─────────────────────────────────────────────────────────────
-
         console.log('\nStoring node...');
         NodeStore.upsertNode({
           id:               nodeId,
@@ -187,15 +159,15 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           region,
           contact,
           capabilities: {
-            forward_proxy:   declaredCapabilities?.forward_proxy   ?? false,
-            reverse_proxy:   declaredCapabilities?.reverse_proxy   ?? false,
-            websockets:      declaredCapabilities?.websockets       ?? false,
-            tunnels:         declaredCapabilities?.tunnels          ?? false,
-            ip_leasing:      declaredCapabilities?.ip_leasing       ?? false,
-            benchmark_score: benchmarkResult.score,
+            forward_proxy:    declaredCapabilities?.forward_proxy  ?? false,
+            reverse_proxy:    declaredCapabilities?.reverse_proxy  ?? false,
+            websockets:       declaredCapabilities?.websockets      ?? false,
+            tunnels:          declaredCapabilities?.tunnels         ?? false,
+            ip_leasing:       declaredCapabilities?.ip_leasing      ?? false,
+            benchmark_score:  benchmarkResult.score,
             fetch_latency_ms: benchmarkResult.details.fetch.avg_latency_ms,
             cpu_performance:  benchmarkResult.details.cpu.hashes_per_second,
-            ipv4:  ipv4 || null,
+            ipv4:             ipv4 || null,
             ipv6,
             port,
           },
@@ -208,29 +180,23 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         NodeStore.setDomain(nodeId, subdomain);
         console.log(' Node stored');
 
-        // ── First observation ─────────────────────────────────────────────────
-
         observeNode(nodeId, ipv4 || null, ipv6).catch((err) =>
           console.error(`[Observer] Initial observation failed for ${nodeId}:`, err),
         );
 
-        // ── Response ──────────────────────────────────────────────────────────
-
         const processingTime = Date.now() - startTime;
-        const paidPrice      = calculateJoinPrice();
-
         console.log(`\n✅ Node registered in ${processingTime}ms — price paid: $${paidPrice}\n`);
 
         res.json({
-          success:          true,
-          node_id:          nodeId,
-          domain:           subdomain,
+          success:            true,
+          node_id:            nodeId,
+          domain:             subdomain,
           ipv6,
-          ipv4:             ipv4 || null,
+          ipv4:               ipv4 || null,
           port,
-          status:           'active',
-          benchmark_score:  benchmarkResult.score,
-          price_paid:       paidPrice,
+          status:             'active',
+          benchmark_score:    benchmarkResult.score,
+          price_paid:         paidPrice,
           processing_time_ms: processingTime,
           next_steps: [
             'DNS propagation may take up to 5 minutes',
@@ -245,8 +211,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
     },
   );
 
-  // ── Heartbeat ───────────────────────────────────────────────────────────────
-
   app.post('/node/heartbeat/:node_id', (req, res) => {
     try {
       const { node_id } = req.params;
@@ -256,15 +220,12 @@ export function registerNodes(app, httpsServer, x402Server, config) {
       if (!node) return res.status(404).json({ error: 'Node not found' });
 
       NodeStore.heartbeat(node_id, { rps, p95_ms, version });
-
       res.json({ success: true, node_id, message: 'Heartbeat recorded', next_heartbeat_in: 300 });
     } catch (error) {
       console.error('Heartbeat error:', error);
       res.status(500).json({ error: 'Heartbeat failed', message: error.message });
     }
   });
-
-  // ── Status ──────────────────────────────────────────────────────────────────
 
   app.get('/node/status/:node_id', (req, res) => {
     try {
@@ -288,8 +249,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
     }
   });
 
-  // ── List ────────────────────────────────────────────────────────────────────
-
   app.get('/nodes', (req, res) => {
     try {
       const nodes = NodeStore.listNodes();
@@ -297,16 +256,16 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         total:              nodes.length,
         current_join_price: calculateJoinPrice(),
         nodes: nodes.map((n) => ({
-          node_id:         n.id,
-          domain:          n.domain,
-          status:          n.status,
-          region:          n.region,
-          capabilities:    n.capabilities,
-          evm_address:     n.evm_address,
-          solana_address:  n.solana_address,
-          icp_address:     n.icp_address,
-          created_at:      n.created_at,
-          heartbeat:       n.heartbeat,
+          node_id:        n.id,
+          domain:         n.domain,
+          status:         n.status,
+          region:         n.region,
+          capabilities:   n.capabilities,
+          evm_address:    n.evm_address,
+          solana_address: n.solana_address,
+          icp_address:    n.icp_address,
+          created_at:     n.created_at,
+          heartbeat:      n.heartbeat,
         })),
       });
     } catch (error) {
@@ -315,15 +274,11 @@ export function registerNodes(app, httpsServer, x402Server, config) {
     }
   });
 
-  // ── Delete ──────────────────────────────────────────────────────────────────
-
   app.delete('/node/:node_id', requireLoopback, (req, res) => {
     try {
       const { node_id } = req.params;
       const deleted = NodeStore.deleteNode(node_id);
-      if (!deleted) {
-        return res.status(404).json({ error: 'Node not found', node_id });
-      }
+      if (!deleted) return res.status(404).json({ error: 'Node not found', node_id });
       console.log(`[Nodes] Deleted node: ${node_id}`);
       res.json({ deleted: true, node_id });
     } catch (error) {

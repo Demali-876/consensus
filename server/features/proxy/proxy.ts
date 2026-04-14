@@ -4,6 +4,7 @@ import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
 import crypto                            from 'node:crypto';
 import Router                            from '../../router.ts';
+import { isPrivateTarget }               from '../../utils/ssrf.ts';
 
 const gunzipAsync           = promisify(gunzip);
 const inflateAsync          = promisify(inflate);
@@ -52,6 +53,11 @@ interface DedupeParams {
   headers?:   Headers;
   body?:      RequestBody;
 }
+
+
+// ── Request/response size caps ─────────────────────────────────────────────────
+const MAX_RESPONSE_BYTES = 50 * 1024 * 1024;  // 50 MB
+const MAX_BODY_BYTES     = 10 * 1024 * 1024;  // 10 MB
 
 const STRIP_REQUEST_HEADERS = new Set([
   'host', 'content-length', 'content-encoding', 'transfer-encoding', 'connection',
@@ -196,6 +202,9 @@ export default class ConsensusProxy {
   ): Promise<ProxyResponse> {
     try { new URL(target_url); } catch {
       throw new TypeError(`Invalid target_url: ${target_url}`);
+    }
+    if (await isPrivateTarget(target_url)) {
+      throw new TypeError(`Forbidden target_url — private/internal addresses are not allowed`);
     }
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
@@ -344,8 +353,8 @@ export default class ConsensusProxy {
         maxRedirects:     5,
         decompress:       false,
         responseType:     'arraybuffer',
-        maxContentLength: Infinity,
-        maxBodyLength:    Infinity,
+        maxContentLength: MAX_RESPONSE_BYTES,
+        maxBodyLength:    MAX_BODY_BYTES,
       });
 
       let raw: Buffer = Buffer.isBuffer(response.data)
