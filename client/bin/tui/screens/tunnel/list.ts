@@ -1,6 +1,6 @@
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
-import { C } from '../theme';
-import { scanAll, SPINNER, type ScannedPort } from '../lib/ports.ts';
+import { C } from '../../../theme';
+import { scanAll, SPINNER, type ScannedPort } from '../../../lib/ports.ts';
 
 const MAX_SHOWN = 8;
 

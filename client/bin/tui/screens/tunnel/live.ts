@@ -82,7 +82,7 @@ function formatUptime(ms: number): string {
 }
 
 // ─── Palette (dark / light mode aware) ───────────────────────────────────────
-import { C } from './theme';
+import { C } from '../../../theme';
 
 // ─── Build the TUI layout ────────────────────────────────────────────────────
 

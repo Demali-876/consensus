@@ -1,10 +1,10 @@
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
-import { C } from '../theme';
-import { writeTraceLog } from '../lib/crash-log';
-import { type FieldDef, type FormState, renderField, handleKey } from '../lib/form.ts';
-import { chooseDefaultPort, REVERSE_PROXY_PORT_CANDIDATES, scanPorts, HTTP_PORTS, SPINNER } from '../lib/ports.ts';
-import type { PreferNetwork } from '../../src/payment-fetch.js';
-import { NETWORK_CAIP2S, NETWORK_LABELS } from '../lib/networks.ts';
+import { C } from '../../../theme';
+import { writeTraceLog } from '../../../lib/crash-log';
+import { type FieldDef, type FormState, renderField, handleKey } from '../../../lib/form.ts';
+import { chooseDefaultPort, REVERSE_PROXY_PORT_CANDIDATES, scanPorts, HTTP_PORTS, SPINNER } from '../../../lib/ports.ts';
+import type { PreferNetwork } from '../../../../src/payment-fetch.js';
+import { NETWORK_CAIP2S, NETWORK_LABELS } from '../../../lib/networks.ts';
 
 export type ReverseSetupResult = {
   upstream:       { host: string; port: number; protocol: 'http' | 'https' };

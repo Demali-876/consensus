@@ -1,46 +1,15 @@
 #!/usr/bin/env bun
 
-import { showLanding }        from './screens/landing';
-import { showTunnels }        from './screens/tunnels';
-import { showProxy }          from './screens/proxy';
-import { showWebsockets }     from './screens/websockets';
-import { showIps }            from './screens/ips';
-import { showSettings }       from './screens/settings';
-import { ConsensusSDK }       from './lib/setup';
-import { runTunnelCommand }   from './commands/tunnel-cmd';
-import { runProxyCommand }    from './commands/proxy-cmd';
-import { runWsCommand }       from './commands/ws-cmd';
-import { runIpCommand }       from './commands/ip-cmd';
-import { installProcessLogCapture, writeCrashLog, writeTraceLog } from './lib/crash-log';
-import chalk                  from 'chalk';
+import { runTui }            from './tui/navigator';
+import { ConsensusSDK }      from './lib/setup';
+import { runTunnelCommand }  from './commands/tunnel';
+import { runProxyCommand }   from './commands/proxy';
+import { runWsCommand }      from './commands/ws';
+import { runIpCommand }      from './commands/ip';
+import { installProcessLogCapture, writeCrashLog } from './lib/crash-log';
+import chalk from 'chalk';
 
 const processLogPath = installProcessLogCapture();
-
-// ─── TUI navigation ───────────────────────────────────────────────────────────
-
-async function runTui(): Promise<void> {
-  writeTraceLog('runTui.enter');
-  const goTo = async (section: string) => {
-    writeTraceLog('runTui.goTo', { section });
-    if      (section === 'tunnels')       await showTunnels();
-    else if (section === 'proxy')         await showProxy();
-    else if (section === 'proxy-forward') await showProxy('forward');
-    else if (section === 'proxy-reverse') await showProxy('reverse');
-    else if (section === 'proxy-manage')  await showProxy();
-    else if (section === 'websockets')    await showWebsockets();
-    else if (section === 'ips')           await showIps();
-    else if (section === 'settings')      await showSettings();
-  };
-
-  let next = await showLanding();
-  writeTraceLog('runTui.afterLanding', { next });
-  while (next !== 'quit') {
-    await goTo(next);
-    next = await showLanding();
-    writeTraceLog('runTui.afterLanding', { next });
-  }
-  writeTraceLog('runTui.exit', { next });
-}
 
 // ─── CLI entry point ──────────────────────────────────────────────────────────
 
@@ -97,17 +66,7 @@ function reportFatal(context: string, err: unknown): void {
   console.error(chalk.dim(`Process log: ${processLogPath}`));
 }
 
-process.on('uncaughtException', (err) => {
-  reportFatal('uncaughtException', err);
-  process.exit(1);
-});
+process.on('uncaughtException',  (err) => { reportFatal('uncaughtException',  err); process.exit(1); });
+process.on('unhandledRejection', (err) => { reportFatal('unhandledRejection', err); process.exit(1); });
 
-process.on('unhandledRejection', (err) => {
-  reportFatal('unhandledRejection', err);
-  process.exit(1);
-});
-
-main().catch((err: Error) => {
-  reportFatal('main.catch', err);
-  process.exit(1);
-});
+main().catch((err: Error) => { reportFatal('main.catch', err); process.exit(1); });

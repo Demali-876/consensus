@@ -19,7 +19,7 @@ import {
   BoxRenderable,
   TextRenderable,
 } from '@opentui/core';
-import { C } from '../theme';
+import { C } from '../../theme';
 
 const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
 
@@ -88,7 +88,7 @@ const MAX_PALETTE_ROWS = 8;
 // ─── Landing ──────────────────────────────────────────────────────────────────
 
 export async function showLanding(): Promise<LandingAction> {
-  const pkg     = await readFile(path.join(import.meta.dir, '../../package.json'), 'utf8');
+  const pkg     = await readFile(path.join(import.meta.dir, '../../../package.json'), 'utf8');
   const version = JSON.parse(pkg).version as string;
   const recent  = loadSessions();
 

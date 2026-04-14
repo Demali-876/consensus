@@ -4,7 +4,7 @@
  */
 
 import chalk           from 'chalk';
-import { runTunnel }   from '../tunnel';
+import { runTunnel }   from '../tui/screens/tunnel/live';
 
 export async function runTunnelCommand(args: string[]): Promise<void> {
   const [tunnelType, tunnelTarget] = args as [string | undefined, string | undefined];

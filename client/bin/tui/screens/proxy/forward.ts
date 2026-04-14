@@ -1,11 +1,11 @@
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
-import { C } from '../theme';
-import { loadConfig } from '../lib/config.ts';
-import { writeTraceLog } from '../lib/crash-log';
-import { type FieldDef, type FormState, renderField, handleKey } from '../lib/form.ts';
-import { scanPorts, HTTP_PORTS, SPINNER } from '../lib/ports.ts';
-import type { PreferNetwork } from '../../src/payment-fetch.js';
-import { NETWORK_CAIP2S, NETWORK_LABELS } from '../lib/networks.ts';
+import { C } from '../../../theme';
+import { loadConfig } from '../../../lib/config.ts';
+import { writeTraceLog } from '../../../lib/crash-log';
+import { type FieldDef, type FormState, renderField, handleKey } from '../../../lib/form.ts';
+import { scanPorts, HTTP_PORTS, SPINNER } from '../../../lib/ports.ts';
+import type { PreferNetwork } from '../../../../src/payment-fetch.js';
+import { NETWORK_CAIP2S, NETWORK_LABELS } from '../../../lib/networks.ts';
 
 export type ForwardSetupResult = {
   appPort?:        number;

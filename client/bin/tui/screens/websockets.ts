@@ -5,10 +5,10 @@ import {
   BoxRenderable,
   TextRenderable,
 } from '@opentui/core';
-import { C } from '../theme';
-import { loadConfig, makeFetchWithPayment, fmtUsd } from '../lib/config.ts';
-import { getWsToken, connectWs, quoteWs } from '../lib/websockets.ts';
-import type { WsModel } from '../lib/websockets.ts';
+import { C } from '../../theme';
+import { loadConfig, makeFetchWithPayment, fmtUsd } from '../../lib/config.ts';
+import { getWsToken, connectWs, quoteWs } from '../../lib/websockets.ts';
+import type { WsModel } from '../../lib/websockets.ts';
 
 const TITLE = 'WEBSOCKETS';
 

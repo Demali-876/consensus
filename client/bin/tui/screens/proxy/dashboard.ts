@@ -1,10 +1,10 @@
 // proxy-dashboard.ts — Live stats dashboard for a running proxy worker.
 
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
-import { launchManagedApp, probeManagedApp, probeManagedAppUntilReady, stopManagedApp } from '../lib/app-manager.js';
-import { writeTraceLog } from '../lib/crash-log';
-import { C } from '../theme';
-import type { WorkerEntry } from './proxy-hub.js';
+import { launchManagedApp, probeManagedApp, probeManagedAppUntilReady, stopManagedApp } from '../../../lib/app-manager.js';
+import { writeTraceLog } from '../../../lib/crash-log';
+import { C } from '../../../theme';
+import type { WorkerEntry } from './hub.js';
 
 function fmtMs(ms: number): string {
   const s = Math.floor(ms / 1000);

@@ -1,13 +1,13 @@
-import { showProxyHub, registerWorker, removeWorker, type WorkerEntry } from './proxy-hub.js';
-import { showForwardSetup }   from './forward-setup.js';
-import { showReverseSetup }   from './reverse-setup.js';
-import { showProxyDashboard } from './proxy-dashboard.js';
-import { dispatchProxy }      from '../../src/proxy-worker.js';
-import type { ProxyWorkerHandle, WorkerStats } from '../../src/proxy-worker.js';
-import { createAppState } from '../lib/app-manager.js';
-import { writeCrashLog, writeTraceLog } from '../lib/crash-log';
+import { showProxyHub, registerWorker, removeWorker, type WorkerEntry } from './hub.js';
+import { showForwardSetup }   from './forward.js';
+import { showReverseSetup }   from './reverse.js';
+import { showProxyDashboard } from './dashboard.js';
+import { dispatchProxy }      from '../../../../src/proxy-worker.js';
+import type { ProxyWorkerHandle, WorkerStats } from '../../../../src/proxy-worker.js';
+import { createAppState } from '../../../lib/app-manager.js';
+import { writeCrashLog, writeTraceLog } from '../../../lib/crash-log';
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
-import { C }                  from '../theme';
+import { C }                  from '../../../theme';
 
 function createPreloadHandle(): ProxyWorkerHandle {
   const startedAt = Date.now();

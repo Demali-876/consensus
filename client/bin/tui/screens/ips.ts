@@ -16,10 +16,10 @@ import {
   BoxRenderable,
   TextRenderable,
 } from '@opentui/core';
-import { C } from '../theme';
-import { loadConfig, saveConfig } from '../lib/config.ts';
-import { listNodes, leaseNode, releaseNode, fmtCapabilities } from '../lib/ip.ts';
-import type { NodeInfo } from '../lib/ip.ts';
+import { C } from '../../theme';
+import { loadConfig, saveConfig } from '../../lib/config.ts';
+import { listNodes, leaseNode, releaseNode, fmtCapabilities } from '../../lib/ip.ts';
+import type { NodeInfo } from '../../lib/ip.ts';
 
 const TITLE = 'IPS / NODES';
 

@@ -24,9 +24,11 @@
     "build:esm":   "bun build src/index.ts --outfile dist/index.js  --format esm --target node --packages=external",
     "build:cjs":   "bun build src/index.ts --outfile dist/index.cjs --format cjs --target node --packages=external",
     "build:types": "tsc -p tsconfig.build.json",
-    "consensus": "bun bin/consensus.ts",
-    "setup": "bun bin/consensus.ts setup",
-    "reset": "bun bin/consensus.ts setup --force",
+    "consensus":   "bun bin/consensus.ts",
+    "dev":         "bun --watch bin/consensus.ts",
+    "dev:cmd":     "bun --watch bin/consensus.ts",
+    "setup":       "bun bin/consensus.ts setup",
+    "reset":       "bun bin/consensus.ts setup --force",
     "start-server": "bun test/proxy/server.ts"
   },
   "dependencies": {
