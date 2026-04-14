@@ -201,8 +201,14 @@ function stableIpv4Window(history: DeviceIpObservation[], hours: number): boolea
   const values = history.map((entry) => entry.publicIps.ipv4).filter((value): value is string => !!value);
   if (values.length < 3) return false;
   if (new Set(values).size !== 1) return false;
-  const oldest = history.find((entry) => entry.publicIps.ipv4)?.observedAt;
-  const newest = [...history].reverse().find((entry) => entry.publicIps.ipv4)?.observedAt;
+  let oldest: number | undefined;
+  for (let i = 0; i < history.length; i++) {
+    if (history[i]!.publicIps.ipv4) { oldest = history[i]!.observedAt; break; }
+  }
+  let newest: number | undefined;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]!.publicIps.ipv4) { newest = history[i]!.observedAt; break; }
+  }
   if (oldest == null || newest == null) return false;
   return newest - oldest >= hours * 60 * 60 * 1000;
 }
@@ -213,8 +219,14 @@ function stableIpv6PrefixWindow(history: DeviceIpObservation[], hours: number): 
     .filter((value): value is string => !!value);
   if (values.length < 3) return false;
   if (new Set(values.map(ipv6Prefix64)).size !== 1) return false;
-  const oldest = history.find((entry) => entry.publicIps.ipv6)?.observedAt;
-  const newest = [...history].reverse().find((entry) => entry.publicIps.ipv6)?.observedAt;
+  let oldest: number | undefined;
+  for (let i = 0; i < history.length; i++) {
+    if (history[i]!.publicIps.ipv6) { oldest = history[i]!.observedAt; break; }
+  }
+  let newest: number | undefined;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]!.publicIps.ipv6) { newest = history[i]!.observedAt; break; }
+  }
   if (oldest == null || newest == null) return false;
   return newest - oldest >= hours * 60 * 60 * 1000;
 }
@@ -375,22 +387,25 @@ export function classifyDeviceIps(input: ClassifyDeviceIpsInput): DeviceIpClue {
   };
 }
 
+async function tryEndpoint(endpoint: string, family: IpFamily): Promise<string> {
+  const response = await fetch(endpoint, {
+    signal:  AbortSignal.timeout(8_000),
+    headers: { 'user-agent': 'Consensus-IP-Detector/1.0' },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const body = await response.text();
+  const ip   = extractIpCandidate(body, family);
+  if (!ip) throw new Error('No valid IP in response');
+  return ip;
+}
+
 export async function resolvePublicIp(family: IpFamily): Promise<string | null> {
   const endpoints = PUBLIC_IP_ENDPOINTS[family === 4 ? 'ipv4' : 'ipv6'];
-  for (const endpoint of endpoints) {
-    try {
-      const response = await fetch(endpoint, {
-        headers: { 'user-agent': 'Consensus-IP-Detector/1.0' },
-      });
-      if (!response.ok) continue;
-      const body = await response.text();
-      const ip = extractIpCandidate(body, family);
-      if (ip) return ip;
-    } catch {
-      // Try the next endpoint.
-    }
+  try {
+    return await Promise.any(endpoints.map((ep) => tryEndpoint(ep, family)));
+  } catch {
+    return null;
   }
-  return null;
 }
 
 export async function resolvePublicIps(): Promise<PublicIps> {
@@ -408,16 +423,22 @@ export async function reverseDnsForIp(ip: string): Promise<string[]> {
     return [];
   }
 }
+const LOCAL_ASSIGNMENT_CACHE_MS = 5 * 60 * 1000;
+let _localAssignmentCache: { value: LocalAssignment; at: number } | null = null;
 
 function detectMacLocalAssignment(): LocalAssignment {
+  if (_localAssignmentCache && Date.now() - _localAssignmentCache.at < LOCAL_ASSIGNMENT_CACHE_MS) {
+    return _localAssignmentCache.value;
+  }
+  let result: LocalAssignment = 'unknown';
   try {
     const routeInfo = execSync('route -n get default', {
       stdio: ['ignore', 'pipe', 'ignore'],
     }).toString();
     const device = routeInfo.match(/interface:\s+([^\s]+)/)?.[1];
-    if (!device) return 'unknown';
+    if (!device) { _localAssignmentCache = { value: 'unknown', at: Date.now() }; return 'unknown'; }
 
-    const ports = execSync('networksetup -listallhardwareports', {
+    const ports  = execSync('networksetup -listallhardwareports', {
       stdio: ['ignore', 'pipe', 'ignore'],
     }).toString();
 
@@ -431,20 +452,21 @@ function detectMacLocalAssignment(): LocalAssignment {
       }
     }
 
-    if (!serviceName) return 'unknown';
-
-    const info = execSync(`networksetup -getinfo "${serviceName}"`, {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).toString();
-    const firstLine = info.split(/\r?\n/, 1)[0]?.trim() ?? '';
-
-    if (/^DHCP\b/i.test(firstLine)) return 'dhcp';
-    if (/^Manual\b/i.test(firstLine)) return 'manual';
-    if (/^BOOTP\b/i.test(firstLine)) return 'bootp';
-    return firstLine ? 'other' : 'unknown';
+    if (serviceName) {
+      const info      = execSync(`networksetup -getinfo "${serviceName}"`, {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).toString();
+      const firstLine = info.split(/\r?\n/, 1)[0]?.trim() ?? '';
+      if      (/^DHCP\b/i.test(firstLine))   result = 'dhcp';
+      else if (/^Manual\b/i.test(firstLine)) result = 'manual';
+      else if (/^BOOTP\b/i.test(firstLine))  result = 'bootp';
+      else                                    result = firstLine ? 'other' : 'unknown';
+    }
   } catch {
-    return 'unknown';
+    result = 'unknown';
   }
+  _localAssignmentCache = { value: result, at: Date.now() };
+  return result;
 }
 
 export function detectLocalAssignment(): LocalAssignment {
