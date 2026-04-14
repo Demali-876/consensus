@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'consensus-main',
       script: './node_modules/.bin/dotenvx',
-      args: 'run -- node server.js',
+      args: 'run --env-file .env -- node server.js',
       interpreter: 'none',
       cwd: '/home/icpi/Desktop/consensus/server',
       instances: 1,
@@ -20,7 +20,7 @@ module.exports = {
     {
       name: 'consensus-proxy',
       script: './node_modules/.bin/dotenvx',
-      args: 'run -- node server.js',
+      args: 'run --env-file .env.proxy -- node server.js',
       interpreter: 'none',
       cwd: '/home/icpi/Desktop/consensus/x402-proxy',
       instances: 1,
@@ -28,7 +28,7 @@ module.exports = {
       watch: false,
       max_memory_restart: '2G',
       env: {
-        DOTENV_PRIVATE_KEY: process.env.DOTENV_PRIVATE_KEY_PROXY,
+        DOTENV_PRIVATE_KEY_PROXY: process.env.DOTENV_PRIVATE_KEY_PROXY,
       },
       error_file: '/home/icpi/Desktop/consensus/logs/proxy-error.log',
       out_file: '/home/icpi/Desktop/consensus/logs/proxy-out.log',

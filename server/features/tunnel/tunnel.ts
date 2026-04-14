@@ -117,7 +117,13 @@ function startTcpGateway(): void {
 
     socket.setTimeout(10_000);
     socket.on('timeout', () => { if (!routed) socket.destroy(); });
-    socket.on('error',   (err: Error) => { if (!routed) console.error('[TCP Gateway] pre-route error:', err.message); });
+    socket.on('error', (err: Error) => {
+      if (!routed) {
+        socket.destroy();
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ECONNRESET') console.error('[TCP Gateway] pre-route error:', err.message);
+      }
+    });
 
     socket.on('data', (chunk: Buffer) => {
       if (routed) return;
