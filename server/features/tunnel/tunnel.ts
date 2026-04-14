@@ -56,6 +56,7 @@ const pendingTokens = new Map<string, PendingToken>();
 let   streamCounter = 0;
 
 const TCP_PORT = 20_000;
+const WS_BACKPRESSURE_BYTES = parseInt(process.env.TUNNEL_WS_BACKPRESSURE_BYTES ?? '', 10) || 1 * 1024 * 1024;
 
 const STRIP_HEADERS = new Set([
   'x-forwarded-host', 'forwarded', 'via',
@@ -112,8 +113,9 @@ function parseRawResponse(buf: Buffer): { status: number; headers: Record<string
 
 function startTcpGateway(): void {
   const server = net.createServer((socket) => {
-    let headerBuf = Buffer.alloc(0);
-    let routed    = false;
+    const headerChunks: Buffer[] = [];
+    let   headerLen = 0;
+    let   routed    = false;
 
     socket.setTimeout(10_000);
     socket.on('timeout', () => { if (!routed) socket.destroy(); });
@@ -128,11 +130,11 @@ function startTcpGateway(): void {
     socket.on('data', (chunk: Buffer) => {
       if (routed) return;
 
-      headerBuf = Buffer.concat([headerBuf, chunk]);
-
-      if (headerBuf.length > 256) { socket.destroy(); return; }
-
-      const newline = headerBuf.indexOf('\n');
+      headerLen += chunk.length;
+      if (headerLen > 256) { socket.destroy(); return; }
+      headerChunks.push(chunk);
+      const headerBuf = Buffer.concat(headerChunks);
+      const newline   = headerBuf.indexOf('\n');
       if (newline === -1) return;
 
       const tunnelId = headerBuf.subarray(0, newline).toString().replace(/\r$/, '').trim();
@@ -164,7 +166,12 @@ function startTcpGateway(): void {
       socket.removeAllListeners('data');
 
       socket.on('data', (data: Buffer) => {
-        if (tunnel.ws.readyState === WebSocket.OPEN) tunnel.ws.send(encodeFrame(FRAME.STREAM_DATA, streamId, data));
+        if (tunnel.ws.readyState !== WebSocket.OPEN) return;
+        tunnel.ws.send(encodeFrame(FRAME.STREAM_DATA, streamId, data));
+        if ((tunnel.ws as any).bufferedAmount > WS_BACKPRESSURE_BYTES) {
+          socket.pause();
+          tunnel.ws.once('drain', () => socket.resume());
+        }
       });
 
       socket.on('end', () => {
