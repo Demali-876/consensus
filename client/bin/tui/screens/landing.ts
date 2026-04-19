@@ -1,25 +1,15 @@
-/**
- * Landing screen
- *
- * Layout:
- *   Top bar      — CONSENSUS left, version right
- *   Centre       — block logo + tagline
- *   Main row     — left col (Recent + Network) | right col (Command Palette)
- *   Status line  — live server health
- *   Bottom bar   — hints left, canister.software right
- */
-
 import { readFile } from 'fs/promises';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
+import fs   from 'fs';
+import path  from 'path';
+import os    from 'os';
 import {
   createCliRenderer,
-  ASCIIFontRenderable,
   BoxRenderable,
   TextRenderable,
 } from '@opentui/core';
 import { C } from '../../theme';
+import { makeSpin } from '../../lib/spinners';
+import { workerRegistry } from '../screens/proxy/hub';
 
 const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
 
@@ -27,7 +17,7 @@ const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.s
 
 type Session = {
   id:        string;
-  type:      'http' | 'tcp';
+  type:      'http' | 'tcp' | 'ws';
   url:       string;
   target:    string;
   startedAt: number;
@@ -52,45 +42,27 @@ function loadSessions(): Session[] {
   } catch { return []; }
 }
 
-function timeAgo(ms: number): string {
-  const diff = Date.now() - ms;
-  const m = Math.floor(diff / 60_000);
-  const h = Math.floor(m / 60);
-  const d = Math.floor(h / 24);
-  if (d > 0) return `${d}d ago`;
-  if (h > 0) return `${h}h ago`;
-  if (m > 0) return `${m}m ago`;
-  return 'just now';
-}
+// ─── Nav items ────────────────────────────────────────────────────────────────
 
-// ─── Command palette commands ─────────────────────────────────────────────────
+export type LandingAction =
+  | 'tunnels' | 'proxy' | 'proxy-forward' | 'proxy-reverse'
+  | 'websockets' | 'ips' | 'settings' | 'quit';
 
-export type LandingAction = 'tunnels' | 'proxy' | 'proxy-forward' | 'proxy-reverse' | 'websockets' | 'ips' | 'settings' | 'quit';
+type NavItem = { icon: string; label: string; action: LandingAction };
 
-type Command = { label: string; hint: string; icon: string; action: LandingAction };
-
-const COMMANDS: Command[] = [
-  { label: 'new tunnel',  hint: 'HTTP/TCP → public URL',    icon: '⇄', action: 'tunnels'    },
-  { label: 'proxy',       hint: 'forward / reverse proxy',  icon: '⟳', action: 'proxy'      },
-  { label: 'websocket',   hint: 'WS tunnel',                icon: '⚡', action: 'websockets' },
-  { label: 'ips',  hint: 'lease an ip to route traffic', icon: '⬡', action: 'ips'  },
-  { label: 'settings',    hint: 'environment and node configuration', icon: '⚙', action: 'settings'   },
+const NAV: NavItem[] = [
+  { icon: '⇄',  label: 'TUNNEL',    action: 'tunnels'    },
+  { icon: '⟳',  label: 'PROXY',     action: 'proxy'      },
+  { icon: '⚡',  label: 'WEBSOCKET', action: 'websockets' },
+  { icon: '⬡',  label: 'IP LEASE',  action: 'ips'        },
+  { icon: '⚙',  label: 'SETTINGS',  action: 'settings'   },
 ];
-
-const PROXY_SUB = [
-  { action: 'proxy-forward' as const, label: 'forward proxy', desc: 'Route outbound traffic through the consensus network' },
-  { action: 'proxy-reverse' as const, label: 'reverse proxy', desc: 'Protect a local server with a caching proxy'         },
-];
-
-// 5 commands + proxy expands to 3 rows (parent + 2 subs) = 7 rows total
-const MAX_PALETTE_ROWS = 8;
 
 // ─── Landing ──────────────────────────────────────────────────────────────────
 
 export async function showLanding(): Promise<LandingAction> {
   const pkg     = await readFile(path.join(import.meta.dir, '../../../package.json'), 'utf8');
   const version = JSON.parse(pkg).version as string;
-  const recent  = loadSessions();
 
   const renderer = await createCliRenderer({
     exitOnCtrlC:        false,
@@ -107,364 +79,352 @@ export async function showLanding(): Promise<LandingAction> {
 
   // ── Top bar ───────────────────────────────────────────────────────────────
   const topBar = new BoxRenderable(renderer, {
-    width:           '100%',
-    flexDirection:   'row',
-    justifyContent:  'space-between',
-    paddingX:        2,
-    paddingY:        0,
-    backgroundColor: C.panel,
+    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
+    paddingX: 2, paddingY: 0, backgroundColor: C.panel,
   });
-  topBar.add(new TextRenderable(renderer, { content: 'CONSENSUS', fg: C.white,  bg: C.panel }));
-  topBar.add(new TextRenderable(renderer, { content: `v${version}`, fg: C.slate, bg: C.panel }));
+  topBar.add(new TextRenderable(renderer, { content: 'CONSENSUS',                        fg: C.white, bg: C.panel }));
+  topBar.add(new TextRenderable(renderer, { content: 'Your private network, on demand.', fg: C.dim,   bg: C.panel }));
+  topBar.add(new TextRenderable(renderer, { content: `v${version}`,                      fg: C.slate, bg: C.panel }));
   root.add(topBar);
 
-  // ── Centre — logo + tagline ───────────────────────────────────────────────
-  const centre = new BoxRenderable(renderer, {
-    width:           '100%',
-    flexDirection:   'column',
-    alignItems:      'center',
-    paddingTop:      2,
-    paddingBottom:   1,
-    backgroundColor: C.dark,
-  });
-
-  centre.add(new ASCIIFontRenderable(renderer, {
-    text:            'CONSENSUS',
-    font:            'block',
-    color:           C.white,
-    backgroundColor: C.dark,
-  }));
-
-  const tagRow = new BoxRenderable(renderer, {
-    flexDirection:  'row',
-    alignItems:     'center',
-    justifyContent: 'center',
-    paddingTop:     1,
-    backgroundColor: C.dark,
-  });
-  const segments: [string, string][] = [
-    ['I am',      C.dim],
-    [' · ',       C.dim],
-    ['you are',   C.slate],
-    [' · ',       C.dim],
-    ['we are',    C.slate],
-    [' · ',       C.dim],
-    ['consensus', C.white],
-  ];
-  for (const [text, fg] of segments) {
-    tagRow.add(new TextRenderable(renderer, { content: text, fg, bg: C.dark }));
-  }
-  centre.add(tagRow);
-  root.add(centre);
-
-  // ── Main content row ──────────────────────────────────────────────────────
+  // ── Main row ──────────────────────────────────────────────────────────────
   const mainRow = new BoxRenderable(renderer, {
-    width:           '100%',
-    flexDirection:   'row',
-    gap:             2,
-    paddingX:        4,
-    paddingTop:      2,
-    paddingBottom:   1,
+    width: '100%', flexGrow: 1, flexDirection: 'row',
     backgroundColor: C.dark,
   });
 
-  // Left column — Recent + Network stacked
-  const leftCol = new BoxRenderable(renderer, {
-    flexGrow:        1,
-    flexShrink:      1,
-    flexDirection:   'column',
-    gap:             1,
-    backgroundColor: C.dark,
-  });
-
-  // ── Recent sessions ───────────────────────────────────────────────────────
-  const recentBox = new BoxRenderable(renderer, {
-    width:           '100%',
-    borderStyle:     'single',
-    borderColor:     C.dim,
-    title:           ' Recent ',
-    padding:         1,
+  // ── Sidebar ───────────────────────────────────────────────────────────────
+  const sidebar = new BoxRenderable(renderer, {
+    width: 20, flexShrink: 0, flexDirection: 'column',
+    paddingX: 1, paddingTop: 1,
     backgroundColor: C.panel,
   });
 
-  if (recent.length === 0) {
-    recentBox.add(new TextRenderable(renderer, { content: '  No recent sessions', fg: C.dim, bg: C.panel }));
-  } else {
-    for (const s of recent.slice(0, 5)) {
-      const row = new BoxRenderable(renderer, {
-        flexDirection:   'row',
-        justifyContent:  'space-between',
-        backgroundColor: 'transparent',
-      });
-      const icon = s.type === 'http' ? '⇄' : '⟳';
-      row.add(new TextRenderable(renderer, { content: `  ${icon}  ${s.id}`, fg: C.slate, bg: 'transparent' }));
-      row.add(new TextRenderable(renderer, { content: timeAgo(s.startedAt),  fg: C.dim,   bg: 'transparent' }));
-      recentBox.add(row);
-    }
+  sidebar.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.panel }));
+  const navRefs: TextRenderable[] = [];
+  for (const item of NAV) {
+    const t = new TextRenderable(renderer, {
+      content: ` ${item.icon}  ${item.label}`,
+      fg: C.slate, bg: C.panel,
+    });
+    sidebar.add(t);
+    navRefs.push(t);
   }
-  leftCol.add(recentBox);
 
-  // ── Network panel ─────────────────────────────────────────────────────────
-  const networkBox = new BoxRenderable(renderer, {
-    width:           '100%',
-    borderStyle:     'single',
-    borderColor:     C.dim,
-    title:           ' Network ',
-    padding:         1,
-    backgroundColor: C.panel,
-  });
+  // Network section
+  sidebar.add(new TextRenderable(renderer, { content: ' ',           fg: C.dim, bg: C.panel }));
+  sidebar.add(new TextRenderable(renderer, { content: '─'.repeat(17), fg: C.dim, bg: C.panel }));
+  sidebar.add(new TextRenderable(renderer, { content: ' NETWORK',    fg: C.dim, bg: C.panel }));
 
-  const mkStat = (label: string, init = '—') => {
+  const mkSideNetRow = (label: string): TextRenderable => {
     const row = new BoxRenderable(renderer, {
-      flexDirection:   'row',
-      justifyContent:  'space-between',
+      flexDirection: 'row', justifyContent: 'space-between',
       backgroundColor: 'transparent',
     });
-    const labelText = new TextRenderable(renderer, { content: `  ${label}`, fg: C.dim,   bg: 'transparent' });
-    const valueText = new TextRenderable(renderer, { content: init,          fg: C.slate, bg: 'transparent' });
-    row.add(labelText);
-    row.add(valueText);
-    networkBox.add(row);
-    return valueText;
+    row.add(new TextRenderable(renderer, { content: ` ${label}`, fg: C.dim,   bg: 'transparent' }));
+    const val = new TextRenderable(renderer,  { content: '—',    fg: C.slate, bg: 'transparent' });
+    row.add(val);
+    sidebar.add(row);
+    return val;
   };
 
-  const netNodes    = mkStat('Nodes');
-  const netHealthy  = mkStat('Healthy');
-  const netLatency  = mkStat('Latency avg');
-  const netCache    = mkStat('Cache hit');
-  leftCol.add(networkBox);
+  const netNodes   = mkSideNetRow('Nodes');
+  const netHttp    = mkSideNetRow('Avg HTTP');
+  const netWs      = mkSideNetRow('Avg WS');
+  const netTunnels = mkSideNetRow('Tunnels');
+  const netLoad    = mkSideNetRow('Net load');
 
-  mainRow.add(leftCol);
+  sidebar.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.panel }));
+  const netStatus = new TextRenderable(renderer, { content: '○ CHECKING', fg: C.dim, bg: C.panel });
+  sidebar.add(netStatus);
 
-  // ── Command palette (right column) ────────────────────────────────────────
-  const paletteBox = new BoxRenderable(renderer, {
-    flexGrow:        1,
-    flexShrink:      1,
-    flexDirection:   'column',
-    borderStyle:     'single',
-    borderColor:     C.dim,
-    title:           ' Commands ',
-    padding:         1,
+  // Wallet
+  sidebar.add(new TextRenderable(renderer, { content: ' ',          fg: C.dim, bg: C.panel }));
+  sidebar.add(new TextRenderable(renderer, { content: '─'.repeat(17), fg: C.dim, bg: C.panel }));
+  sidebar.add(new TextRenderable(renderer, { content: ' Wallet',    fg: C.dim, bg: C.panel }));
+  const walletRef = new TextRenderable(renderer, { content: ' ✓ Loaded', fg: C.emerald, bg: C.panel });
+  sidebar.add(walletRef);
+
+  mainRow.add(sidebar);
+
+  // ── Content area ──────────────────────────────────────────────────────────
+  const content = new BoxRenderable(renderer, {
+    flexGrow: 1, flexDirection: 'column',
+    gap: 1, paddingX: 2, paddingTop: 1, paddingBottom: 1,
+    backgroundColor: C.dark,
+  });
+
+  const topRow = new BoxRenderable(renderer, {
+    width: '100%', flexDirection: 'row', gap: 2,
+    backgroundColor: C.dark,
+  });
+
+  const bottomRow = new BoxRenderable(renderer, {
+    width: '100%', flexGrow: 1, flexDirection: 'row', gap: 2,
+    backgroundColor: C.dark,
+  });
+
+  // ── WORKERS panel ─────────────────────────────────────────────────────────
+  const workersPanel = new BoxRenderable(renderer, {
+    flexGrow: 1, flexShrink: 1, flexDirection: 'column',
+    borderStyle: 'single', borderColor: C.dim,
+    title: ' WORKERS ', padding: 1,
     backgroundColor: C.panel,
   });
 
-  // Input row
-  const inputText = new TextRenderable(renderer, {
-    content: '> _',
-    fg:      C.white,
-    bg:      C.panel,
+  const W_COLS = { id: 2, type: 3, port: 5, reqs: 5, avg: 6, p95: 6, status: 6 };
+  const workerHeader = new TextRenderable(renderer, {
+    content: [
+      '#'.padEnd(W_COLS.id),
+      'TYP'.padEnd(W_COLS.type),
+      'PORT'.padEnd(W_COLS.port),
+      'REQS'.padStart(W_COLS.reqs),
+      'AVG'.padStart(W_COLS.avg),
+      'P95'.padStart(W_COLS.p95),
+      'STATUS',
+    ].join('  '),
+    fg: C.dim, bg: 'transparent',
   });
-  paletteBox.add(inputText);
+  workersPanel.add(workerHeader);
+  workersPanel.add(new TextRenderable(renderer, { content: '─'.repeat(42), fg: C.dim, bg: 'transparent' }));
 
-  // Separator
-  paletteBox.add(new TextRenderable(renderer, {
-    content: '  ──────────────────────',
-    fg:      C.dim,
-    bg:      C.panel,
-  }));
-
-  // Pre-allocated command slots
-  type Slot = { label: TextRenderable; hint: TextRenderable; row: BoxRenderable };
-  const slots: Slot[] = [];
-  for (let i = 0; i < MAX_PALETTE_ROWS; i++) {
-    const slotRow = new BoxRenderable(renderer, {
-      flexDirection:   'row',
-      justifyContent:  'space-between',
-      backgroundColor: 'transparent',
-    });
-    const labelT = new TextRenderable(renderer, { content: '', fg: C.slate, bg: 'transparent' });
-    const hintT  = new TextRenderable(renderer, { content: '', fg: C.dim,   bg: 'transparent' });
-    slotRow.add(labelT);
-    slotRow.add(hintT);
-    paletteBox.add(slotRow);
-    slots.push({ label: labelT, hint: hintT, row: slotRow });
+  const MAX_WORKERS = 4;
+  const workerLines: TextRenderable[] = [];
+  for (let i = 0; i < MAX_WORKERS; i++) {
+    const t = new TextRenderable(renderer, { content: '', fg: C.dim, bg: 'transparent' });
+    workersPanel.add(t);
+    workerLines.push(t);
   }
 
-  mainRow.add(paletteBox);
-  root.add(mainRow);
+  topRow.add(workersPanel);
 
-  // ── Status line ───────────────────────────────────────────────────────────
-  const statusLine = new BoxRenderable(renderer, {
-    width:           '100%',
-    flexDirection:   'column',
-    alignItems:      'center',
-    justifyContent:  'center',
-    paddingBottom:   1,
-    backgroundColor: C.dark,
+  // ── ACTIVE CONNECTIONS panel ──────────────────────────────────────────────
+  const connPanel = new BoxRenderable(renderer, {
+    flexGrow: 2, flexShrink: 1, flexDirection: 'column',
+    borderStyle: 'single', borderColor: C.dim,
+    title: ' ACTIVE CONNECTIONS ', padding: 1,
+    backgroundColor: C.panel,
   });
-  const statusText  = new TextRenderable(renderer, { content: '●  STATUS: CHECKING', fg: C.dim,   bg: C.dark });
-  const legendLine1 = new TextRenderable(renderer, { content: '',                    fg: C.white,  bg: C.dark });
-  const legendLine2 = new TextRenderable(renderer, { content: '',                    fg: C.slate,  bg: C.dark });
-  statusLine.add(statusText);
-  statusLine.add(legendLine1);
-  statusLine.add(legendLine2);
-  root.add(statusLine);
+
+  const C_COLS = { type: 4, url: 22, reqs: 6, din: 8, dout: 8, status: 6 };
+  connPanel.add(new TextRenderable(renderer, {
+    content: [
+      'TYPE'.padEnd(C_COLS.type),
+      'URL'.padEnd(C_COLS.url),
+      'REQS'.padStart(C_COLS.reqs),
+      'DOWNLOAD'.padStart(C_COLS.din),
+      'UPLOAD'.padStart(C_COLS.dout),
+      'STATUS',
+    ].join('  '),
+    fg: C.dim, bg: 'transparent',
+  }));
+  connPanel.add(new TextRenderable(renderer, { content: '─'.repeat(52), fg: C.dim, bg: 'transparent' }));
+
+  const MAX_CONN = 5;
+  const connRows: TextRenderable[] = [];
+  for (let i = 0; i < MAX_CONN; i++) {
+    const t = new TextRenderable(renderer, { content: '', fg: C.slate, bg: 'transparent' });
+    connPanel.add(t);
+    connRows.push(t);
+  }
+  // populated by refreshDashboard()
+
+  topRow.add(connPanel);
+
+  // ── SPENDING panel ────────────────────────────────────────────────────────
+  const spendPanel = new BoxRenderable(renderer, {
+    flexGrow: 1, flexShrink: 1, flexDirection: 'column',
+    borderStyle: 'single', borderColor: C.dim,
+    title: ' SPENDING ', padding: 1,
+    backgroundColor: C.panel,
+  });
+
+  const spendGraph  = new TextRenderable(renderer, { content: 'No spending data', fg: C.dim,   bg: 'transparent' });
+  const spendBudget = new TextRenderable(renderer, { content: '',                  fg: C.slate, bg: 'transparent' });
+  const spendSpent  = new TextRenderable(renderer, { content: '',                  fg: C.slate, bg: 'transparent' });
+  spendPanel.add(spendGraph);
+  spendPanel.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: 'transparent' }));
+  spendPanel.add(spendBudget);
+  spendPanel.add(spendSpent);
+
+  bottomRow.add(spendPanel);
+
+  // ── LOGS panel ────────────────────────────────────────────────────────────
+  const logsPanel = new BoxRenderable(renderer, {
+    flexGrow: 2, flexShrink: 1, flexDirection: 'column',
+    borderStyle: 'single', borderColor: C.dim,
+    title: ' LOGS ', padding: 1,
+    backgroundColor: C.panel,
+  });
+
+  const MAX_LOGS = 6;
+  const logLines: TextRenderable[] = [];
+  for (let i = 0; i < MAX_LOGS; i++) {
+    const t = new TextRenderable(renderer, { content: '', fg: C.dim, bg: 'transparent' });
+    logsPanel.add(t);
+    logLines.push(t);
+  }
+  logLines[0]!.content = 'No activity yet';
+
+  bottomRow.add(logsPanel);
+
+  content.add(topRow);
+  content.add(bottomRow);
+  mainRow.add(content);
+  root.add(mainRow);
 
   // ── Bottom bar ────────────────────────────────────────────────────────────
   const bottomBar = new BoxRenderable(renderer, {
-    width:           '100%',
-    flexDirection:   'row',
-    justifyContent:  'space-between',
-    paddingX:        2,
-    paddingY:        0,
-    backgroundColor: C.panel,
+    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
+    paddingX: 2, paddingY: 0, backgroundColor: C.panel,
   });
   bottomBar.add(new TextRenderable(renderer, {
-    content: '[↵ select]  [↑↓ navigate]  [esc clear]  [ctrl+c quit]',
-    fg:      C.slate,
-    bg:      C.panel,
+    content: '[↑↓] navigate   [↵] open   [q] quit',
+    fg: C.slate, bg: C.panel,
   }));
   bottomBar.add(new TextRenderable(renderer, { content: 'canister.software', fg: C.dim, bg: C.panel }));
   root.add(bottomBar);
 
-  // ── Palette state ─────────────────────────────────────────────────────────
-  let filter            = '';
-  let selectedIdx       = 0;
-  let proxyDropdownOpen = false;
-  let proxyCursor       = 0;
+  // ── Sidebar state ─────────────────────────────────────────────────────────
+  const ALL_ACTIONS = NAV.map(n => n.action);
+  let navIdx = 0;
 
-  // Track last real server status so we can restore it when dropdown closes.
-  let savedStatusContent = '●  STATUS: CHECKING';
-  let savedStatusFg      = C.dim as string;
+  const renderSidebar = () => {
+    for (let i = 0; i < navRefs.length; i++) {
+      const sel = i + 1 === navIdx;
+      navRefs[i]!.fg      = sel ? C.accent : C.slate;
+      navRefs[i]!.content = sel
+        ? `▶${NAV[i]!.icon}  ${NAV[i]!.label}`
+        : ` ${NAV[i]!.icon}  ${NAV[i]!.label}`;
+    }
+  };
 
-  const getFiltered = (): Command[] =>
-    filter.trim() === ''
-      ? COMMANDS
-      : COMMANDS.filter((c) =>
-          c.label.includes(filter.toLowerCase()) || c.hint.includes(filter.toLowerCase())
-        );
+  renderSidebar();
 
-  // Build the flat row list for the proxy-expanded view.
-  // Returns: { label, hint, fg, isProxySub, subIdx? }
-  type FlatRow =
-    | { kind: 'cmd';    label: string; hint: string; selected: boolean }
-    | { kind: 'phead'                                                   }
-    | { kind: 'psub';   label: string; subIdx: number; selected: boolean };
+  // ── Dashboard refresh ─────────────────────────────────────────────────────
+  const fmtHms = (ms: number): string => {
+    const s = Math.floor(ms / 1000);
+    return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60]
+      .map(n => String(n).padStart(2, '0')).join(':');
+  };
 
-  const buildProxyRows = (): FlatRow[] => {
-    const rows: FlatRow[] = [];
-    for (const cmd of COMMANDS) {
-      if (cmd.action !== 'proxy') {
-          rows.push({ kind: 'cmd', label: `${cmd.icon}  ${cmd.label}`, hint: '', selected: false });
-      } else {
-        rows.push({ kind: 'phead' });
-        PROXY_SUB.forEach((sub, i) =>
-          rows.push({ kind: 'psub', label: sub.label, subIdx: i, selected: proxyCursor === i })
-        );
+  const fmtLat   = (ms?: number): string  => ms == null ? '—' : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+  const fmtReqs  = (n: number): string    => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k` : String(n);
+  const fmtBytes = (b: number): string    => b >= 1_073_741_824 ? `${(b / 1_073_741_824).toFixed(1)} GB` : b >= 1_048_576 ? `${(b / 1_048_576).toFixed(1)} MB` : b >= 1_024 ? `${(b / 1_024).toFixed(1)} KB` : `${b} B`;
+
+  const refreshDashboard = (): void => {
+    // WORKERS
+    const fmtStatus = (code?: number): string => {
+      if (code == null) return '—';
+      if (code < 300) return `${code} OK`;
+      if (code < 400) return `${code} RDR`;
+      if (code < 500) return `${code} ERR`;
+      return `${code} FAIL`;
+    };
+
+    const workers = workerRegistry.slice(0, MAX_WORKERS);
+    if (workers.length === 0) {
+      workerLines[0]!.content = 'No active workers';
+      workerLines[0]!.fg      = C.dim;
+      for (let i = 1; i < MAX_WORKERS; i++) workerLines[i]!.content = '';
+    } else {
+      for (let i = 0; i < MAX_WORKERS; i++) {
+        const w = workers[i];
+        if (!w) { workerLines[i]!.content = ''; workerLines[i]!.fg = C.dim; continue; }
+        const s      = w.handle.stats();
+        const id     = String(i + 1).padEnd(W_COLS.id);
+        const type   = (w.handle.type === 'forward' ? 'fwd' : 'rev').padEnd(W_COLS.type);
+        const port   = `:${w.handle.port}`.padEnd(W_COLS.port);
+        const reqs   = fmtReqs(s.requests).padStart(W_COLS.reqs);
+        const avg    = fmtLat(s.avgLatencyMs).padStart(W_COLS.avg);
+        const p95    = fmtLat(s.p95LatencyMs).padStart(W_COLS.p95);
+        const status = fmtStatus(s.lastStatusCode).padEnd(W_COLS.status);
+        workerLines[i]!.content = [id, type, port, reqs, avg, p95, status].join('  ');
+        const isErr = s.lastStatusCode != null && s.lastStatusCode >= 400;
+        workerLines[i]!.fg = isErr ? C.red : C.emerald;
       }
     }
-    return rows;
-  };
 
-  const renderLegend = () => {
-    if (!proxyDropdownOpen) {
-      legendLine1.content = '';
-      legendLine2.content = '';
-      return;
-    }
-    legendLine1.content = `  ${PROXY_SUB[0]!.desc}`;
-    legendLine2.content = `  ${PROXY_SUB[1]!.desc}`;
-    legendLine1.fg = proxyCursor === 0 ? C.white : C.slate;
-    legendLine2.fg = proxyCursor === 1 ? C.white : C.slate;
-  };
-
-  const renderPalette = () => {
-    inputText.content = filter ? `> ${filter}_` : '> _';
-
-    if (proxyDropdownOpen) {
-      statusText.content = '';
-      const rows = buildProxyRows();
-      for (let i = 0; i < MAX_PALETTE_ROWS; i++) {
-        const row = rows[i];
-        const s   = slots[i]!;
-        if (!row) { s.label.content = ''; s.hint.content = ''; continue; }
-
-        if (row.kind === 'cmd') {
-          s.label.content = `     ${row.label}`;
-          s.label.fg      = C.slate;
-          s.hint.content  = '';
-        } else if (row.kind === 'phead') {
-          s.label.content = `  ▶  proxy`;
-          s.label.fg      = C.white;
-          s.hint.content  = '';
-        } else {
-          const sel       = row.selected;
-          s.label.content = sel ? `        ▶  ${row.label}` : `           ${row.label}`;
-          s.label.fg      = sel ? C.white                   : C.slate;
-          s.hint.content  = '';
-        }
+    // ACTIVE CONNECTIONS — proxy workers as HTTP/TCP/WS rows
+    const conns = workerRegistry.slice(0, MAX_CONN);
+    if (conns.length === 0) {
+      connRows[0]!.content = 'No active connections';
+      connRows[0]!.fg      = C.dim;
+      connRows[2]!.content = '[T] new tunnel    [W] new websocket';
+      connRows[2]!.fg      = C.dim;
+      for (let i = 1; i < MAX_CONN; i++) if (i !== 2) connRows[i]!.content = '';
+    } else {
+      connRows[2]!.content = '';
+      for (let i = 0; i < MAX_CONN; i++) {
+        const w = conns[i];
+        if (!w) { connRows[i]!.content = ''; connRows[i]!.fg = C.dim; continue; }
+        const s      = w.handle.stats();
+        // forward proxy = HTTP (outbound), reverse proxy = HTTP (inbound)
+        const type     = 'http'.padEnd(C_COLS.type);
+        const rawUrl   = `localhost:${w.handle.port}`;
+        const url      = (rawUrl.length > C_COLS.url ? rawUrl.slice(0, C_COLS.url - 1) + '…' : rawUrl).padEnd(C_COLS.url);
+        const reqs     = fmtReqs(s.requests).padStart(C_COLS.reqs);
+        const download = fmtBytes(s.bytesRecv).padStart(C_COLS.din);
+        const upload   = fmtBytes(s.bytesSent).padStart(C_COLS.dout);
+        const status   = fmtStatus(s.lastStatusCode).padEnd(C_COLS.status);
+        connRows[i]!.content = [type, url, reqs, download, upload, status].join('  ');
+        const isErr = s.lastStatusCode != null && s.lastStatusCode >= 400;
+        connRows[i]!.fg = isErr ? C.red : C.slate;
       }
-      renderLegend();
-      return;
-    }
-
-    // Normal mode
-    statusText.content = savedStatusContent;
-    statusText.fg      = savedStatusFg;
-    legendLine1.content = '';
-    legendLine2.content = '';
-
-    const filtered = getFiltered();
-    if (selectedIdx >= filtered.length) selectedIdx = Math.max(0, filtered.length - 1);
-
-    for (let i = 0; i < MAX_PALETTE_ROWS; i++) {
-      const cmd = filtered[i];
-      const s   = slots[i]!;
-      if (!cmd) { s.label.content = ''; s.hint.content = ''; continue; }
-      const sel       = i === selectedIdx;
-      s.label.content = sel ? `  ▶  ${cmd.icon}  ${cmd.label}` : `     ${cmd.icon}  ${cmd.label}`;
-      s.label.fg      = sel ? C.white              : C.slate;
-      s.hint.content  = sel ? cmd.hint             : '';
-      s.hint.fg       = C.dim;
     }
   };
 
-  renderPalette();
+  // ── Live state ────────────────────────────────────────────────────────────
+  let live       = true;
+  let isChecking = true;
 
-  // ── Background: server health ─────────────────────────────────────────────
-  // `live` guards every async callback — set to false in done() before
-  // renderer.destroy() so nothing writes to a dead TextBuffer.
-  let live = true;
-
-  const applyStatus = (content: string, fg: string) => {
-    if (!live) return;
-    savedStatusContent = content;
-    savedStatusFg      = fg;
-    if (!proxyDropdownOpen) { statusText.content = content; statusText.fg = fg; }
-  };
+  const spin      = makeSpin('checking');
+  const spinTimer = setInterval(() => {
+    if (!live || !isChecking) return;
+    netStatus.content = `${spin()} CHECKING`;
+  }, 100);
 
   fetch(`${SERVER}/health`, { signal: AbortSignal.timeout(4000) })
-    .then((r) => applyStatus(
-      r.ok ? '●  STATUS: CONNECTED' : '●  STATUS: DEGRADED',
-      r.ok ? C.emerald               : C.amber,
-    ))
-    .catch(() => applyStatus('●  STATUS: DISCONNECTED', C.red));
+    .then((r) => {
+      if (!live) return;
+      isChecking        = false;
+      netStatus.content = r.ok ? '● CONNECTED' : '● DEGRADED';
+      netStatus.fg      = r.ok ? C.emerald      : C.amber;
+    })
+    .catch(() => {
+      if (!live) return;
+      isChecking        = false;
+      netStatus.content = '● OFFLINE';
+      netStatus.fg      = C.red;
+    });
 
-  // ── Background: network stats (poll every 5s) ─────────────────────────────
   const fetchStats = () => {
     fetch(`${SERVER}/stats`, { signal: AbortSignal.timeout(4000) })
       .then(async (r) => {
-        if (!live) return;
-        if (!r.ok) return;
+        if (!live || !r.ok) return;
         const d = await r.json() as Record<string, unknown>;
         if (!live) return;
-        if (typeof d.nodes    === 'number') netNodes.content   = String(d.nodes);
-        if (typeof d.healthy  === 'number') netHealthy.content = String(d.healthy);
-        if (typeof d.latency  === 'number') netLatency.content = `${d.latency}ms`;
-        if (typeof d.cacheHit === 'number') netCache.content   = `${d.cacheHit}%`;
-        netNodes.fg = netHealthy.fg = netLatency.fg = netCache.fg = C.white;
+        if (typeof d.nodes     === 'number') { netNodes.content   = String(d.nodes);        netNodes.fg   = C.white; }
+        if (typeof d.latency   === 'number') { netHttp.content    = `${d.latency}ms`;      netHttp.fg    = C.white; }
+        if (typeof d.wsLatency === 'number') { netWs.content      = `${d.wsLatency}ms`;    netWs.fg      = C.white; }
+        if (typeof d.tunnels   === 'number') { netTunnels.content = String(d.tunnels);      netTunnels.fg = C.white; }
+        if (typeof d.load      === 'number') { netLoad.content    = `${d.load}%`;           netLoad.fg    = d.load > 80 ? C.red : d.load > 50 ? C.amber : C.white; }
       })
-      .catch(() => { /* non-fatal — keep dashes */ });
+      .catch(() => { /* non-fatal */ });
   };
 
   fetchStats();
-  const statsTimer = setInterval(fetchStats, 5000);
+  const statsTimer   = setInterval(fetchStats, 5000);
+  refreshDashboard();
+  const dashTimer    = setInterval(() => { if (live) refreshDashboard(); }, 1000);
 
   // ── Key input ─────────────────────────────────────────────────────────────
   return new Promise<LandingAction>((resolve) => {
     const done = (action: LandingAction) => {
       live = false;
+      clearInterval(spinTimer);
       clearInterval(statsTimer);
+      clearInterval(dashTimer);
       renderer.destroy();
       resolve(action);
     };
@@ -472,79 +432,21 @@ export async function showLanding(): Promise<LandingAction> {
     renderer.keyInput.on('keypress', (key) => {
       if (!live) return;
       if (key.ctrl && key.name === 'c') { done('quit'); return; }
+      if (key.name === 'q' || key.name === 'Q') { done('quit'); return; }
 
-      // ── Proxy dropdown mode ──────────────────────────────────────────────
-      if (proxyDropdownOpen) {
-        if (key.name === 'up' || key.name === 'k') {
-          proxyCursor = (proxyCursor - 1 + PROXY_SUB.length) % PROXY_SUB.length;
-          renderPalette();
-          return;
-        }
-        if (key.name === 'down' || key.name === 'j') {
-          proxyCursor = (proxyCursor + 1) % PROXY_SUB.length;
-          renderPalette();
-          return;
-        }
-        if (key.name === 'return' || key.name === 'enter') {
-          done(PROXY_SUB[proxyCursor]!.action);
-          return;
-        }
-        if (key.name === 'escape') {
-          proxyDropdownOpen = false;
-          renderPalette();
-          return;
-        }
-        return; // swallow all other keys while dropdown is open
-      }
-
-      // ── Normal palette mode ──────────────────────────────────────────────
-      if (key.name === 'up') {
-        const len = getFiltered().length;
-        selectedIdx = (selectedIdx - 1 + len) % len;
-        renderPalette();
+      if (key.name === 'up' || key.name === 'k') {
+        navIdx = navIdx <= 1 ? NAV.length : navIdx - 1;
+        renderSidebar();
         return;
       }
-      if (key.name === 'down') {
-        const len = getFiltered().length;
-        selectedIdx = (selectedIdx + 1) % len;
-        renderPalette();
+      if (key.name === 'down' || key.name === 'j') {
+        navIdx = navIdx >= NAV.length ? 1 : navIdx + 1;
+        renderSidebar();
         return;
       }
-
       if (key.name === 'return' || key.name === 'enter') {
-        const filtered = getFiltered();
-        const cmd = filtered[selectedIdx];
-        if (!cmd) return;
-        if (cmd.action === 'proxy') {
-          proxyDropdownOpen = true;
-          proxyCursor       = 0;
-          filter            = '';
-          renderPalette();
-        } else {
-          done(cmd.action);
-        }
-        return;
-      }
-
-      if (key.name === 'escape') {
-        filter      = '';
-        selectedIdx = 0;
-        renderPalette();
-        return;
-      }
-
-      if (key.name === 'backspace') {
-        filter      = filter.slice(0, -1);
-        selectedIdx = 0;
-        renderPalette();
-        return;
-      }
-
-      // Printable character → type into filter
-      if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta && key.sequence >= ' ') {
-        filter     += key.sequence;
-        selectedIdx = 0;
-        renderPalette();
+        if (navIdx === 0) return;
+        done(ALL_ACTIONS[navIdx - 1]!);
         return;
       }
     });

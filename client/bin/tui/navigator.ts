@@ -6,7 +6,7 @@
  */
 
 import { showLanding, type LandingAction } from './screens/landing';
-import { showTunnels }    from './screens/tunnel/list';
+import { showTunnelSetup } from './screens/tunnel/setup';
 import { showProxy }      from './screens/proxy/index';
 import { showWebsockets } from './screens/websockets';
 import { showIps }        from './screens/ips';
@@ -14,7 +14,7 @@ import { showSettings }   from './screens/settings';
 import { writeTraceLog }  from '../lib/crash-log';
 
 const ROUTES: Record<string, () => Promise<unknown>> = {
-  tunnels:       () => showTunnels(),
+  tunnels:       () => showTunnelSetup(),
   proxy:         () => showProxy(),
   'proxy-forward': () => showProxy('forward'),
   'proxy-reverse': () => showProxy('reverse'),

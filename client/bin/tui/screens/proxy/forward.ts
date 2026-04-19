@@ -3,7 +3,8 @@ import { C } from '../../../theme';
 import { loadConfig } from '../../../lib/config.ts';
 import { writeTraceLog } from '../../../lib/crash-log';
 import { type FieldDef, type FormState, renderField, handleKey } from '../../../lib/form.ts';
-import { scanPorts, HTTP_PORTS, SPINNER } from '../../../lib/ports.ts';
+import { scanPorts, HTTP_PORTS } from '../../../lib/ports.ts';
+import { makeSpin } from '../../../lib/spinners.ts';
 import type { PreferNetwork } from '../../../../src/payment-fetch.js';
 import { NETWORK_CAIP2S, NETWORK_LABELS } from '../../../lib/networks.ts';
 
@@ -51,16 +52,15 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
   });
   scanRoot.add(scanContent);
 
+  const spin = makeSpin('scan');
   const spinRef = new TextRenderable(scanRenderer, {
-    content: `${SPINNER[0]}  Scanning local ports…`, fg: C.slate, bg: C.dark,
+    content: `${spin()}  Scanning local ports…`, fg: C.slate, bg: C.dark,
   });
   scanContent.add(spinRef);
 
-  let spinIdx = 0;
   const spinTimer = setInterval(() => {
-    spinIdx = (spinIdx + 1) % SPINNER.length;
-    spinRef.content = `${SPINNER[spinIdx]}  Scanning local ports…`;
-  }, 150);
+    spinRef.content = `${spin()}  Scanning local ports…`;
+  }, 120);
 
   const openPorts = await scanPorts(HTTP_PORTS);
   clearInterval(spinTimer);
@@ -208,13 +208,12 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
     if (scanning) return;
     scanning = true;
     for (let i = 0; i < MAX_SHOWN; i++) detectedRefs[i]!.content = ' ';
-    detectedRefs[0]!.content = `  ${SPINNER[0]}  scanning…`;
+    const rescanSpin = makeSpin('scan');
+    detectedRefs[0]!.content = `  ${rescanSpin()}  scanning…`;
     detectedRefs[0]!.fg      = C.slate;
-    let si = 0;
     const t = setInterval(() => {
       if (!live) { clearInterval(t); return; }
-      si = (si + 1) % SPINNER.length;
-      detectedRefs[0]!.content = `  ${SPINNER[si]}  scanning…`;
+      detectedRefs[0]!.content = `  ${rescanSpin()}  scanning…`;
     }, 150);
     detectedPorts = await scanPorts(HTTP_PORTS);
     clearInterval(t);

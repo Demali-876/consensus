@@ -11,3 +11,4 @@ node_modules
 setting*
 ip-pool-history*
 ssrf-poc.ts
+test-server.ts
