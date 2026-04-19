@@ -58,9 +58,7 @@ let   streamCounter = 0;
 const TCP_PORT = 20_000;
 const WS_BACKPRESSURE_BYTES = parseInt(process.env.TUNNEL_WS_BACKPRESSURE_BYTES ?? '', 10) || 1 * 1024 * 1024;
 
-const STRIP_HEADERS = new Set([
-  'x-forwarded-host', 'forwarded', 'via',
-]);
+const STRIP_HEADERS = new Set(['connection']);
 
 function buildRawRequest(req: Request): Buffer {
   const lines: string[] = [`${req.method} ${req.url} HTTP/1.1`];
@@ -78,6 +76,7 @@ function buildRawRequest(req: Request): Buffer {
     lines.push(`x-forwarded-for: ${existingXff ? `${existingXff}, ${clientIp}` : clientIp}`);
   }
   lines.push(`x-forwarded-proto: ${req.protocol}`);
+  lines.push('connection: close');
 
   let body: Buffer = (req as any).rawBody ?? Buffer.alloc(0);
   if (!body.length && req.body) {
