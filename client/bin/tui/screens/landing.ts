@@ -278,10 +278,11 @@ export async function showLanding(): Promise<LandingAction> {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     paddingX: 2, paddingY: 0, backgroundColor: C.panel,
   });
-  bottomBar.add(new TextRenderable(renderer, {
+  const hintsRef = new TextRenderable(renderer, {
     content: '[↑↓] navigate   [↵] open   [q] quit',
     fg: C.slate, bg: C.panel,
-  }));
+  });
+  bottomBar.add(hintsRef);
   bottomBar.add(new TextRenderable(renderer, { content: 'canister.software', fg: C.dim, bg: C.panel }));
   root.add(bottomBar);
 
@@ -420,6 +421,8 @@ export async function showLanding(): Promise<LandingAction> {
 
   // ── Key input ─────────────────────────────────────────────────────────────
   return new Promise<LandingAction>((resolve) => {
+    let confirming = false;
+
     const done = (action: LandingAction) => {
       live = false;
       clearInterval(spinTimer);
@@ -431,8 +434,23 @@ export async function showLanding(): Promise<LandingAction> {
 
     renderer.keyInput.on('keypress', (key) => {
       if (!live) return;
+
+      // Quit confirmation
+      if (confirming) {
+        if (key.name === 'y' || key.name === 'Y') { done('quit'); return; }
+        confirming        = false;
+        hintsRef.content  = '[↑↓] navigate   [↵] open   [q] quit';
+        hintsRef.fg       = C.slate;
+        return;
+      }
+
       if (key.ctrl && key.name === 'c') { done('quit'); return; }
-      if (key.name === 'q' || key.name === 'Q') { done('quit'); return; }
+      if (key.name === 'q' || key.name === 'Q') {
+        confirming       = true;
+        hintsRef.content = 'Quit consensus?   [Y] yes   [any] cancel';
+        hintsRef.fg      = C.amber;
+        return;
+      }
 
       if (key.name === 'up' || key.name === 'k') {
         navIdx = navIdx <= 1 ? NAV.length : navIdx - 1;

@@ -69,4 +69,6 @@ function reportFatal(context: string, err: unknown): void {
 process.on('uncaughtException',  (err) => { reportFatal('uncaughtException',  err); process.exit(1); });
 process.on('unhandledRejection', (err) => { reportFatal('unhandledRejection', err); process.exit(1); });
 
-main().catch((err: Error) => { reportFatal('main.catch', err); process.exit(1); });
+main()
+  .then(() => process.exit(0))
+  .catch((err: Error) => { reportFatal('main.catch', err); process.exit(1); });
