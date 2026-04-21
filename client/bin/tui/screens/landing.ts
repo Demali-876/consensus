@@ -279,7 +279,7 @@ export async function showLanding(): Promise<LandingAction> {
     paddingX: 2, paddingY: 0, backgroundColor: C.panel,
   });
   const hintsRef = new TextRenderable(renderer, {
-    content: '[↑↓] navigate   [↵] open   [q] quit',
+    content: '[↑↓] navigate   [↵] open   [R] refresh   [q] quit',
     fg: C.slate, bg: C.panel,
   });
   bottomBar.add(hintsRef);
@@ -377,7 +377,7 @@ export async function showLanding(): Promise<LandingAction> {
 
   // ── Live state ────────────────────────────────────────────────────────────
   let live       = true;
-  let isChecking = true;
+  let isChecking = false;
 
   const spin      = makeSpin('checking');
   const spinTimer = setInterval(() => {
@@ -385,39 +385,42 @@ export async function showLanding(): Promise<LandingAction> {
     netStatus.content = `${spin()} CHECKING`;
   }, 100);
 
-  fetch(`${SERVER}/health`, { signal: AbortSignal.timeout(4000) })
-    .then((r) => {
-      if (!live) return;
-      isChecking        = false;
-      netStatus.content = r.ok ? '● CONNECTED' : '● DEGRADED';
-      netStatus.fg      = r.ok ? C.emerald      : C.amber;
-    })
-    .catch(() => {
-      if (!live) return;
-      isChecking        = false;
-      netStatus.content = '● OFFLINE';
-      netStatus.fg      = C.red;
-    });
+  function doRefresh(): void {
+    if (isChecking) return;
+    isChecking        = true;
+    netStatus.content = `${spin()} CHECKING`;
+    netStatus.fg      = C.dim;
 
-  const fetchStats = () => {
+    fetch(`${SERVER}/health`, { signal: AbortSignal.timeout(4000) })
+      .then((r) => {
+        if (!live) return;
+        isChecking        = false;
+        netStatus.content = r.ok ? '● CONNECTED' : '● DEGRADED';
+        netStatus.fg      = r.ok ? C.emerald      : C.amber;
+      })
+      .catch(() => {
+        if (!live) return;
+        isChecking        = false;
+        netStatus.content = '● OFFLINE';
+        netStatus.fg      = C.red;
+      });
+
     fetch(`${SERVER}/stats`, { signal: AbortSignal.timeout(4000) })
       .then(async (r) => {
         if (!live || !r.ok) return;
         const d = await r.json() as Record<string, unknown>;
         if (!live) return;
-        if (typeof d.nodes     === 'number') { netNodes.content   = String(d.nodes);        netNodes.fg   = C.white; }
-        if (typeof d.latency   === 'number') { netHttp.content    = `${d.latency}ms`;      netHttp.fg    = C.white; }
-        if (typeof d.wsLatency === 'number') { netWs.content      = `${d.wsLatency}ms`;    netWs.fg      = C.white; }
-        if (typeof d.tunnels   === 'number') { netTunnels.content = String(d.tunnels);      netTunnels.fg = C.white; }
-        if (typeof d.load      === 'number') { netLoad.content    = `${d.load}%`;           netLoad.fg    = d.load > 80 ? C.red : d.load > 50 ? C.amber : C.white; }
+        if (typeof d.nodes     === 'number') { netNodes.content   = String(d.nodes);   netNodes.fg   = C.white; }
+        if (typeof d.latency   === 'number') { netHttp.content    = `${d.latency}ms`;  netHttp.fg    = C.white; }
+        if (typeof d.wsLatency === 'number') { netWs.content      = `${d.wsLatency}ms`; netWs.fg     = C.white; }
+        if (typeof d.tunnels   === 'number') { netTunnels.content = String(d.tunnels); netTunnels.fg = C.white; }
+        if (typeof d.load      === 'number') { netLoad.content    = `${d.load}%`;      netLoad.fg    = d.load > 80 ? C.red : d.load > 50 ? C.amber : C.white; }
       })
       .catch(() => { /* non-fatal */ });
-  };
+  }
 
-  fetchStats();
-  const statsTimer   = setInterval(fetchStats, 5000);
   refreshDashboard();
-  const dashTimer    = setInterval(() => { if (live) refreshDashboard(); }, 1000);
+  const dashTimer = setInterval(() => { if (live) refreshDashboard(); }, 1000);
 
   // ── Key input ─────────────────────────────────────────────────────────────
   return new Promise<LandingAction>((resolve) => {
@@ -426,7 +429,6 @@ export async function showLanding(): Promise<LandingAction> {
     const done = (action: LandingAction) => {
       live = false;
       clearInterval(spinTimer);
-      clearInterval(statsTimer);
       clearInterval(dashTimer);
       renderer.destroy();
       resolve(action);
@@ -439,10 +441,12 @@ export async function showLanding(): Promise<LandingAction> {
       if (confirming) {
         if (key.name === 'y' || key.name === 'Y') { done('quit'); return; }
         confirming        = false;
-        hintsRef.content  = '[↑↓] navigate   [↵] open   [q] quit';
+        hintsRef.content  = '[↑↓] navigate   [↵] open   [R] refresh   [q] quit';
         hintsRef.fg       = C.slate;
         return;
       }
+
+      if (key.name === 'r' || key.name === 'R') { doRefresh(); return; }
 
       if (key.ctrl && key.name === 'c') { done('quit'); return; }
       if (key.name === 'q' || key.name === 'Q') {
