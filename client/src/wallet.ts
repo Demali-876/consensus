@@ -17,6 +17,17 @@ type ResolveSignersOptions = {
   timeoutMs?: number;
 };
 
+async function getServerMode(serverUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${serverUrl.replace(/\/$/, '')}/config`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return false;
+    const data = await res.json() as { free_mode?: boolean };
+    return data.free_mode === true;
+  } catch {
+    return false;
+  }
+}
+
 function signerFamily(preferNetwork?: string): 'eip155' | 'solana' | 'icp' | null {
   if (!preferNetwork) return null;
   if (preferNetwork.startsWith('eip155')) return 'eip155';
@@ -52,6 +63,7 @@ export async function resolveSigners(opts: ResolveSignersOptions = {}): Promise<
   const signers: ResolvedSigners = {};
   const targetFamily = signerFamily(opts.preferNetwork);
   const timeoutMs = opts.timeoutMs ?? 5000;
+  const serverUrl = 'https://consensus.canister.software';
 
   if (process.env.CONSENSUS_EVM_KEY && (!targetFamily || targetFamily === 'eip155')) {
     try {
@@ -107,14 +119,16 @@ export async function resolveSigners(opts: ResolveSignersOptions = {}): Promise<
   }
 
   if (!signers.evm && !signers.svm && !signers.icp) {
-    const requested = targetFamily ? ` for preferred network "${opts.preferNetwork}"` : '';
-    throw new Error(
-      `[Consensus] No signing credentials found${requested}.\n` +
+    const freeMode = await getServerMode(serverUrl);
+    if (!freeMode) {
+      throw new Error(
+      `[Consensus] No signing credentials found.\n` +
       'Set at least one of:\n' +
       '  CONSENSUS_EVM_KEY   — hex EVM private key (0x-prefix optional)\n' +
       '  CONSENSUS_SVM_KEY   — base58 Solana keypair\n' +
       '  CONSENSUS_PEM_PATH  — path to PEM-encoded ICP/Ed25519 key file',
     );
+    }
   }
 
   return signers;

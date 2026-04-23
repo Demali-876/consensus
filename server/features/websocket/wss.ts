@@ -354,37 +354,27 @@ export function registerWebSocket(
 ) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
-  app.get(
-    '/ws',
-    paymentMiddleware(
+  const wsHandlers: any[] = [];
+  if (process.env.FREE_MODE !== 'true') {
+    wsHandlers.push(paymentMiddleware(
       {
         'GET /ws': {
           accepts: [
-            {
-              scheme:  'exact',
-              price:   sessionPrice,
-              network: 'eip155:84532',
-              payTo:   EVM_PAY_TO,
-            },
-            {
-              scheme:  'exact',
-              price:   sessionPrice,
-              network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
-              payTo:   SOLANA_PAY_TO,
-            },
-            {
-              scheme:  'exact',
-              price:   sessionPriceIcp,
-              network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',
-              payTo:   ICP_PAY_TO,
-            },
+            { scheme: 'exact', price: sessionPrice,    network: 'eip155:84532',                          payTo: EVM_PAY_TO    },
+            { scheme: 'exact', price: sessionPrice,    network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', payTo: SOLANA_PAY_TO },
+            { scheme: 'exact', price: sessionPriceIcp, network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',    payTo: ICP_PAY_TO    },
           ],
           description: 'Pay-per-use WebSockets on demand',
           mimeType:    'application/json',
         },
       },
       x402Server,
-    ),
+    ));
+  }
+
+  app.get(
+    '/ws',
+    ...wsHandlers,
     (req, res) => {
       const model     = (req.query.model     ?? 'hybrid').toString();
       const minutes   = parseInt((req.query.minutes   ?? '5').toString(),  10);

@@ -27,13 +27,13 @@ function calculateJoinPrice() {
 export function registerNodes(app, httpsServer, x402Server, config) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
-  app.post(
-    '/node/join',
-    paymentMiddleware(
+  const joinHandlers = [];
+  if (process.env.FREE_MODE !== 'true') {
+    joinHandlers.push(paymentMiddleware(
       {
         'POST /node/join': {
           accepts: [
-            { scheme: 'exact', price: () => `$${calculateJoinPrice()}`, network: 'eip155:84532',                          payTo: EVM_PAY_TO    },
+            { scheme: 'exact', price: () => `$${calculateJoinPrice()}`, network: 'eip155:84532',                             payTo: EVM_PAY_TO    },
             { scheme: 'exact', price: () => `$${calculateJoinPrice()}`, network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', payTo: SOLANA_PAY_TO },
           ],
           description: 'Join the Consensus Network',
@@ -41,7 +41,12 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         },
       },
       x402Server,
-    ),
+    ));
+  }
+
+  app.post(
+    '/node/join',
+    ...joinHandlers,
     async (req, res) => {
       const startTime = Date.now();
       const paidPrice = calculateJoinPrice();

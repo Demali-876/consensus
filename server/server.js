@@ -36,11 +36,11 @@ const EVM_PAY_TO = process.env.EVM_PAY_TO;
 const SOLANA_PAY_TO = process.env.SOLANA_PAY_TO;
 const ICP_PAY_TO = process.env.ICP_PAY_TO;
 
-if (!process.env.FACILITATOR_URL) {
-  throw new Error('FACILITATOR_URL is missing from .env');
-}
-if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) {
-  throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO');
+const FREE_MODE = process.env.FREE_MODE === 'true';
+
+if (!FREE_MODE) {
+  if (!process.env.FACILITATOR_URL) throw new Error('FACILITATOR_URL is missing from .env');
+  if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO');
 }
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
@@ -92,6 +92,10 @@ app.get('/', publicLimiter, (req, res) => {
     },
     facilitator: 'https://facilitator.canister.software',
   });
+});
+
+app.get('/config', publicLimiter, (_req, res) => {
+  res.json({ free_mode: FREE_MODE });
 });
 
 app.get('/health', publicLimiter, (req, res) => {
@@ -149,37 +153,24 @@ app.post('/proxy', async (req, res, next) => {
   next();
 });
 
-app.use(
-  paymentMiddleware(
-    {
-      'POST /proxy': {
-        accepts: [
-          {
-            scheme: 'exact',
-            price: '$0.001',
-            network: 'eip155:84532',
-            payTo: EVM_PAY_TO,
-          },
-          {
-            scheme: 'exact',
-            price: '$0.001',
-            network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
-            payTo: SOLANA_PAY_TO,
-          },
-          {
-            scheme: 'exact',
-            price: '100000',
-            network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',
-            payTo: ICP_PAY_TO,
-          },
-        ],
-        description: 'API Deduplication Service',
-        mimeType: 'application/json',
+if (!FREE_MODE) {
+  app.use(
+    paymentMiddleware(
+      {
+        'POST /proxy': {
+          accepts: [
+            { scheme: 'exact', price: '$0.001', network: 'eip155:84532', payTo: EVM_PAY_TO },
+            { scheme: 'exact', price: '$0.001', network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', payTo: SOLANA_PAY_TO },
+            { scheme: 'exact', price: '100000', network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai', payTo: ICP_PAY_TO },
+          ],
+          description: 'API Deduplication Service',
+          mimeType: 'application/json',
+        },
       },
-    },
-    x402Server
-  )
-);
+      x402Server
+    )
+  );
+}
 
 app.post('/proxy', async (req, res) => {
   const startTime = Date.now();

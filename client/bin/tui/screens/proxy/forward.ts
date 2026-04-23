@@ -231,8 +231,8 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
       pemPath && 'CONSENSUS_PEM_PATH ✓',
     ].filter(Boolean) as string[];
     if (found.length === 0) {
-      walletRef.content = '  ⚠   No wallet credentials detected — run: consensus setup';
-      walletRef.fg = C.amber;
+      walletRef.content = '  ○   Free mode — no wallet required!';
+      walletRef.fg = C.dim;
     } else {
       walletRef.content = `  ●   self-managed   ${found.join('   ')}`;
       walletRef.fg = C.emerald;
