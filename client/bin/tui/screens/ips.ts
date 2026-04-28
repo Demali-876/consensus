@@ -40,9 +40,14 @@ function fmtScore(s?: number): string {
 
 function fmtLeaseAge(iso: string): string {
   const d = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(d)) return 'unknown';
   if (d < 3_600_000)  return `${Math.floor(d / 60_000)}m ago`;
   if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h ago`;
   return `${Math.floor(d / 86_400_000)}d ago`;
+}
+
+function nodeLeaseTarget(node: NodeInfo): string {
+  return node.domain || node.node_id || '';
 }
 
 // ─── Column widths ─────────────────────────────────────────────────────────────
@@ -154,6 +159,7 @@ export async function showIps(): Promise<'back'> {
 
   // ── Render ────────────────────────────────────────────────────────────────────
   function renderLease(): void {
+    if (!live) return;
     const cfg = loadConfig();
     if (cfg.leased_node) {
       const ln = cfg.leased_node;
@@ -166,6 +172,7 @@ export async function showIps(): Promise<'back'> {
   }
 
   function renderRows(): void {
+    if (!live) return;
     const cfg = loadConfig();
     const leasedDomain = cfg.leased_node?.domain;
     const visible = nodes.slice(offset, offset + MAX_VISIBLE);
@@ -176,7 +183,7 @@ export async function showIps(): Promise<'back'> {
 
       const globalIdx  = offset + i;
       const isSelected = globalIdx === cursor;
-      const isLeased   = node.domain === leasedDomain;
+      const isLeased   = !!leasedDomain && nodeLeaseTarget(node) === leasedDomain;
       const row        = tableRow(node, globalIdx, isLeased);
 
       rowRefs[i]!.content = isSelected ? `▶ ${row.slice(2)}` : row;
@@ -189,6 +196,7 @@ export async function showIps(): Promise<'back'> {
   }
 
   function renderHints(): void {
+    if (!live) return;
     const cfg = loadConfig();
     const hasLease = !!cfg.leased_node;
     hintsRef.content = loading
@@ -199,6 +207,7 @@ export async function showIps(): Promise<'back'> {
   }
 
   function renderAll(): void {
+    if (!live) return;
     renderLease();
     renderRows();
     renderHints();
@@ -209,13 +218,14 @@ export async function showIps(): Promise<'back'> {
   let spinTimer: ReturnType<typeof setInterval> | null = null;
 
   async function fetchNodes(): Promise<void> {
-    if (loading) return;
+    if (!live || loading) return;
     loading   = true;
     cursor    = 0;
     offset    = 0;
     nodes     = [];
     renderAll();
 
+    if (!live) return;
     statusRef.content = `${spin()}  Fetching nodes…`;
     statusRef.fg      = C.dim;
     spinTimer = setInterval(() => {
@@ -226,11 +236,13 @@ export async function showIps(): Promise<'back'> {
     try {
       const cfg = loadConfig();
       nodes = await listNodes({ config: cfg, noCache: true });
+      if (!live) return;
       statusRef.content = nodes.length > 0
         ? `  ${nodes.length} node${nodes.length === 1 ? '' : 's'} available`
         : '  No nodes found — check your connection';
       statusRef.fg = nodes.length > 0 ? C.slate : C.amber;
     } catch (err) {
+      if (!live) return;
       nodes = [];
       statusRef.content = `  Error: ${err instanceof Error ? err.message : String(err)}`;
       statusRef.fg      = C.red;
@@ -289,9 +301,21 @@ export async function showIps(): Promise<'back'> {
         const node = nodes[cursor];
         if (!node) return;
         const cfg = loadConfig();
-        leaseNode({ config: cfg, nodeIdOrDomain: node.domain, nodes });
-        statusRef.content = `  ✓  Leased  ${node.domain}${node.region ? '  · ' + node.region : ''}`;
-        statusRef.fg      = C.emerald;
+        const target = nodeLeaseTarget(node);
+        if (!target) {
+          statusRef.content = '  Error: selected node cannot be leased';
+          statusRef.fg      = C.red;
+          renderAll();
+          return;
+        }
+        try {
+          leaseNode({ config: cfg, nodeIdOrDomain: target, nodes });
+          statusRef.content = `  ✓  Leased  ${target}${node.region ? '  · ' + node.region : ''}`;
+          statusRef.fg      = C.emerald;
+        } catch (err) {
+          statusRef.content = `  Error: ${err instanceof Error ? err.message : String(err)}`;
+          statusRef.fg      = C.red;
+        }
         renderAll();
         return;
       }

@@ -32,11 +32,20 @@ export async function listNodes(opts: {
   }
 
   const data = await res.json() as unknown;
-  let nodes: NodeInfo[];
-  if (Array.isArray(data))             nodes = data as NodeInfo[];
-  else if (Array.isArray((data as any).nodes)) nodes = (data as any).nodes as NodeInfo[];
-  else if (Array.isArray((data as any).data))  nodes = (data as any).data  as NodeInfo[];
-  else nodes = [];
+  let rawNodes: unknown[];
+  if (Array.isArray(data))                    rawNodes = data;
+  else if (Array.isArray((data as any).nodes)) rawNodes = (data as any).nodes;
+  else if (Array.isArray((data as any).data))  rawNodes = (data as any).data;
+  else rawNodes = [];
+
+  const nodes = rawNodes
+    .filter((n): n is Record<string, unknown> => !!n && typeof n === 'object')
+    .map((n) => ({
+      ...n,
+      node_id: String(n.node_id ?? n.id ?? ''),
+      domain:  String(n.domain ?? ''),
+      region:  String(n.region ?? ''),
+    })) as NodeInfo[];
 
   saveNodeCache(nodes);
   return nodes;
@@ -56,8 +65,10 @@ export function leaseNode(opts: {
     const match = opts.nodes.find(
       n => n.node_id === opts.nodeIdOrDomain || n.domain === opts.nodeIdOrDomain,
     );
-    if (match) { domain = match.domain; node_id = match.node_id; region = match.region; }
+    if (match) { domain = match.domain || match.node_id || opts.nodeIdOrDomain; node_id = match.node_id; region = match.region; }
   }
+
+  if (!domain) throw new Error('Selected node does not have a leaseable domain or id');
 
   saveConfig({
     ...opts.config,
