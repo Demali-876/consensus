@@ -1,5 +1,6 @@
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { C } from '../../../theme';
+import { loadPrefs } from '../../../lib/store.ts';
 import { writeTraceLog } from '../../../lib/crash-log';
 import { type FieldDef, type FormState, renderField, handleKey } from '../../../lib/form.ts';
 import { chooseDefaultPort, REVERSE_PROXY_PORT_CANDIDATES, scanPorts, HTTP_PORTS } from '../../../lib/ports.ts';
@@ -57,6 +58,7 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
   scanRenderer.destroy();
 
   // ── Form phase ────────────────────────────────────────────────────────────────
+  const prefs = loadPrefs();
   const firstPort = openPorts[0];
   const defaultListenPort = chooseDefaultPort(openPorts, REVERSE_PROXY_PORT_CANDIDATES, 8081);
 
@@ -65,10 +67,10 @@ export async function showReverseSetup(): Promise<ReverseSetupResult | null> {
     { id: 'port',       label: 'Port',        hint: 'upstream port',         type: 'text',   value: firstPort ? String(firstPort) : '' },
     { id: 'protocol',   label: 'Protocol',    hint: 'http / https',          type: 'toggle', value: 'http', options: ['http', 'https'] },
     { id: 'listenPort', label: 'Listen port', hint: 'local proxy bind port', type: 'text',   value: String(defaultListenPort) },
-    { id: 'cacheTtl',   label: 'Cache TTL',   hint: 'seconds, 0 = off',      type: 'text',   value: '30' },
+    { id: 'cacheTtl',   label: 'Cache TTL',   hint: 'seconds, 0 = off',      type: 'text',   value: String(prefs.defaultCacheTtl || 30) },
     { id: 'maxSize',    label: 'Max entries', hint: 'max cached responses',   type: 'text',   value: '1000' },
-    { id: 'network', label: 'Pay network', hint: '←/→ or ↵ to select', type: 'toggle',
-      value: '', options: NETWORK_CAIP2S, optionLabels: NETWORK_LABELS },
+    { id: 'network',    label: 'Pay network', hint: '←/→ or ↵ to select',   type: 'toggle',
+      value: prefs.defaultNetwork ?? '', options: NETWORK_CAIP2S, optionLabels: NETWORK_LABELS },
   ];
 
   const state: FormState = { cursor: 0, editing: false, editBuf: '' };

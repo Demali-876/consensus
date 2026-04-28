@@ -1,7 +1,5 @@
 import { readFile } from 'fs/promises';
-import fs   from 'fs';
-import path  from 'path';
-import os    from 'os';
+import * as path from 'node:path';
 import {
   createCliRenderer,
   BoxRenderable,
@@ -9,37 +7,20 @@ import {
 } from '@opentui/core';
 import { C } from '../../theme';
 import { makeSpin } from '../../lib/spinners';
+import { isFreeMode } from '../../lib/server-config';
 import { workerRegistry } from '../screens/proxy/hub';
+import { saveSession, loadSpending, type SessionRecord, type SessionType } from '../../lib/store';
 
 const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
 
 // ─── Session store ────────────────────────────────────────────────────────────
 
-type Session = {
-  id:        string;
-  type:      'http' | 'tcp' | 'ws';
-  url:       string;
-  target:    string;
-  startedAt: number;
-};
-
-export function recordSession(session: Session): void {
+export function recordSession(session: {
+  id: string; type: SessionType; url: string; target: string; startedAt: number;
+}): void {
   try {
-    const dir = path.join(os.homedir(), '.consensus');
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const existing = loadSessions();
-    const merged   = [session, ...existing.filter((s) => s.id !== session.id)].slice(0, 10);
-    fs.writeFileSync(sessionsPath(), JSON.stringify(merged, null, 2));
+    saveSession(session as SessionRecord);
   } catch { /* non-fatal */ }
-}
-
-function sessionsPath() { return path.join(os.homedir(), '.consensus', 'sessions.json'); }
-
-function loadSessions(): Session[] {
-  try {
-    if (!fs.existsSync(sessionsPath())) return [];
-    return JSON.parse(fs.readFileSync(sessionsPath(), 'utf8')) as Session[];
-  } catch { return []; }
 }
 
 // ─── Nav items ────────────────────────────────────────────────────────────────
@@ -61,8 +42,9 @@ const NAV: NavItem[] = [
 // ─── Landing ──────────────────────────────────────────────────────────────────
 
 export async function showLanding(): Promise<LandingAction> {
-  const pkg     = await readFile(path.join(import.meta.dir, '../../../package.json'), 'utf8');
-  const version = JSON.parse(pkg).version as string;
+  const pkg      = await readFile(path.join(import.meta.dir, '../../../package.json'), 'utf8');
+  const version  = JSON.parse(pkg).version as string;
+  const freeMode = await isFreeMode();
 
   const renderer = await createCliRenderer({
     exitOnCtrlC:        false,
@@ -102,13 +84,21 @@ export async function showLanding(): Promise<LandingAction> {
 
   sidebar.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.panel }));
   const navRefs: TextRenderable[] = [];
-  for (const item of NAV) {
+  const proxySubRefs: TextRenderable[] = [];
+  for (let ni = 0; ni < NAV.length; ni++) {
+    const item = NAV[ni]!;
     const t = new TextRenderable(renderer, {
       content: ` ${item.icon}  ${item.label}`,
       fg: C.slate, bg: C.panel,
     });
     sidebar.add(t);
     navRefs.push(t);
+    if (item.action === 'proxy') {
+      // Created but NOT added yet — inserted/removed dynamically on expand/collapse
+      const fwd = new TextRenderable(renderer, { id: 'proxy-fwd', content: '', fg: C.slate, bg: C.panel });
+      const rev = new TextRenderable(renderer, { id: 'proxy-rev', content: '', fg: C.slate, bg: C.panel });
+      proxySubRefs.push(fwd, rev);
+    }
   }
 
   // Network section
@@ -129,10 +119,9 @@ export async function showLanding(): Promise<LandingAction> {
   };
 
   const netNodes   = mkSideNetRow('Nodes');
-  const netHttp    = mkSideNetRow('Avg HTTP');
-  const netWs      = mkSideNetRow('Avg WS');
+  const netHttp    = mkSideNetRow('HTTP bench');
+  const netWs      = mkSideNetRow('WS avg p95');
   const netTunnels = mkSideNetRow('Tunnels');
-  const netLoad    = mkSideNetRow('Net load');
 
   sidebar.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.panel }));
   const netStatus = new TextRenderable(renderer, { content: '○ CHECKING', fg: C.dim, bg: C.panel });
@@ -167,7 +156,7 @@ export async function showLanding(): Promise<LandingAction> {
   // ── WORKERS panel ─────────────────────────────────────────────────────────
   const workersPanel = new BoxRenderable(renderer, {
     flexGrow: 1, flexShrink: 1, flexDirection: 'column',
-    borderStyle: 'single', borderColor: C.dim,
+    borderStyle: 'single', borderColor: C.line2,
     title: ' WORKERS ', padding: 1,
     backgroundColor: C.panel,
   });
@@ -201,7 +190,7 @@ export async function showLanding(): Promise<LandingAction> {
   // ── ACTIVE CONNECTIONS panel ──────────────────────────────────────────────
   const connPanel = new BoxRenderable(renderer, {
     flexGrow: 2, flexShrink: 1, flexDirection: 'column',
-    borderStyle: 'single', borderColor: C.dim,
+    borderStyle: 'single', borderColor: C.line2,
     title: ' ACTIVE CONNECTIONS ', padding: 1,
     backgroundColor: C.panel,
   });
@@ -234,7 +223,7 @@ export async function showLanding(): Promise<LandingAction> {
   // ── SPENDING panel ────────────────────────────────────────────────────────
   const spendPanel = new BoxRenderable(renderer, {
     flexGrow: 1, flexShrink: 1, flexDirection: 'column',
-    borderStyle: 'single', borderColor: C.dim,
+    borderStyle: 'single', borderColor: C.line2,
     title: ' SPENDING ', padding: 1,
     backgroundColor: C.panel,
   });
@@ -247,12 +236,12 @@ export async function showLanding(): Promise<LandingAction> {
   spendPanel.add(spendBudget);
   spendPanel.add(spendSpent);
 
-  bottomRow.add(spendPanel);
+  if (!freeMode) bottomRow.add(spendPanel);
 
   // ── LOGS panel ────────────────────────────────────────────────────────────
   const logsPanel = new BoxRenderable(renderer, {
     flexGrow: 2, flexShrink: 1, flexDirection: 'column',
-    borderStyle: 'single', borderColor: C.dim,
+    borderStyle: 'single', borderColor: C.line2,
     title: ' LOGS ', padding: 1,
     backgroundColor: C.panel,
   });
@@ -287,16 +276,61 @@ export async function showLanding(): Promise<LandingAction> {
   root.add(bottomBar);
 
   // ── Sidebar state ─────────────────────────────────────────────────────────
-  const ALL_ACTIONS = NAV.map(n => n.action);
-  let navIdx = 0;
+  // Two modes:
+  //   'main'      — navigating the top-level NAV list; PROXY is a normal item
+  //   'proxy-sub' — inside the proxy dropdown; B or Esc collapses back
+  const PROXY_NAV_IDX = NAV.findIndex(n => n.action === 'proxy'); // 1
+  const PROXY_SUB = [
+    { label: 'Forward Proxy', action: 'proxy-forward' as LandingAction, desc: 'route outbound traffic through the consensus network' },
+    { label: 'Reverse Proxy', action: 'proxy-reverse' as LandingAction, desc: 'protect a local server with a caching proxy' },
+  ];
+
+  type SidebarMode = { kind: 'main'; idx: number } | { kind: 'proxy-sub'; sub: number };
+  let navMode: SidebarMode  = { kind: 'main', idx: 0 };
+  let proxySubAdded         = false;
 
   const renderSidebar = () => {
-    for (let i = 0; i < navRefs.length; i++) {
-      const sel = i + 1 === navIdx;
-      navRefs[i]!.fg      = sel ? C.accent : C.slate;
+    const proxyOpen = navMode.kind === 'proxy-sub';
+
+    // Dynamically insert sub-items into sidebar after PROXY row when expanding,
+    // and remove them when collapsing — prevents them from occupying layout space.
+    if (proxyOpen && !proxySubAdded) {
+      const anchor = navRefs[PROXY_NAV_IDX + 1]; // node after PROXY (WEBSOCKET)
+      if (anchor) {
+        sidebar.insertBefore(proxySubRefs[0]!, anchor);
+        sidebar.insertBefore(proxySubRefs[1]!, anchor);
+      } else {
+        sidebar.add(proxySubRefs[0]!);
+        sidebar.add(proxySubRefs[1]!);
+      }
+      proxySubAdded = true;
+    } else if (!proxyOpen && proxySubAdded) {
+      sidebar.remove('proxy-fwd');
+      sidebar.remove('proxy-rev');
+      proxySubAdded = false;
+    }
+
+    for (let i = 0; i < NAV.length; i++) {
+      const sel = navMode.kind === 'main' && navMode.idx === i + 1;
+      const fg  = sel ? C.accent : (proxyOpen && i === PROXY_NAV_IDX ? C.white : C.slate);
+      navRefs[i]!.fg      = fg;
       navRefs[i]!.content = sel
         ? `▶${NAV[i]!.icon}  ${NAV[i]!.label}`
         : ` ${NAV[i]!.icon}  ${NAV[i]!.label}`;
+    }
+
+    if (proxyOpen) {
+      const sub = (navMode as { kind: 'proxy-sub'; sub: number }).sub;
+      for (let i = 0; i < PROXY_SUB.length; i++) {
+        const sel = sub === i;
+        proxySubRefs[i]!.content = `  ${sel ? '▶' : ' '} ${PROXY_SUB[i]!.label}`;
+        proxySubRefs[i]!.fg      = sel ? C.accent : C.slate;
+      }
+      hintsRef.content = PROXY_SUB[sub]!.desc;
+      hintsRef.fg      = C.dim;
+    } else {
+      hintsRef.content = '[↑↓] navigate   [↵] open   [R] refresh   [q] quit';
+      hintsRef.fg      = C.slate;
     }
   };
 
@@ -392,11 +426,26 @@ export async function showLanding(): Promise<LandingAction> {
     netStatus.fg      = C.dim;
 
     fetch(`${SERVER}/health`, { signal: AbortSignal.timeout(4000) })
-      .then((r) => {
+      .then(async (r) => {
         if (!live) return;
         isChecking        = false;
         netStatus.content = r.ok ? '● CONNECTED' : '● DEGRADED';
         netStatus.fg      = r.ok ? C.emerald      : C.amber;
+        if (!r.ok) return;
+        const d = await r.json() as {
+          websocket?: { router_stats?: { active_nodes?: number } };
+          tunnels?:   { active_tunnels?: number };
+          network?:   { avg_http_latency_ms?: number | null; avg_ws_latency_ms?: number | null };
+        };
+        if (!live) return;
+        const nodes   = d.websocket?.router_stats?.active_nodes;
+        const httpLat = d.network?.avg_http_latency_ms;
+        const wsLat   = d.network?.avg_ws_latency_ms;
+        const tunnels = d.tunnels?.active_tunnels;
+        if (typeof nodes   === 'number') { netNodes.content   = String(nodes);   netNodes.fg   = C.white; }
+        if (typeof httpLat === 'number') { netHttp.content    = `${httpLat}ms`;  netHttp.fg    = C.white; }
+        if (typeof wsLat   === 'number') { netWs.content      = `${wsLat}ms`;    netWs.fg      = C.white; }
+        if (typeof tunnels === 'number') { netTunnels.content = String(tunnels); netTunnels.fg = C.white; }
       })
       .catch(() => {
         if (!live) return;
@@ -404,23 +453,35 @@ export async function showLanding(): Promise<LandingAction> {
         netStatus.content = '● OFFLINE';
         netStatus.fg      = C.red;
       });
-
-    fetch(`${SERVER}/stats`, { signal: AbortSignal.timeout(4000) })
-      .then(async (r) => {
-        if (!live || !r.ok) return;
-        const d = await r.json() as Record<string, unknown>;
-        if (!live) return;
-        if (typeof d.nodes     === 'number') { netNodes.content   = String(d.nodes);   netNodes.fg   = C.white; }
-        if (typeof d.latency   === 'number') { netHttp.content    = `${d.latency}ms`;  netHttp.fg    = C.white; }
-        if (typeof d.wsLatency === 'number') { netWs.content      = `${d.wsLatency}ms`; netWs.fg     = C.white; }
-        if (typeof d.tunnels   === 'number') { netTunnels.content = String(d.tunnels); netTunnels.fg = C.white; }
-        if (typeof d.load      === 'number') { netLoad.content    = `${d.load}%`;      netLoad.fg    = d.load > 80 ? C.red : d.load > 50 ? C.amber : C.white; }
-      })
-      .catch(() => { /* non-fatal */ });
   }
 
+  const refreshSpend = (): void => {
+    if (freeMode) return;
+    try {
+      const ledger  = loadSpending();
+      const today   = new Date().toISOString().slice(0, 10);
+      const todayUsd = ledger.entries
+        .filter(e => e.date === today)
+        .reduce((s, e) => s + e.amountUsd, 0);
+      if (ledger.allTimeUsd === 0) {
+        spendGraph.content  = ' No spending data';
+        spendGraph.fg       = C.dim;
+        spendBudget.content = '';
+        spendSpent.content  = '';
+      } else {
+        spendGraph.content  = ` Today     $${todayUsd.toFixed(4)}`;
+        spendGraph.fg       = todayUsd > 0 ? C.white : C.slate;
+        spendBudget.content = ` All-time  $${ledger.allTimeUsd.toFixed(4)}`;
+        spendBudget.fg      = C.slate;
+        spendSpent.content  = ` Sessions  ${ledger.entries.length}`;
+        spendSpent.fg       = C.dim;
+      }
+    } catch { /* non-fatal */ }
+  };
+
   refreshDashboard();
-  const dashTimer = setInterval(() => { if (live) refreshDashboard(); }, 1000);
+  refreshSpend();
+  const dashTimer = setInterval(() => { if (live) { refreshDashboard(); refreshSpend(); } }, 1000);
 
   // ── Key input ─────────────────────────────────────────────────────────────
   return new Promise<LandingAction>((resolve) => {
@@ -456,19 +517,51 @@ export async function showLanding(): Promise<LandingAction> {
         return;
       }
 
+      if (key.name === 'b' || key.name === 'B' || key.name === 'escape') {
+        if (navMode.kind === 'proxy-sub') {
+          navMode = { kind: 'main', idx: PROXY_NAV_IDX + 1 };
+          renderSidebar();
+        }
+        return;
+      }
+
       if (key.name === 'up' || key.name === 'k') {
-        navIdx = navIdx <= 1 ? NAV.length : navIdx - 1;
+        if (navMode.kind === 'proxy-sub') {
+          navMode = navMode.sub > 0
+            ? { kind: 'proxy-sub', sub: navMode.sub - 1 }
+            : { kind: 'main', idx: PROXY_NAV_IDX + 1 }; // back to PROXY item
+        } else {
+          const idx = navMode.idx <= 1 ? NAV.length : navMode.idx - 1;
+          navMode = { kind: 'main', idx };
+        }
         renderSidebar();
         return;
       }
       if (key.name === 'down' || key.name === 'j') {
-        navIdx = navIdx >= NAV.length ? 1 : navIdx + 1;
+        if (navMode.kind === 'proxy-sub') {
+          navMode = navMode.sub < PROXY_SUB.length - 1
+            ? { kind: 'proxy-sub', sub: navMode.sub + 1 }
+            : { kind: 'main', idx: PROXY_NAV_IDX + 2 }; // to item after PROXY
+        } else {
+          const idx = navMode.idx >= NAV.length ? 1 : navMode.idx + 1;
+          navMode = { kind: 'main', idx };
+        }
         renderSidebar();
         return;
       }
       if (key.name === 'return' || key.name === 'enter') {
-        if (navIdx === 0) return;
-        done(ALL_ACTIONS[navIdx - 1]!);
+        if (navMode.kind === 'proxy-sub') {
+          done(PROXY_SUB[navMode.sub]!.action);
+        } else if (navMode.idx > 0) {
+          const item = NAV[navMode.idx - 1]!;
+          if (item.action === 'proxy') {
+            // Expand the dropdown
+            navMode = { kind: 'proxy-sub', sub: 0 };
+            renderSidebar();
+          } else {
+            done(item.action);
+          }
+        }
         return;
       }
     });

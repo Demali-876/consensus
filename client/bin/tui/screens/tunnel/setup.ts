@@ -4,7 +4,8 @@ import { writeTraceLog } from '../../../lib/crash-log';
 import { type FieldDef, type FormState, renderField, handleKey } from '../../../lib/form.ts';
 import { scanAll, scanLan, LAN_HTTP_PORTS, LAN_TCP_PORTS, type ScannedPort, type LanDevice } from '../../../lib/ports.ts';
 import { showTunnelDashboard } from './dashboard.ts';
-import { makeSpin } from '../../../lib/spinners.ts';
+import { makeSpin }            from '../../../lib/spinners.ts';
+import { loadPrefs, loadBookmarks, saveBookmark, type Bookmark } from '../../../lib/store.ts';
 
 export type TunnelSetupResult = {
   protocol: 'http' | 'tcp';
@@ -54,12 +55,16 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
   root.add(bottomBar);
 
   // ── Fields ────────────────────────────────────────────────────────────────
+  const prefs = loadPrefs();
   const fields: FieldDef[] = [
-    { id: 'protocol', label: 'Protocol', hint: 'http / tcp',              type: 'toggle', value: 'http', options: ['http', 'tcp'] },
-    { id: 'target',   label: 'Target',   hint: 'IP address or hostname',  type: 'text',   value: '' },
+    { id: 'protocol', label: 'Protocol', hint: 'http / tcp',              type: 'toggle', value: prefs.defaultProtocol, options: ['http', 'tcp'] },
+    { id: 'target',   label: 'Target',   hint: 'IP address or hostname',  type: 'text',   value: prefs.defaultTarget ?? '' },
     { id: 'port',     label: 'Port',     hint: 'optional — leave blank to use default', type: 'text', value: '' },
   ];
   const state: FormState = { cursor: 0, editing: false, editBuf: '' };
+  let bmList = loadBookmarks().filter(b => b.type === 'tunnel-http' || b.type === 'tunnel-tcp');
+  let bmMode = false;
+  const MAX_BM = 5;
 
   // ── Protocol row ──────────────────────────────────────────────────────────
   const protoBox = new BoxRenderable(renderer, {
@@ -82,7 +87,7 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
 
   const localPanel = new BoxRenderable(renderer, {
     flexGrow: 1, flexShrink: 1, flexDirection: 'column',
-    borderStyle: 'single', borderColor: C.dim,
+    borderStyle: 'single', borderColor: C.line2,
     title: ' LOCAL PROCESSES ', padding: 1,
     backgroundColor: C.panel,
   });
@@ -103,7 +108,7 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
 
   const lanPanel = new BoxRenderable(renderer, {
     flexGrow: 2, flexShrink: 1, flexDirection: 'column',
-    borderStyle: 'single', borderColor: C.dim,
+    borderStyle: 'single', borderColor: C.line2,
     title: ' LAN DEVICES ', padding: 1,
     backgroundColor: C.panel,
   });
@@ -140,6 +145,17 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
   content.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.dark }));
   const validationRef = new TextRenderable(renderer, { content: ' ', fg: C.red, bg: C.dark });
   content.add(validationRef);
+
+  // ── BOOKMARKS section ─────────────────────────────────────────────────────
+  content.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.dark }));
+  const bmHeaderRef = new TextRenderable(renderer, { content: '', fg: C.dim, bg: C.dark });
+  content.add(bmHeaderRef);
+  const bmRefs: TextRenderable[] = [];
+  for (let i = 0; i < MAX_BM; i++) {
+    const t = new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.dark });
+    content.add(t);
+    bmRefs.push(t);
+  }
 
   // ── Runtime state ─────────────────────────────────────────────────────────
   let live           = true;
@@ -242,6 +258,7 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     fields.forEach((f, i) => renderField(f, i, state));
     renderLocal();
     renderLan();
+    renderBookmarks();
     validationRef.content = validationMsg ? `  ✕  ${validationMsg}` : ' ';
     validationRef.fg      = validationMsg ? C.red : C.dark;
     const pick    = buildPickList();
@@ -249,7 +266,9 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     const lanHint = lanEverScanned ? '[L rescan LAN]' : '[L scan LAN]';
     hintsRef.content = state.editing
       ? '[↵ confirm]  [esc cancel]'
-      : `${numHint}[R rescan local]  ${lanHint}  [A show all]  [↑↓ navigate]  [↵/←/→ edit]  [S start]  [B back]`;
+      : bmMode
+        ? '[1-5 load bookmark]  [M save current]  [esc cancel]'
+        : `${numHint}[R rescan local]  ${lanHint}  [A show all]  [M bookmark]  [↑↓ navigate]  [↵/←/→ edit]  [S start]  [B back]`;
   }
 
   // ── Spinner ───────────────────────────────────────────────────────────────
@@ -331,6 +350,44 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     return null;
   }
 
+  function fmtAge(ts: number): string {
+    const d = Date.now() - ts;
+    if (d < 3_600_000)  return `${Math.floor(d / 60_000)}m`;
+    if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h`;
+    return `${Math.floor(d / 86_400_000)}d`;
+  }
+
+  function renderBookmarks(): void {
+    if (bmList.length === 0) {
+      bmHeaderRef.content = 'BOOKMARKS  ' + '─'.repeat(38) + '  [M] save first';
+      bmHeaderRef.fg      = C.dim;
+      bmRefs[0]!.content  = '  (none saved)';
+      bmRefs[0]!.fg       = C.dim;
+      for (let i = 1; i < MAX_BM; i++) bmRefs[i]!.content = ' ';
+      return;
+    }
+    bmHeaderRef.content = bmMode
+      ? 'BOOKMARKS  ' + '─'.repeat(22) + '  ← press number to load   [esc] cancel   [M] save'
+      : 'BOOKMARKS  ' + '─'.repeat(35) + '  [M] save   [O] load';
+    bmHeaderRef.fg = bmMode ? C.white : C.dim;
+    for (let i = 0; i < MAX_BM; i++) {
+      const b = bmList[i];
+      if (!b) { bmRefs[i]!.content = ' '; continue; }
+      const proto  = b.type === 'tunnel-http' ? 'http' : 'tcp';
+      const target = b.port ? `${b.target}:${b.port}` : b.target;
+      const label  = b.label.length > 18 ? b.label.slice(0, 17) + '…' : b.label.padEnd(18);
+      bmRefs[i]!.content = `  ${i + 1}  ${label}  ${proto}  ${target.padEnd(20)}  ${fmtAge(b.createdAt)} ago`;
+      bmRefs[i]!.fg      = bmMode ? C.white : C.dim;
+    }
+  }
+
+  function applyTunnelBookmark(b: Bookmark): void {
+    const set = (id: string, val: string) => { const f = fields.find(f => f.id === id); if (f) f.value = val; };
+    set('protocol', b.type === 'tunnel-http' ? 'http' : 'tcp');
+    set('target',   b.target);
+    set('port',     b.port != null ? String(b.port) : '');
+  }
+
   const done = (result: TunnelSetupResult | null) => {
     writeTraceLog('tunnelSetup.done', { result });
     live = false;
@@ -343,17 +400,55 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     renderer.keyInput.on('keypress', async (key) => {
       if (!live) return;
 
+      // Bookmark-mode escape
+      if (key.name === 'escape' && bmMode) {
+        bmMode = false;
+        renderAll();
+        return;
+      }
+
       if (!state.editing) {
         if (key.name === 'r' || key.name === 'R') { runLocalScan(); return; }
         if (key.name === 'l' || key.name === 'L') { runLanScan();   return; }
         if (key.name === 'a' || key.name === 'A') { showAllLan = !showAllLan; renderAll(); return; }
 
-        const num  = parseInt(key.name ?? '');
-        const pick = buildPickList();
-        if (!isNaN(num) && num >= 1 && num <= pick.length) {
-          const e = pick[num - 1]!;
-          prefill(e.target, e.port);
+        // M — save bookmark
+        if (key.name === 'm' || key.name === 'M') {
+          const get  = (id: string) => fields.find(f => f.id === id)?.value.trim() ?? '';
+          const proto = get('protocol') as 'http' | 'tcp';
+          const port  = parseInt(get('port'), 10);
+          saveBookmark({
+            id:        crypto.randomUUID(),
+            label:     `${get('target') || 'localhost'}${get('port') ? ':' + get('port') : ''}`,
+            type:      proto === 'http' ? 'tunnel-http' : 'tunnel-tcp',
+            target:    get('target') || 'localhost',
+            port:      !isNaN(port) && port > 0 ? port : undefined,
+            createdAt: Date.now(),
+          });
+          bmList = loadBookmarks().filter(b => b.type === 'tunnel-http' || b.type === 'tunnel-tcp');
           renderAll();
+          return;
+        }
+
+        // O — toggle bookmark load mode
+        if (key.name === 'o' || key.name === 'O') {
+          if (bmList.length > 0) { bmMode = !bmMode; renderAll(); }
+          return;
+        }
+
+        const num  = parseInt(key.name ?? '');
+        if (!isNaN(num) && num >= 1) {
+          if (bmMode) {
+            const b = bmList[num - 1];
+            if (b) { applyTunnelBookmark(b); bmMode = false; renderAll(); }
+          } else {
+            const pick = buildPickList();
+            if (num <= pick.length) {
+              const e = pick[num - 1]!;
+              prefill(e.target, e.port);
+              renderAll();
+            }
+          }
           return;
         }
       }

@@ -4,6 +4,9 @@ import { makeSpin } from '../../../lib/spinners.ts';
 import { loadConfig, getNodeOptions } from '../../../lib/config.ts';
 import { createPaymentFetch } from '../../../../src/payment-fetch.js';
 import { SocketClient } from '../../../../src/socket-client.ts';
+import { saveSession, recordSpend } from '../../../lib/store.ts';
+import { quoteWs } from '../../../lib/websockets.ts';
+import { decodePaymentResponseHeader } from '@x402/fetch';
 import type { WsSetupResult } from './setup.ts';
 
 // ─── Formatting ───────────────────────────────────────────────────────────────
@@ -125,9 +128,11 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     paddingX: 2, paddingY: 0, backgroundColor: C.dark,
   });
-  const dataRef   = new TextRenderable(renderer, { content: 'Data: — / —',    fg: C.dim, bg: C.dark });
-  const uptimeRef = new TextRenderable(renderer, { content: '00:00:00',        fg: C.dim, bg: C.dark });
+  const dataRef    = new TextRenderable(renderer, { content: 'Data: — / —',        fg: C.dim, bg: C.dark });
+  const latencyRef = new TextRenderable(renderer, { content: 'Latency: —',          fg: C.dim, bg: C.dark });
+  const uptimeRef  = new TextRenderable(renderer, { content: '00:00:00',            fg: C.dim, bg: C.dark });
   statsBar.add(dataRef);
+  statsBar.add(latencyRef);
   statsBar.add(uptimeRef);
   root.add(statsBar);
 
@@ -164,6 +169,34 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
   const expiresMs  = setup.minutes * 60 * 1000;
   const log: MsgEntry[] = [];
   let session: { send: (data: string) => void; close: () => void } | null = null;
+  const sessionId = crypto.randomUUID();
+  let lastTxHash: string | undefined;
+
+  // ── Latency (send → first received message RTT) ───────────────────────────
+  const MAX_LATENCY_SAMPLES = 40;
+  const recentLatencies: number[] = [];
+  let lastSentAt: number | null = null;
+
+  function recordRtt(): void {
+    if (lastSentAt == null) return;
+    const rtt = Date.now() - lastSentAt;
+    lastSentAt = null;
+    recentLatencies.push(rtt);
+    if (recentLatencies.length > MAX_LATENCY_SAMPLES) recentLatencies.shift();
+  }
+
+  function renderLatency(): void {
+    if (recentLatencies.length === 0) {
+      latencyRef.content = 'Latency: —';
+      return;
+    }
+    const cur = recentLatencies.at(-1)!;
+    const avg = recentLatencies.reduce((s, v) => s + v, 0) / recentLatencies.length;
+    const sorted = [...recentLatencies].sort((a, b) => a - b);
+    const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!;
+    latencyRef.content = `RTT: ${Math.round(cur)}ms  avg ${Math.round(avg)}ms  p95 ${Math.round(p95)}ms`;
+    latencyRef.fg = avg > 1000 ? C.amber : C.dim;
+  }
 
   // ── Log rendering ─────────────────────────────────────────────────────────
   function renderLog(): void {
@@ -217,6 +250,7 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
         try {
           session.send(sendBuf);
           bytesSent += new TextEncoder().encode(sendBuf).length;
+          lastSentAt = Date.now();
           pushMsg('▶', sendBuf);
         } catch { /* session may have closed */ }
       }
@@ -260,6 +294,33 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
     clearInterval(spinTimer);
     clearInterval(clockTimer);
     try { session?.close(); } catch { /* ignore */ }
+    const endedAt   = Date.now();
+    const durationMs = endedAt - startedAt;
+    const spendUsd  = quoteWs(setup.model, setup.minutes, setup.megabytes);
+    saveSession({
+      id:         sessionId,
+      type:       'websocket',
+      url:        '',
+      target:     `ws ${setup.model} ${setup.minutes}min ${setup.megabytes}MB`,
+      startedAt,
+      endedAt,
+      durationMs,
+      outcome:    'user-quit',
+      spendUsd,
+      bytesIn:    bytesRecv,
+      bytesOut:   bytesSent,
+      network:    setup.preferNetwork,
+    });
+    if (spendUsd > 0) {
+      recordSpend({
+        sessionId,
+        date:      new Date().toISOString().slice(0, 10),
+        type:      'websocket',
+        amountUsd: spendUsd,
+        network:   setup.preferNetwork,
+        txHash:    lastTxHash,
+      });
+    }
     renderer.destroy();
   };
 
@@ -286,7 +347,21 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
   const connectDone = (async () => {
     try {
       const cfg      = loadConfig();
-      const fetchFn  = await createPaymentFetch({ preferNetwork: setup.preferNetwork });
+
+      // Wrap the base fetch to capture the settlement txHash from X-PAYMENT-RESPONSE
+      const trackingFetch = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const response = await globalThis.fetch(input, init as RequestInit);
+        const header = response.headers.get('X-PAYMENT-RESPONSE') ?? response.headers.get('PAYMENT-RESPONSE');
+        if (header) {
+          try {
+            const decoded = decodePaymentResponseHeader(header) as { transaction?: string };
+            if (decoded?.transaction) lastTxHash = decoded.transaction;
+          } catch { /* non-fatal */ }
+        }
+        return response;
+      };
+
+      const fetchFn  = await createPaymentFetch({ preferNetwork: setup.preferNetwork, fetch: trackingFetch as typeof fetch });
       const nodeOpts = getNodeOptions(cfg);
 
       const client = SocketClient(fetchFn as Parameters<typeof SocketClient>[0], {
@@ -316,6 +391,8 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
           if (!live) return;
           const text = typeof data === 'string' ? data : JSON.stringify(data);
           bytesRecv += new TextEncoder().encode(text).length;
+          recordRtt();
+          renderLatency();
           pushMsg('◀', text);
         },
         onClose: () => {

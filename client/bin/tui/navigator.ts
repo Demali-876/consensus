@@ -12,6 +12,7 @@ import { showWebsockets } from './screens/websockets';
 import { showIps }        from './screens/ips';
 import { showSettings }   from './screens/settings';
 import { writeTraceLog }  from '../lib/crash-log';
+import { ensureJetBrainsMono } from '../lib/font-check';
 
 const ROUTES: Record<string, () => Promise<unknown>> = {
   tunnels:       () => showTunnelSetup(),
@@ -26,6 +27,8 @@ const ROUTES: Record<string, () => Promise<unknown>> = {
 
 export async function runTui(): Promise<void> {
   writeTraceLog('navigator.enter');
+
+  ensureJetBrainsMono();
 
   let next: LandingAction = await showLanding();
   writeTraceLog('navigator.afterLanding', { next });

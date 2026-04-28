@@ -7,6 +7,7 @@ import { NETWORK_CAIP2S, NETWORK_LABELS } from '../../../lib/networks.ts';
 import { resolveNetworkBalance } from '../../../lib/balance.ts';
 import type { PreferNetwork } from '../../../../src/payment-fetch.js';
 import { showWsDashboard } from './dashboard.ts';
+import { loadPrefs }       from '../../../lib/store.ts';
 
 export type WsSetupResult = {
   model:          WsModel;
@@ -59,11 +60,12 @@ export async function showWsSetup(): Promise<void> {
   root.add(bottomBar);
 
   // ── Fields ────────────────────────────────────────────────────────────────
+  const prefs = loadPrefs();
   const fields: FieldDef[] = [
-    { id: 'model',     label: 'Model',       hint: 'billing model',              type: 'toggle', value: 'hybrid', options: ['hybrid', 'time', 'data'] },
-    { id: 'minutes',   label: 'Duration',    hint: 'minutes (e.g. 5)',           type: 'text',   value: '5' },
-    { id: 'megabytes', label: 'Data',        hint: 'megabytes (e.g. 50)',        type: 'text',   value: '50' },
-    { id: 'network',   label: 'Pay network', hint: '←/→ or ↵ to select',        type: 'toggle', value: '', options: NETWORK_CAIP2S, optionLabels: NETWORK_LABELS },
+    { id: 'model',     label: 'Model',       hint: 'billing model',        type: 'toggle', value: prefs.defaultWsModel,                options: ['hybrid', 'time', 'data'] },
+    { id: 'minutes',   label: 'Duration',    hint: 'minutes (e.g. 5)',     type: 'text',   value: String(prefs.defaultWsMinutes) },
+    { id: 'megabytes', label: 'Data',        hint: 'megabytes (e.g. 50)',  type: 'text',   value: String(prefs.defaultWsMegabytes) },
+    { id: 'network',   label: 'Pay network', hint: '←/→ or ↵ to select',  type: 'toggle', value: prefs.defaultNetwork ?? '', options: NETWORK_CAIP2S, optionLabels: NETWORK_LABELS },
   ];
   const state: FormState = { cursor: 0, editing: false, editBuf: '' };
 
@@ -77,7 +79,7 @@ export async function showWsSetup(): Promise<void> {
   // Left: form fields
   const formPanel = new BoxRenderable(renderer, {
     flexGrow: 1, flexShrink: 1, flexDirection: 'column',
-    borderStyle: 'single', borderColor: C.dim,
+    borderStyle: 'single', borderColor: C.line2,
     title: ' SESSION ', padding: 1,
     backgroundColor: C.panel,
   });
@@ -103,7 +105,7 @@ export async function showWsSetup(): Promise<void> {
   // Right: billing info
   const infoPanel = new BoxRenderable(renderer, {
     flexGrow: 2, flexShrink: 1, flexDirection: 'column',
-    borderStyle: 'single', borderColor: C.dim,
+    borderStyle: 'single', borderColor: C.line2,
     title: ' BILLING ', padding: 1,
     backgroundColor: C.panel,
   });
