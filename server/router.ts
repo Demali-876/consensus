@@ -168,11 +168,27 @@ export default class Router {
     let totalReqs = 0; for (const v of this.activeRequests.values()) totalReqs += v;
     let totalSess = 0; for (const v of this.activeSessions.values()) totalSess += v;
 
+    const httpLat = activeNodes
+      .map((n: any) => n.capabilities?.fetch_latency_ms)
+      .filter((v: unknown): v is number => typeof v === 'number' && v > 0);
+    const avgHttpLatencyMs: number | null = httpLat.length
+      ? Math.round(httpLat.reduce((a: number, b: number) => a + b, 0) / httpLat.length)
+      : null;
+
+    const wsLat = activeNodes
+      .map((n: any) => n.heartbeat?.p95_ms)
+      .filter((v: unknown): v is number => typeof v === 'number' && v > 0);
+    const avgWsLatencyMs: number | null = wsLat.length
+      ? Math.round(wsLat.reduce((a: number, b: number) => a + b, 0) / wsLat.length)
+      : null;
+
     return {
       total_nodes:            allNodes.length,
       active_nodes:           activeNodes.length,
       total_active_requests:  totalReqs,
       total_active_sessions:  totalSess,
+      avg_http_latency_ms:    avgHttpLatencyMs,
+      avg_ws_latency_ms:      avgWsLatencyMs,
       sticky_mappings:        this.requestToNode.size,
       selection_stats: {
         total_selections: this.stats.total_selections,

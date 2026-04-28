@@ -98,22 +98,26 @@ app.get('/config', publicLimiter, (_req, res) => {
   res.json({ free_mode: FREE_MODE });
 });
 
-app.get('/health', publicLimiter, (req, res) => {
-  const stats = proxy.getStats();
-  const ws = wsStats.getStats();
-  const nodes = nodeStats.getStats();
-  const tunnels = tunnelStats.getStats();
+app.get('/health', publicLimiter, (_req, res) => {
+  const proxyStats  = proxy.getStats();
+  const ws          = wsStats.getStats();
+  const tunnels     = tunnelStats.getStats();
+  const routerStats = ws.router_stats;
+
   res.json({
-    status: 'healthy',
+    status:    'healthy',
     timestamp: new Date().toISOString(),
     proxy: {
-      cache_size: stats.cache_size,
-      total_requests: stats.total_requests,
-      cache_hits: stats.cache_hits,
+      cache_size:     proxyStats.cache_size,
+      total_requests: proxyStats.total_requests,
+      cache_hits:     proxyStats.cache_hits,
     },
     websocket: ws,
-    nodes: nodes,
     tunnels,
+    network: {
+      avg_http_latency_ms: routerStats.avg_http_latency_ms,
+      avg_ws_latency_ms:   routerStats.avg_ws_latency_ms,
+    },
   });
 });
 
