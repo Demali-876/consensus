@@ -323,6 +323,29 @@ export const NodeStore = {
     return this.getNode(id);
   },
 
+  setNodeUpdateState(id, state, details = {}) {
+    const node = this.getNode(id);
+    if (!node) throw new Error(`Node not found: ${id}`);
+    const capabilities = { ...(node.capabilities ?? {}) };
+    if (state == null) {
+      delete capabilities.update_state;
+      delete capabilities.update_id;
+      delete capabilities.update_target_version;
+      delete capabilities.update_reason;
+      delete capabilities.update_at;
+    } else {
+      capabilities.update_state = state;
+      capabilities.update_id = details.update_id ?? capabilities.update_id ?? null;
+      capabilities.update_target_version = details.target_version ?? capabilities.update_target_version ?? null;
+      capabilities.update_reason = details.reason ?? null;
+      capabilities.update_at = nowSec();
+    }
+    const ts = nowSec();
+    db.prepare('UPDATE nodes SET capabilities = ?, updated_at = ? WHERE id = ?')
+      .run(toJson(capabilities), ts, id);
+    return this.getNode(id);
+  },
+
   createJoinRequest({ pubkey, alg, ttlSeconds = 300 }) {
     const id        = crypto.randomBytes(8).toString('hex');
     const nonce     = crypto.randomBytes(32);

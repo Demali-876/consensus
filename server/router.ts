@@ -50,7 +50,7 @@ export default class Router {
     const sticky = this.requestToNode.get(dedupeKey);
     if (sticky) {
       const node = NodeStore.getNode(sticky.nodeId);
-      if (node && node.status === 'active') {
+      if (node && node.status === 'active' && !isNodeUpdating(node)) {
         this.stats.sticky_hits++;
         return node;
       }
@@ -58,7 +58,9 @@ export default class Router {
     }
 
     const allNodes = NodeStore.listNodes();
-    let eligibleNodes = allNodes.filter((node: any) => node.status === 'active');
+    let eligibleNodes = allNodes.filter((node: any) =>
+      node.status === 'active' && !isNodeUpdating(node),
+    );
 
     eligibleNodes = this.filterByPreferences(eligibleNodes, preferenceHeaders);
 
@@ -160,6 +162,12 @@ export default class Router {
     this.statsCache = null;
   }
 
+  getNodeLoad(nodeId: string): { requests: number; sessions: number; total: number } {
+    const requests = this.activeRequests.get(nodeId) ?? 0;
+    const sessions = this.activeSessions.get(nodeId) ?? 0;
+    return { requests, sessions, total: requests + sessions };
+  }
+
   // Separated so the return type can be inferred for statsCache typing.
   private _buildStats() {
     const allNodes    = NodeStore.listNodes();
@@ -216,4 +224,9 @@ export default class Router {
     this.statsCache = { value, at: now };
     return value;
   }
+}
+
+function isNodeUpdating(node: any): boolean {
+  const state = node?.capabilities?.update_state;
+  return state === 'preparing' || state === 'ready' || state === 'draining' || state === 'updating';
 }

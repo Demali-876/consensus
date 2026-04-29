@@ -5,7 +5,7 @@ import type { Server } from 'http';
 import NodeStore from '../../data/node_store.js';
 import { FRAME_TYPE, type FrameType } from './frames.ts';
 import { acceptClientHandshake, createHandshakeReject, decodeHandshakeMessage, encodeHandshakeMessage } from './handshake.ts';
-import { MESSAGE_TYPE, createErrorMessage, decodeMessage, encodeMessage, nowSeconds, type EvalAction, type EvalResponseMessage, type HelloMessage, type ProxyResponseMessage, type TunnelMessage } from './messages.ts';
+import { MESSAGE_TYPE, createErrorMessage, decodeMessage, encodeMessage, nowSeconds, type EvalAction, type EvalResponseMessage, type HelloMessage, type ProxyResponseMessage, type TunnelMessage, type UpdateReadyMessage } from './messages.ts';
 import { openFrame, sealFrame, type SecureSession } from './secure-channel.ts';
 
 interface PendingTunnelRequest {
@@ -31,6 +31,17 @@ interface NodeTunnelSession {
   candidateId?: string;
   publicKeyPem?: string;
   version?: string;
+  activeRequests: number;
+  activeStreams: number;
+  update?: {
+    id: string;
+    state: 'preparing' | 'ready' | 'draining' | 'updating' | 'failed';
+    targetVersion: string;
+    artifactPath?: string;
+    sha256?: string;
+    error?: string;
+    updatedAt: number;
+  };
   connectedAt: number;
   lastSeenAt: number;
   pending: Map<string, PendingTunnelRequest>;
@@ -52,11 +63,18 @@ interface NodeTunnelSession {
 }
 
 type EvalJoinRequest = NonNullable<NodeTunnelSession['eval']>['joinRequest'];
+type RouterLike = {
+  getNodeLoad?(nodeId: string): { requests: number; sessions: number; total: number };
+};
 
 const sessions = new Map<string, NodeTunnelSession>();
 const byNodeId = new Map<string, string>();
 
-export function registerNodeTunnel(app: Express, server: Server) {
+// Router-directed node updates are disabled unless
+// CONSENSUS_NODE_AUTO_UPDATES=true. When enabled, the scheduler picks one idle
+// outdated control session at a time, prepares the artifact on the node, then
+// applies after the router and tunnel both report no active work.
+export function registerNodeTunnel(app: Express, server: Server, options: { router?: RouterLike } = {}) {
   app.get('/node/tunnel/stats', (_req, res) => {
     res.json(getStats());
   });
@@ -90,6 +108,32 @@ export function registerNodeTunnel(app: Express, server: Server) {
       });
     }
   });
+
+  app.post('/node/tunnel/update/:node_id/prepare', requireLoopback, async (req, res) => {
+    try {
+      const manifest = req.body?.manifest ?? NodeStore.getRequiredManifest()?.manifest;
+      if (!manifest) return res.status(404).json({ error: 'No update manifest available' });
+      const ready = await prepareNodeUpdate(req.params.node_id, manifest);
+      res.json({ ok: true, ready });
+    } catch (error) {
+      res.status(500).json({ error: 'Update prepare failed', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/node/tunnel/update/:node_id/apply', requireLoopback, async (req, res) => {
+    try {
+      const result = await applyNodeUpdate(req.params.node_id, {
+        updateId: req.body?.update_id,
+        restartAfterMs: Number(req.body?.restart_after_ms ?? 1_000),
+        force: Boolean(req.body?.force),
+      });
+      res.json({ ok: true, result });
+    } catch (error) {
+      res.status(500).json({ error: 'Update apply failed', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  const scheduler = startUpdateScheduler(options.router);
 
   const wss = new WebSocketServer({ noServer: true });
 
@@ -136,6 +180,12 @@ export function registerNodeTunnel(app: Express, server: Server) {
       if (!handshakeComplete || !session) return;
       sessions.delete(session.id);
       if (session.nodeId) byNodeId.delete(session.nodeId);
+      if (session.nodeId && session.update?.state === 'updating') {
+        NodeStore.setNodeUpdateState(session.nodeId, 'updating', {
+          update_id: session.update.id,
+          target_version: session.update.targetVersion,
+        });
+      }
       console.log(`[Node Tunnel] disconnected ${session.id}`);
     });
 
@@ -165,6 +215,9 @@ export function registerNodeTunnel(app: Express, server: Server) {
       if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
       return attachProxySession(session, clientWs);
     },
+    prepareNodeUpdate,
+    applyNodeUpdate,
+    stopUpdateScheduler: () => scheduler?.stop(),
     getSession: (sessionId: string) => sessions.get(sessionId) ?? null,
     getNodeSession: (nodeId: string) => {
       const sessionId = byNodeId.get(nodeId);
@@ -194,6 +247,8 @@ async function handleHandshake(ws: WebSocket, raw: Buffer): Promise<NodeTunnelSe
     candidateId: init.candidate_id,
     publicKeyPem: init.node_public_key_pem,
     version: init.release_version,
+    activeRequests: 0,
+    activeStreams: 0,
     connectedAt: Date.now(),
     lastSeenAt: Date.now(),
     pending: new Map(),
@@ -250,6 +305,8 @@ async function handleEncryptedMessage(session: NodeTunnelSession, raw: Buffer): 
   }
   if (message.type === MESSAGE_TYPE.HEARTBEAT) {
     session.nodeId = message.node_id;
+    session.activeRequests = message.active_requests ?? 0;
+    session.activeStreams = message.active_streams ?? 0;
     byNodeId.set(message.node_id, session.id);
     try {
       NodeStore.heartbeat(message.node_id, {
@@ -267,6 +324,42 @@ async function handleEncryptedMessage(session: NodeTunnelSession, raw: Buffer): 
     return;
   }
   if (message.type === MESSAGE_TYPE.PROXY_RESPONSE || message.type === MESSAGE_TYPE.ERROR) {
+    resolvePending(session, message);
+    return;
+  }
+  if (message.type === MESSAGE_TYPE.UPDATE_READY) {
+    session.update = {
+      id: message.update_id,
+      state: 'ready',
+      targetVersion: message.target_version,
+      artifactPath: message.artifact_path,
+      sha256: message.sha256,
+      updatedAt: Date.now(),
+    };
+    if (session.nodeId) {
+      NodeStore.setNodeUpdateState(session.nodeId, 'ready', {
+        update_id: message.update_id,
+        target_version: message.target_version,
+      });
+    }
+    resolvePending(session, message);
+    return;
+  }
+  if (message.type === MESSAGE_TYPE.UPDATE_FAILED) {
+    session.update = {
+      id: message.update_id,
+      state: 'failed',
+      targetVersion: session.update?.targetVersion ?? '',
+      error: message.message,
+      updatedAt: Date.now(),
+    };
+    if (session.nodeId) {
+      NodeStore.setNodeUpdateState(session.nodeId, 'failed', {
+        update_id: message.update_id,
+        target_version: session.update.targetVersion,
+        reason: message.message,
+      });
+    }
     resolvePending(session, message);
     return;
   }
@@ -420,6 +513,85 @@ async function requestProxy(
   return message;
 }
 
+async function prepareNodeUpdate(nodeId: string, manifest: Record<string, unknown>): Promise<UpdateReadyMessage> {
+  const session = getControlSession(nodeId);
+  if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
+
+  const updateId = crypto.randomUUID();
+  const targetVersion = typeof manifest.version === 'string' ? manifest.version : 'unknown';
+  session.update = {
+    id: updateId,
+    state: 'preparing',
+    targetVersion,
+    updatedAt: Date.now(),
+  };
+  NodeStore.setNodeUpdateState(nodeId, 'preparing', {
+    update_id: updateId,
+    target_version: targetVersion,
+  });
+
+  const response = new Promise<TunnelMessage>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      session.pending.delete(updateId);
+      NodeStore.setNodeUpdateState(nodeId, 'failed', {
+        update_id: updateId,
+        target_version: targetVersion,
+        reason: 'prepare_timeout',
+      });
+      reject(new Error(`Node update prepare timed out: ${nodeId}`));
+    }, 180_000);
+    session.pending.set(updateId, { resolve, reject, timer });
+  });
+
+  await sendEncrypted(session, {
+    type: MESSAGE_TYPE.UPDATE_PREPARE,
+    id: updateId,
+    timestamp: nowSeconds(),
+    update_id: updateId,
+    manifest,
+  });
+
+  const message = await response;
+  if (message.type !== MESSAGE_TYPE.UPDATE_READY) {
+    throw new Error(`Unexpected update prepare response: ${message.type}`);
+  }
+  return message;
+}
+
+async function applyNodeUpdate(
+  nodeId: string,
+  options: { updateId?: string; restartAfterMs?: number; force?: boolean } = {},
+): Promise<{ update_id: string; state: string }> {
+  const session = getControlSession(nodeId);
+  if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
+  if (!session.update || session.update.state !== 'ready') {
+    throw new Error(`Node update is not ready: ${nodeId}`);
+  }
+  if (options.updateId && options.updateId !== session.update.id) {
+    throw new Error(`Update id mismatch for node ${nodeId}`);
+  }
+  if (!options.force && !isSessionIdle(session)) {
+    throw new Error(`Node is not idle: ${nodeId}`);
+  }
+
+  session.update.state = 'updating';
+  session.update.updatedAt = Date.now();
+  NodeStore.setNodeUpdateState(nodeId, 'updating', {
+    update_id: session.update.id,
+    target_version: session.update.targetVersion,
+  });
+
+  await sendEncrypted(session, {
+    type: MESSAGE_TYPE.UPDATE_APPLY,
+    id: session.update.id,
+    timestamp: nowSeconds(),
+    update_id: session.update.id,
+    restart_after_ms: Math.max(0, options.restartAfterMs ?? 1_000),
+  });
+
+  return { update_id: session.update.id, state: session.update.state };
+}
+
 function attachProxySession(session: NodeTunnelSession, clientWs: WebSocket): { streamId: string; close: () => void } {
   const streamId = crypto.randomUUID();
   let closed = false;
@@ -489,10 +661,59 @@ function resolvePending(session: NodeTunnelSession, message: TunnelMessage): voi
   clearTimeout(pending.timer);
   session.pending.delete(replyTo);
 
-  if (message.type === MESSAGE_TYPE.ERROR) {
+  if (message.type === MESSAGE_TYPE.ERROR || message.type === MESSAGE_TYPE.UPDATE_FAILED) {
     pending.reject(new Error(message.message));
   } else {
     pending.resolve(message);
+  }
+}
+
+function startUpdateScheduler(router?: RouterLike): { stop: () => void } | null {
+  if (process.env.CONSENSUS_NODE_AUTO_UPDATES !== 'true') return null;
+  const intervalMs = Math.max(30_000, Number(process.env.CONSENSUS_NODE_UPDATE_INTERVAL_MS ?? 60_000));
+  let running = false;
+
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await scheduleOneUpdate(router);
+    } catch (error) {
+      console.error('[Node Tunnel] update scheduler failed:', error);
+    } finally {
+      running = false;
+    }
+  };
+
+  const timer = setInterval(() => void tick(), intervalMs);
+  timer.unref();
+  void tick();
+  return { stop: () => clearInterval(timer) };
+}
+
+async function scheduleOneUpdate(router?: RouterLike): Promise<void> {
+  const required = NodeStore.getRequiredManifest()?.manifest;
+  if (!required || typeof required.version !== 'string') return;
+
+  const activeUpdating = Array.from(sessions.values()).some((session) =>
+    session.update?.state === 'preparing' ||
+    session.update?.state === 'draining' ||
+    session.update?.state === 'updating',
+  );
+  if (activeUpdating) return;
+
+  for (const session of sessions.values()) {
+    if (!session.nodeId || session.mode !== 'control') continue;
+    if (session.version === required.version) continue;
+    if (!isSessionIdle(session, router)) continue;
+
+    const ready = await prepareNodeUpdate(session.nodeId, required);
+    NodeStore.setNodeUpdateState(session.nodeId, 'draining', {
+      update_id: ready.update_id,
+      target_version: ready.target_version,
+    });
+    await applyNodeUpdate(session.nodeId, { updateId: ready.update_id });
+    return;
   }
 }
 
@@ -504,6 +725,9 @@ function getStats() {
     node_id: session.nodeId ?? null,
     candidate_id: session.candidateId ?? null,
     version: session.version ?? null,
+    active_requests: session.activeRequests,
+    active_streams: session.activeStreams,
+    update: session.update ?? null,
     connected_for_ms: now - session.connectedAt,
     last_seen_ms_ago: now - session.lastSeenAt,
     eval: session.eval
@@ -529,6 +753,16 @@ function getStats() {
     active_control_sessions: active.filter((session) => session.mode === 'control').length,
     sessions: active,
   };
+}
+
+function isSessionIdle(session: NodeTunnelSession, router?: RouterLike): boolean {
+  const routerLoad = session.nodeId ? router?.getNodeLoad?.(session.nodeId) : null;
+  const routerTotal = routerLoad?.total ?? 0;
+  return session.pending.size === 0 &&
+    session.streams.size === 0 &&
+    session.activeRequests === 0 &&
+    session.activeStreams === 0 &&
+    routerTotal === 0;
 }
 
 function getControlSession(nodeId: string): NodeTunnelSession | null {
