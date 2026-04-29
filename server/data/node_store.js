@@ -66,6 +66,14 @@ db.exec(`
     expires_at  INTEGER NOT NULL,
     consumed_at INTEGER
   );
+
+  CREATE TABLE IF NOT EXISTS release_manifests (
+    version     TEXT PRIMARY KEY,
+    manifest    TEXT NOT NULL,
+    github_url  TEXT,
+    required    INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
 `);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -179,6 +187,30 @@ const deleteNodeHeartbeatsStmt = db.prepare(`
   DELETE FROM heartbeats WHERE node_id = ?
 `);
 
+const upsertManifestStmt = db.prepare(`
+  INSERT INTO release_manifests (version, manifest, github_url, required, created_at)
+  VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(version) DO UPDATE SET
+    manifest = excluded.manifest,
+    github_url = excluded.github_url,
+    required = excluded.required,
+    created_at = excluded.created_at
+`);
+
+const getRequiredManifestStmt = db.prepare(`
+  SELECT version, manifest, github_url, required, created_at
+  FROM release_manifests
+  WHERE required = 1
+  ORDER BY created_at DESC
+  LIMIT 1
+`);
+
+const getManifestByVersionStmt = db.prepare(`
+  SELECT version, manifest, github_url, required, created_at
+  FROM release_manifests
+  WHERE version = ?
+`);
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 function rowToNode(row) {
@@ -200,6 +232,17 @@ function rowToNode(row) {
     heartbeat: row.hb_at
       ? { rps: row.hb_rps, p95_ms: row.hb_p95_ms, version: row.hb_version, at: row.hb_at }
       : null,
+  };
+}
+
+function rowToManifest(row) {
+  if (!row) return null;
+  return {
+    version: row.version,
+    manifest: fromJson(row.manifest, {}),
+    github_url: row.github_url,
+    required: Boolean(row.required),
+    created_at: row.created_at,
   };
 }
 
@@ -250,6 +293,36 @@ export const NodeStore = {
     return this.getNode(id);
   },
 
+  updateNodeVerification(id, verified, version, build_digest) {
+    const node = this.getNode(id);
+    if (!node) throw new Error(`Node not found: ${id}`);
+    const capabilities = {
+      ...(node.capabilities ?? {}),
+      verified: Boolean(verified),
+      verified_version: version,
+      build_digest,
+      verified_at: nowSec(),
+    };
+    const ts = nowSec();
+    db.prepare('UPDATE nodes SET capabilities = ?, updated_at = ? WHERE id = ?')
+      .run(toJson(capabilities), ts, id);
+    return this.getNode(id);
+  },
+
+  clearNodeVerification(id) {
+    const node = this.getNode(id);
+    if (!node) return null;
+    const capabilities = { ...(node.capabilities ?? {}) };
+    delete capabilities.verified;
+    delete capabilities.verified_version;
+    delete capabilities.build_digest;
+    delete capabilities.verified_at;
+    const ts = nowSec();
+    db.prepare('UPDATE nodes SET capabilities = ?, updated_at = ? WHERE id = ?')
+      .run(toJson(capabilities), ts, id);
+    return this.getNode(id);
+  },
+
   createJoinRequest({ pubkey, alg, ttlSeconds = 300 }) {
     const id        = crypto.randomBytes(8).toString('hex');
     const nonce     = crypto.randomBytes(32);
@@ -282,6 +355,19 @@ export const NodeStore = {
     deleteNodeHeartbeatsStmt.run(id);
     const res = deleteNodeStmt.run(id);
     return res.changes > 0;
+  },
+
+  upsertManifest(version, manifest, github_url = null, required = true) {
+    upsertManifestStmt.run(version, toJson(manifest), github_url, required ? 1 : 0, nowSec());
+    return this.getManifestByVersion(version);
+  },
+
+  getRequiredManifest() {
+    return rowToManifest(getRequiredManifestStmt.get());
+  },
+
+  getManifestByVersion(version) {
+    return rowToManifest(getManifestByVersionStmt.get(version));
   },
 };
 

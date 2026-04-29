@@ -1,0 +1,44 @@
+{
+  "name": "@canister-software/consensus-node",
+  "version": "0.1.0-alpha.0",
+  "description": "Verifiable Consensus worker node runtime",
+  "type": "module",
+  "main": "src/instance.ts",
+  "bin": {
+    "consensus-node": "bin/consensus-node.ts"
+  },
+  "scripts": {
+    "start": "bun src/instance.ts",
+    "eval": "bun src/eval.ts",
+    "control": "bun src/control.ts",
+    "register": "bun src/register.ts",
+    "verify": "bun src/verify.ts",
+    "update": "bun src/update.ts",
+    "release": "bun src/release.ts",
+    "test:secure-channel": "bun src/tests/secure-channel.test.ts",
+    "test:handshake": "bun src/tests/handshake.test.ts",
+    "test:eval-client": "bun src/tests/eval-client.test.ts",
+    "test:control-client": "bun src/tests/control-client.test.ts",
+    "test:register": "bun src/tests/register.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.0.2",
+    "@noble/ciphers": "^2.2.0",
+    "fastify": "^5.6.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.2",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT"
+}

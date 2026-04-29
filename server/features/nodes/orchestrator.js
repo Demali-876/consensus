@@ -24,6 +24,75 @@ function calculateJoinPrice() {
   return Math.min(BASE_PRICE + NodeStore.listNodes().length * INCREMENT, MAX_PRICE);
 }
 
+function verifyAndConsumeJoinRequest({ join_id, join_signature, pubkey_ed25519_pem }) {
+  if (!join_id && !join_signature) return null;
+  if (!join_id || !join_signature) {
+    const error = new Error('join_id and join_signature must be provided together');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!pubkey_ed25519_pem) {
+    const error = new Error('pubkey_ed25519_pem is required when using join request authorization');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const join = NodeStore.getJoin(join_id);
+  if (!join) {
+    const error = new Error('Join request not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  if (join.consumed_at != null) {
+    const error = new Error('Join request already consumed');
+    error.statusCode = 409;
+    throw error;
+  }
+  if (join.expires_at < Math.floor(Date.now() / 1000)) {
+    const error = new Error('Join request expired');
+    error.statusCode = 410;
+    throw error;
+  }
+  if (join.alg !== 'ed25519') {
+    const error = new Error(`Unsupported join request algorithm: ${join.alg}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  let requestPubkey;
+  let bodyPubkey;
+  try {
+    requestPubkey = crypto.createPublicKey({ key: join.node_pubkey, format: 'der', type: 'spki' });
+    bodyPubkey = crypto.createPublicKey(pubkey_ed25519_pem);
+  } catch {
+    const error = new Error('Invalid join request public key');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const requestDer = requestPubkey.export({ format: 'der', type: 'spki' });
+  const bodyDer = bodyPubkey.export({ format: 'der', type: 'spki' });
+  if (requestDer.length !== bodyDer.length || !crypto.timingSafeEqual(Buffer.from(requestDer), Buffer.from(bodyDer))) {
+    const error = new Error('Join request public key does not match node public key');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const verified = crypto.verify(
+    null,
+    join.nonce,
+    requestPubkey,
+    Buffer.from(join_signature, 'base64'),
+  );
+  if (!verified) {
+    const error = new Error('Join request signature verification failed');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  return NodeStore.consumeJoin(join_id);
+}
+
 export function registerNodes(app, httpsServer, x402Server, config) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
@@ -65,6 +134,8 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           solana_address,
           icp_address,
           capabilities: declaredCapabilities,
+          join_id,
+          join_signature,
         } = req.body;
 
         if (!ipv6 || !port || !test_endpoint || !region || !contact ||
@@ -115,6 +186,16 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           if (pubkey_ed25519_pem)   pubkeyEd25519   = crypto.createPublicKey(pubkey_ed25519_pem).export({ format: 'der', type: 'spki' });
         } catch {
           return res.status(400).json({ error: 'Invalid public key PEM format' });
+        }
+
+        let consumedJoin = null;
+        try {
+          consumedJoin = verifyAndConsumeJoinRequest({ join_id, join_signature, pubkey_ed25519_pem });
+        } catch (error) {
+          return res.status(error.statusCode ?? 400).json({
+            error: 'Join request verification failed',
+            message: error.message,
+          });
         }
 
         console.log('\nPayment verified — processing node registration');
@@ -202,6 +283,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           status:             'active',
           benchmark_score:    benchmarkResult.score,
           price_paid:         paidPrice,
+          join_request_id:    consumedJoin?.id ?? null,
           processing_time_ms: processingTime,
           next_steps: [
             'DNS propagation may take up to 5 minutes',

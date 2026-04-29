@@ -60,7 +60,7 @@ export async function observeNode(
  */
 export async function observeAllNodes(): Promise<ObserveNodeResult[]> {
   const nodes = NodeStore.listNodes().filter(
-    (n) => n.status === 'active' && n.id !== SERVER_NODE_ID,
+    (n: any) => n.status === 'active' && n.id !== SERVER_NODE_ID,
   );
 
   if (nodes.length === 0) {

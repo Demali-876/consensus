@@ -18,7 +18,9 @@ import { registerWhitepaperSignup } from './data/whitepaperSignup.js';
 import { registerWebSocket } from './features/websocket/wss.ts';
 import { registerNodes } from './features/nodes/orchestrator.js';
 import { registerTunnel } from './features/tunnel/tunnel.ts';
+import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
+import { registerUpdater } from './updater.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,7 +52,6 @@ const x402Server = new x402ResourceServer(facilitatorClient)
   .register('icp:1:xafvr-biaaa-aaaai-aql5q-cai', new ExactIcpScheme());
 
 const router = new Router();
-const proxy = new ConsensusProxy({ router: router });
 
 const app = express();
 app.set('trust proxy', 1);
@@ -59,8 +60,11 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 registerWhitepaperSignup(app);
+registerUpdater(app, { adminKey: process.env.ADMIN_KEY });
 
 const server = http.createServer(app);
+const tunnelStats = registerTunnel(app, server);
+const nodeTunnelStats = registerNodeTunnel(app, server);
 const wsStats = registerWebSocket(
   app,
   server,
@@ -70,7 +74,8 @@ const wsStats = registerWebSocket(
     SOLANA_PAY_TO,
     ICP_PAY_TO,
   },
-  router
+  router,
+  nodeTunnelStats
 );
 
 const nodeStats = registerNodes(app, server, x402Server, {
@@ -78,7 +83,7 @@ const nodeStats = registerNodes(app, server, x402Server, {
   SOLANA_PAY_TO,
   ICP_PAY_TO,
 });
-const tunnelStats = registerTunnel(app, server);
+const proxy = new ConsensusProxy({ router: router, nodeTunnel: nodeTunnelStats });
 
 app.get('/', publicLimiter, (req, res) => {
   res.json({
@@ -114,6 +119,7 @@ app.get('/health', publicLimiter, (_req, res) => {
     },
     websocket: ws,
     tunnels,
+    node_tunnel: nodeTunnelStats.getStats(),
     network: {
       avg_http_latency_ms: routerStats.avg_http_latency_ms,
       avg_ws_latency_ms:   routerStats.avg_ws_latency_ms,
