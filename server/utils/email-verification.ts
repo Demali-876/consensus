@@ -76,26 +76,34 @@ function hashToken(token: string): string {
 }
 
 async function sendVerificationEmail(email: string, code: string): Promise<void> {
-  const zohoUrl = process.env.ZOHO_MAIL_API_URL;
-  const zohoToken = process.env.ZOHO_MAIL_TOKEN;
+  const accountId = process.env.ZOHO_MAIL_ACCOUNT_ID;
   const from = process.env.ZOHO_MAIL_FROM;
+  const accessToken = await getZohoAccessToken();
 
-  if (!zohoUrl || !zohoToken || !from) {
+  if (!accountId || !from || !accessToken) {
     console.warn(`[Email] Zoho not configured; verification code for ${email}: ${code}`);
     return;
   }
 
-  const response = await fetch(zohoUrl, {
+  const mailBaseUrl = trimTrailingSlash(process.env.ZOHO_MAIL_API_BASE_URL ?? 'https://mail.zoho.com');
+  const response = await fetch(`${mailBaseUrl}/api/accounts/${encodeURIComponent(accountId)}/messages`, {
     method: 'POST',
     headers: {
-      authorization: `Zoho-oauthtoken ${zohoToken}`,
+      accept: 'application/json',
+      authorization: `Zoho-oauthtoken ${accessToken}`,
       'content-type': 'application/json',
     },
     body: JSON.stringify({
       fromAddress: from,
       toAddress: email,
-      subject: 'Consensus node verification code',
-      content: `Your Consensus node verification code is ${code}. It expires in 10 minutes.`,
+      subject: 'Welcome to Consensus - verify your email',
+      content: [
+        'Welcome to Consensus.',
+        '',
+        `Your node verification code is ${code}.`,
+        'This code expires in 10 minutes.',
+      ].join('\n'),
+      mailFormat: 'plaintext',
     }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -103,4 +111,55 @@ async function sendVerificationEmail(email: string, code: string): Promise<void>
     const detail = await response.text().catch(() => '');
     throw new Error(`Zoho email send failed: HTTP ${response.status} ${detail}`);
   }
+}
+
+let cachedZohoToken: { accessToken: string; expiresAtMs: number } | null = null;
+
+async function getZohoAccessToken(): Promise<string | null> {
+  if (cachedZohoToken && cachedZohoToken.expiresAtMs > Date.now() + 60_000) {
+    return cachedZohoToken.accessToken;
+  }
+
+  const clientId = process.env.ZOHO_CLIENT_ID;
+  const clientSecret = process.env.ZOHO_CLIENT_SECRET;
+  const refreshToken = process.env.ZOHO_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) return null;
+
+  const accountsBaseUrl = trimTrailingSlash(process.env.ZOHO_ACCOUNTS_BASE_URL ?? 'https://accounts.zoho.com');
+  const body = new URLSearchParams({
+    refresh_token: refreshToken,
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: 'refresh_token',
+  });
+
+  const response = await fetch(`${accountsBaseUrl}/oauth/v2/token`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    body,
+    signal: AbortSignal.timeout(15_000),
+  });
+  const parsed = await response.json().catch(() => null) as {
+    access_token?: string;
+    expires_in?: number;
+    error?: string;
+  } | null;
+
+  if (!response.ok || !parsed?.access_token) {
+    throw new Error(`Zoho token refresh failed: HTTP ${response.status} ${parsed?.error ?? ''}`.trim());
+  }
+
+  const expiresInSeconds = Number.isFinite(parsed.expires_in) ? Number(parsed.expires_in) : 3600;
+  cachedZohoToken = {
+    accessToken: parsed.access_token,
+    expiresAtMs: Date.now() + Math.max(60, expiresInSeconds) * 1000,
+  };
+  return cachedZohoToken.accessToken;
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
 }
