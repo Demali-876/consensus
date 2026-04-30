@@ -1,8 +1,6 @@
 import crypto                from 'crypto';
 import { isIPv4, isIPv6 }   from 'node:net';
-import { isPrivateTarget }   from '../../utils/ssrf.ts';
 import { paymentMiddleware } from '@x402/express';
-import { benchmarkNode }     from '../../utils/benchmark.js';
 import { provisionNodeDNS }  from '../../utils/dns.js';
 import NodeStore             from '../../data/node_store.js';
 import { observeNode }       from '../ip-pool/observer.ts';
@@ -162,7 +160,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           ipv6,
           ipv4,
           port,
-          test_endpoint,
           contact,
           email_verification_token,
           evm_address,
@@ -173,11 +170,11 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           join_signature,
         } = req.body;
 
-        if (!ipv4 || !port || !test_endpoint || !contact ||
+        if (!ipv4 || !port || !contact ||
             !evm_address || !solana_address || !icp_address) {
           return res.status(400).json({
             error:    'Missing required fields',
-            required: ['ipv4', 'port', 'test_endpoint', 'contact', 'email_verification_token', 'evm_address', 'solana_address', 'icp_address'],
+            required: ['ipv4', 'port', 'contact', 'email_verification_token', 'evm_address', 'solana_address', 'icp_address'],
           });
         }
 
@@ -204,13 +201,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         }
         if (solana_address.length < 32 || solana_address.length > 44) {
           return res.status(400).json({ error: 'Invalid Solana address format' });
-        }
-
-        try { new URL(test_endpoint); } catch {
-          return res.status(400).json({ error: 'Invalid test_endpoint URL' });
-        }
-        if (await isPrivateTarget(test_endpoint)) {
-          return res.status(400).json({ error: 'test_endpoint must be a public address' });
         }
 
         try {
@@ -258,19 +248,9 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           return res.status(409).json({ error: 'IP already registered', existing_node_id: duplicate.id });
         }
 
-        console.log('\nRunning benchmark tests...');
-        const benchmarkResult = await benchmarkNode(test_endpoint);
-
-        if (!benchmarkResult.passed) {
-          console.log(`  Benchmark failed: ${benchmarkResult.score}/100\n`);
-          return res.status(400).json({
-            error:          'Node performance below minimum requirements',
-            score:          benchmarkResult.score,
-            required_score: 75,
-            details:        benchmarkResult.details,
-          });
-        }
-        console.log(` Benchmark passed: ${benchmarkResult.score}/100`);
+        const benchmarkScore = consumedJoin?.benchmark_score ?? 0;
+        const benchmarkDetails = consumedJoin?.benchmark_details ?? null;
+        console.log(` Encrypted eval benchmark accepted: ${benchmarkScore}/100`);
 
         const nodeId    = crypto.randomBytes(6).toString('hex');
         const subdomain = `${nodeId}.consensus.canister.software`;
@@ -300,10 +280,11 @@ export function registerNodes(app, httpsServer, x402Server, config) {
             websockets:       declaredCapabilities?.websockets      ?? false,
             tunnels:          declaredCapabilities?.tunnels         ?? false,
             ip_leasing:       declaredCapabilities?.ip_leasing      ?? false,
-            benchmark_score:  benchmarkResult.score,
-            fetch_latency_ms: benchmarkResult.details.fetch.avg_latency_ms,
-            cpu_performance:  benchmarkResult.details.cpu.hashes_per_second,
-            memory_score:     benchmarkResult.details.memory.score,
+            benchmark_score:  benchmarkScore,
+            benchmark_details: benchmarkDetails,
+            cpu_performance:  benchmarkDetails?.benchmark_cpu?.hashes_per_second ?? null,
+            crypto_performance: benchmarkDetails?.benchmark_crypto?.total_bytes_per_second ?? null,
+            memory_score:     benchmarkDetails?.benchmark_memory_pressure?.allocated_mb ?? null,
             ipv4,
             ipv6:             ipv6 || null,
             port,
@@ -335,7 +316,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           region,
           geo:                geoRegion,
           status:             'active',
-          benchmark_score:    benchmarkResult.score,
+          benchmark_score:    benchmarkScore,
           price_paid:         paidPrice,
           join_request_id:    consumedJoin?.id ?? null,
           processing_time_ms: processingTime,

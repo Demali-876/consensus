@@ -454,10 +454,11 @@ function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMes
   if (!complete) return;
 
   session.eval.completedAt = Date.now();
-  session.eval.errors.push(...validateEvalResults(session.eval.results));
+  const evalScore = scoreEvalResults(session.eval.results);
+  session.eval.errors.push(...evalScore.errors);
   session.eval.status = session.eval.errors.length === 0 ? 'passed' : 'failed';
   if (session.eval.status === 'passed' && session.publicKeyPem) {
-    session.eval.joinRequest = createEvalJoinRequest(session.publicKeyPem);
+    session.eval.joinRequest = createEvalJoinRequest(session.publicKeyPem, evalScore);
     void sendJoinReady(session).catch((error) => {
       session.eval?.errors.push(`join_ready: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -465,12 +466,17 @@ function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMes
   console.log(`[Node Tunnel] eval ${session.eval.status} ${session.id}`);
 }
 
-function validateEvalResults(results: Partial<Record<EvalAction, unknown>>): string[] {
+function scoreEvalResults(results: Partial<Record<EvalAction, unknown>>): { score: number; errors: string[]; details: Partial<Record<EvalAction, unknown>> } {
   const errors: string[] = [];
   const cpu = results.benchmark_cpu as { hashes_per_second?: number } | undefined;
   const cryptoResult = results.benchmark_crypto as { total_bytes_per_second?: number } | undefined;
   const memory = results.benchmark_memory_pressure as { allocated_mb?: number } | undefined;
   const system = results.benchmark_system as { total_memory_bytes?: number } | undefined;
+  const cpuScore = Math.min(100, (Number(cpu?.hashes_per_second ?? 0) / EVAL_MIN_CPU_HASHES_PER_SECOND) * 70);
+  const cryptoScore = Math.min(100, (Number(cryptoResult?.total_bytes_per_second ?? 0) / EVAL_MIN_CRYPTO_BYTES_PER_SECOND) * 70);
+  const memoryScore = Math.min(100, (Number(memory?.allocated_mb ?? 0) / EVAL_MIN_MEMORY_ALLOCATED_MB) * 80);
+  const totalMemoryMb = Number(system?.total_memory_bytes ?? 0) / 1024 / 1024;
+  const systemScore = Math.min(100, (totalMemoryMb / EVAL_MIN_SYSTEM_MEMORY_MB) * 70);
 
   if (Number(cpu?.hashes_per_second ?? 0) < EVAL_MIN_CPU_HASHES_PER_SECOND) {
     errors.push(`benchmark_cpu: below minimum ${EVAL_MIN_CPU_HASHES_PER_SECOND} hashes/sec`);
@@ -481,11 +487,14 @@ function validateEvalResults(results: Partial<Record<EvalAction, unknown>>): str
   if (Number(memory?.allocated_mb ?? 0) < EVAL_MIN_MEMORY_ALLOCATED_MB) {
     errors.push(`benchmark_memory_pressure: below minimum ${EVAL_MIN_MEMORY_ALLOCATED_MB}MB allocated`);
   }
-  const totalMemoryMb = Number(system?.total_memory_bytes ?? 0) / 1024 / 1024;
   if (totalMemoryMb < EVAL_MIN_SYSTEM_MEMORY_MB) {
     errors.push(`benchmark_system: below minimum ${EVAL_MIN_SYSTEM_MEMORY_MB}MB total memory`);
   }
-  return errors;
+  return {
+    score: Math.round(cpuScore * 0.2 + cryptoScore * 0.35 + memoryScore * 0.25 + systemScore * 0.2),
+    errors,
+    details: results,
+  };
 }
 
 async function sendJoinReady(session: NodeTunnelSession): Promise<void> {
@@ -500,12 +509,14 @@ async function sendJoinReady(session: NodeTunnelSession): Promise<void> {
   });
 }
 
-function createEvalJoinRequest(publicKeyPem: string): EvalJoinRequest {
+function createEvalJoinRequest(publicKeyPem: string, evalScore: { score: number; details: Partial<Record<EvalAction, unknown>> }): EvalJoinRequest {
   const pubkey = crypto.createPublicKey(publicKeyPem).export({ format: 'der', type: 'spki' });
   return NodeStore.createJoinRequest({
     pubkey,
     alg: 'ed25519',
     ttlSeconds: 10 * 60,
+    benchmarkScore: evalScore.score,
+    benchmarkDetails: evalScore.details,
   });
 }
 

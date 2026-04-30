@@ -63,6 +63,8 @@ db.exec(`
     node_pubkey BLOB    NOT NULL,
     alg         TEXT    NOT NULL,
     nonce       BLOB    NOT NULL,
+    benchmark_score INTEGER,
+    benchmark_details TEXT,
     expires_at  INTEGER NOT NULL,
     consumed_at INTEGER
   );
@@ -88,6 +90,17 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS email_verifications_token_idx ON email_verifications(token_hash);
 `);
+
+for (const statement of [
+  'ALTER TABLE join_requests ADD COLUMN benchmark_score INTEGER',
+  'ALTER TABLE join_requests ADD COLUMN benchmark_details TEXT',
+]) {
+  try {
+    db.exec(statement);
+  } catch (error) {
+    if (!String(error?.message ?? '').includes('duplicate column name')) throw error;
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -180,12 +193,12 @@ const touchNodeStmt = db.prepare(`
 `);
 
 const insertJoinStmt = db.prepare(`
-  INSERT INTO join_requests (id, node_pubkey, alg, nonce, expires_at, consumed_at)
-  VALUES (?, ?, ?, ?, ?, NULL)
+  INSERT INTO join_requests (id, node_pubkey, alg, nonce, benchmark_score, benchmark_details, expires_at, consumed_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
 `);
 
 const getJoinStmt = db.prepare(`
-  SELECT id, node_pubkey, alg, nonce, expires_at, consumed_at FROM join_requests WHERE id = ?
+  SELECT id, node_pubkey, alg, nonce, benchmark_score, benchmark_details, expires_at, consumed_at FROM join_requests WHERE id = ?
 `);
 
 const consumeJoinStmt = db.prepare(`
@@ -398,11 +411,11 @@ export const NodeStore = {
     return this.getNode(id);
   },
 
-  createJoinRequest({ pubkey, alg, ttlSeconds = 300 }) {
+  createJoinRequest({ pubkey, alg, ttlSeconds = 300, benchmarkScore = null, benchmarkDetails = null }) {
     const id        = crypto.randomBytes(8).toString('hex');
     const nonce     = crypto.randomBytes(32);
     const expires_at = nowSec() + Math.max(60, ttlSeconds);
-    insertJoinStmt.run(id, pubkey, alg, nonce, expires_at);
+    insertJoinStmt.run(id, pubkey, alg, nonce, benchmarkScore, toJson(benchmarkDetails), expires_at);
     return { id, nonce: b64url(nonce), alg, expires_at };
   },
 
@@ -414,6 +427,8 @@ export const NodeStore = {
       node_pubkey: row.node_pubkey,
       alg:         row.alg,
       nonce:       row.nonce,
+      benchmark_score: row.benchmark_score ?? null,
+      benchmark_details: fromJson(row.benchmark_details, null),
       expires_at:  row.expires_at,
       consumed_at: row.consumed_at ?? null,
       nonce_b64:   b64url(row.nonce),
