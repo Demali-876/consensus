@@ -2,12 +2,33 @@ import crypto from 'node:crypto';
 import NodeStore from '../data/node_store.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const REQUIRED_EMAIL_ENV = [
+  'EMAIL_VERIFICATION_SECRET',
+  'ZOHO_CLIENT_ID',
+  'ZOHO_CLIENT_SECRET',
+  'ZOHO_REFRESH_TOKEN',
+  'ZOHO_MAIL_ACCOUNT_ID',
+  'ZOHO_MAIL_FROM',
+] as const;
+
+let emailEnvValidated = false;
 
 export function isValidEmail(value: string): boolean {
   return EMAIL_RE.test(value) && value.length <= 256;
 }
 
+export function assertEmailVerificationEnv(): void {
+  const missing = REQUIRED_EMAIL_ENV.filter((key) => !process.env[key]?.trim());
+  if (missing.length > 0) {
+    throw new Error(`Missing required email verification env var(s): ${missing.join(', ')}`);
+  }
+  assertOptionalUrl('ZOHO_ACCOUNTS_BASE_URL');
+  assertOptionalUrl('ZOHO_MAIL_API_BASE_URL');
+  emailEnvValidated = true;
+}
+
 export async function startEmailVerification(email: string): Promise<{ verification_id: string; expires_at: number; dev_code?: string }> {
+  assertEmailVerificationEnv();
   const normalized = normalizeEmail(email);
   if (!isValidEmail(normalized)) throw new Error('Invalid email address');
 
@@ -65,24 +86,24 @@ function normalizeEmail(email: string): string {
 
 function hashCode(code: string): string {
   return crypto.createHash('sha256')
-    .update(`${process.env.EMAIL_VERIFICATION_SECRET ?? 'dev-email-secret'}:${code}`)
+    .update(`${emailSecret()}:${code}`)
     .digest('hex');
 }
 
 function hashToken(token: string): string {
   return crypto.createHash('sha256')
-    .update(`${process.env.EMAIL_VERIFICATION_SECRET ?? 'dev-email-secret'}:${token}`)
+    .update(`${emailSecret()}:${token}`)
     .digest('hex');
 }
 
 async function sendVerificationEmail(email: string, code: string): Promise<void> {
+  if (!emailEnvValidated) assertEmailVerificationEnv();
   const accountId = process.env.ZOHO_MAIL_ACCOUNT_ID;
   const from = process.env.ZOHO_MAIL_FROM;
   const accessToken = await getZohoAccessToken();
 
   if (!accountId || !from || !accessToken) {
-    console.warn(`[Email] Zoho not configured; verification code for ${email}: ${code}`);
-    return;
+    throw new Error('Zoho email verification is not configured');
   }
 
   const mailBaseUrl = trimTrailingSlash(process.env.ZOHO_MAIL_API_BASE_URL ?? 'https://mail.zoho.com');
@@ -162,4 +183,20 @@ async function getZohoAccessToken(): Promise<string | null> {
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '');
+}
+
+function emailSecret(): string {
+  const secret = process.env.EMAIL_VERIFICATION_SECRET;
+  if (!secret?.trim()) throw new Error('EMAIL_VERIFICATION_SECRET is missing from .env');
+  return secret;
+}
+
+function assertOptionalUrl(key: 'ZOHO_ACCOUNTS_BASE_URL' | 'ZOHO_MAIL_API_BASE_URL'): void {
+  const value = process.env[key];
+  if (!value) return;
+  try {
+    new URL(value);
+  } catch {
+    throw new Error(`${key} must be a valid URL`);
+  }
 }

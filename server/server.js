@@ -21,6 +21,7 @@ import { registerTunnel } from './features/tunnel/tunnel.ts';
 import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 import { registerUpdater } from './updater.ts';
+import { assertEmailVerificationEnv } from './utils/email-verification.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,6 +45,7 @@ if (!FREE_MODE) {
   if (!process.env.FACILITATOR_URL) throw new Error('FACILITATOR_URL is missing from .env');
   if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO');
 }
+assertEmailVerificationEnv();
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 const x402Server = new x402ResourceServer(facilitatorClient)
