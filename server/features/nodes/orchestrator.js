@@ -266,7 +266,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           return res.status(400).json({
             error:          'Node performance below minimum requirements',
             score:          benchmarkResult.score,
-            required_score: 60,
+            required_score: 75,
             details:        benchmarkResult.details,
           });
         }

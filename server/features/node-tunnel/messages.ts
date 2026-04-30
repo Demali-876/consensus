@@ -57,7 +57,9 @@ export type EvalAction =
   | 'capabilities'
   | 'integrity'
   | 'benchmark_system'
-  | 'benchmark_cpu';
+  | 'benchmark_cpu'
+  | 'benchmark_crypto'
+  | 'benchmark_memory_pressure';
 
 export interface EvalRequestMessage extends BaseMessage {
   type: typeof MESSAGE_TYPE.EVAL_REQUEST;

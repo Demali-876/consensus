@@ -69,6 +69,10 @@ type RouterLike = {
 
 const sessions = new Map<string, NodeTunnelSession>();
 const byNodeId = new Map<string, string>();
+const EVAL_MIN_CPU_HASHES_PER_SECOND = 5_000;
+const EVAL_MIN_CRYPTO_BYTES_PER_SECOND = 10 * 1024 * 1024;
+const EVAL_MIN_MEMORY_ALLOCATED_MB = 128;
+const EVAL_MIN_SYSTEM_MEMORY_MB = 512;
 
 // Router-directed node updates are disabled unless
 // CONSENSUS_NODE_AUTO_UPDATES=true. When enabled, the scheduler picks one idle
@@ -399,7 +403,14 @@ async function handleHello(session: NodeTunnelSession, message: HelloMessage): P
 }
 
 async function startEval(session: NodeTunnelSession): Promise<void> {
-  const actions: EvalAction[] = ['capabilities', 'integrity', 'benchmark_system', 'benchmark_cpu'];
+  const actions: EvalAction[] = [
+    'capabilities',
+    'integrity',
+    'benchmark_system',
+    'benchmark_cpu',
+    'benchmark_crypto',
+    'benchmark_memory_pressure',
+  ];
   session.eval = {
     status: 'pending',
     requested: actions,
@@ -414,11 +425,16 @@ async function startEval(session: NodeTunnelSession): Promise<void> {
       id: crypto.randomUUID(),
       timestamp: nowSeconds(),
       action,
-      params: action === 'benchmark_cpu'
-        ? { iterations: 5_000, data: 'consensus-node-eval' }
-        : undefined,
+      params: evalParams(action),
     });
   }
+}
+
+function evalParams(action: EvalAction): Record<string, unknown> | undefined {
+  if (action === 'benchmark_cpu') return { iterations: 5_000, data: 'consensus-node-eval' };
+  if (action === 'benchmark_crypto') return { iterations: 500, payload_size_kb: 16 };
+  if (action === 'benchmark_memory_pressure') return { test_size_mb: 128, rounds: 2 };
+  return undefined;
 }
 
 function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMessage): void {
@@ -438,6 +454,7 @@ function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMes
   if (!complete) return;
 
   session.eval.completedAt = Date.now();
+  session.eval.errors.push(...validateEvalResults(session.eval.results));
   session.eval.status = session.eval.errors.length === 0 ? 'passed' : 'failed';
   if (session.eval.status === 'passed' && session.publicKeyPem) {
     session.eval.joinRequest = createEvalJoinRequest(session.publicKeyPem);
@@ -446,6 +463,29 @@ function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMes
     });
   }
   console.log(`[Node Tunnel] eval ${session.eval.status} ${session.id}`);
+}
+
+function validateEvalResults(results: Partial<Record<EvalAction, unknown>>): string[] {
+  const errors: string[] = [];
+  const cpu = results.benchmark_cpu as { hashes_per_second?: number } | undefined;
+  const cryptoResult = results.benchmark_crypto as { total_bytes_per_second?: number } | undefined;
+  const memory = results.benchmark_memory_pressure as { allocated_mb?: number } | undefined;
+  const system = results.benchmark_system as { total_memory_bytes?: number } | undefined;
+
+  if (Number(cpu?.hashes_per_second ?? 0) < EVAL_MIN_CPU_HASHES_PER_SECOND) {
+    errors.push(`benchmark_cpu: below minimum ${EVAL_MIN_CPU_HASHES_PER_SECOND} hashes/sec`);
+  }
+  if (Number(cryptoResult?.total_bytes_per_second ?? 0) < EVAL_MIN_CRYPTO_BYTES_PER_SECOND) {
+    errors.push(`benchmark_crypto: below minimum ${EVAL_MIN_CRYPTO_BYTES_PER_SECOND} bytes/sec`);
+  }
+  if (Number(memory?.allocated_mb ?? 0) < EVAL_MIN_MEMORY_ALLOCATED_MB) {
+    errors.push(`benchmark_memory_pressure: below minimum ${EVAL_MIN_MEMORY_ALLOCATED_MB}MB allocated`);
+  }
+  const totalMemoryMb = Number(system?.total_memory_bytes ?? 0) / 1024 / 1024;
+  if (totalMemoryMb < EVAL_MIN_SYSTEM_MEMORY_MB) {
+    errors.push(`benchmark_system: below minimum ${EVAL_MIN_SYSTEM_MEMORY_MB}MB total memory`);
+  }
+  return errors;
 }
 
 async function sendJoinReady(session: NodeTunnelSession): Promise<void> {
