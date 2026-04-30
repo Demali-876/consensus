@@ -74,6 +74,19 @@ db.exec(`
     required    INTEGER NOT NULL,
     created_at  INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS email_verifications (
+    id          TEXT PRIMARY KEY,
+    email       TEXT NOT NULL,
+    code_hash   TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    token_hash  TEXT,
+    expires_at  INTEGER NOT NULL,
+    consumed_at INTEGER,
+    created_at  INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS email_verifications_token_idx ON email_verifications(token_hash);
 `);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -211,6 +224,31 @@ const getManifestByVersionStmt = db.prepare(`
   WHERE version = ?
 `);
 
+const insertEmailVerificationStmt = db.prepare(`
+  INSERT INTO email_verifications (id, email, code_hash, attempts, token_hash, expires_at, consumed_at, created_at)
+  VALUES (?, ?, ?, 0, NULL, ?, NULL, ?)
+`);
+
+const getEmailVerificationStmt = db.prepare(`
+  SELECT id, email, code_hash, attempts, token_hash, expires_at, consumed_at, created_at
+  FROM email_verifications
+  WHERE id = ?
+`);
+
+const getEmailVerificationByTokenStmt = db.prepare(`
+  SELECT id, email, code_hash, attempts, token_hash, expires_at, consumed_at, created_at
+  FROM email_verifications
+  WHERE token_hash = ?
+`);
+
+const incrementEmailVerificationAttemptsStmt = db.prepare(`
+  UPDATE email_verifications SET attempts = attempts + 1 WHERE id = ?
+`);
+
+const consumeEmailVerificationStmt = db.prepare(`
+  UPDATE email_verifications SET consumed_at = ?, token_hash = ? WHERE id = ? AND consumed_at IS NULL
+`);
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 function rowToNode(row) {
@@ -242,6 +280,20 @@ function rowToManifest(row) {
     manifest: fromJson(row.manifest, {}),
     github_url: row.github_url,
     required: Boolean(row.required),
+    created_at: row.created_at,
+  };
+}
+
+function rowToEmailVerification(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    email: row.email,
+    code_hash: row.code_hash,
+    attempts: row.attempts,
+    token_hash: row.token_hash,
+    expires_at: row.expires_at,
+    consumed_at: row.consumed_at ?? null,
     created_at: row.created_at,
   };
 }
@@ -391,6 +443,33 @@ export const NodeStore = {
 
   getManifestByVersion(version) {
     return rowToManifest(getManifestByVersionStmt.get(version));
+  },
+
+  createEmailVerification({ email, code_hash, ttlSeconds = 600 }) {
+    const id = crypto.randomBytes(12).toString('hex');
+    const created_at = nowSec();
+    const expires_at = created_at + Math.max(60, ttlSeconds);
+    insertEmailVerificationStmt.run(id, email, code_hash, expires_at, created_at);
+    return this.getEmailVerification(id);
+  },
+
+  getEmailVerification(id) {
+    return rowToEmailVerification(getEmailVerificationStmt.get(id));
+  },
+
+  getEmailVerificationByToken(tokenHash) {
+    return rowToEmailVerification(getEmailVerificationByTokenStmt.get(tokenHash));
+  },
+
+  incrementEmailVerificationAttempts(id) {
+    incrementEmailVerificationAttemptsStmt.run(id);
+    return this.getEmailVerification(id);
+  },
+
+  consumeEmailVerification(id, tokenHash) {
+    const result = consumeEmailVerificationStmt.run(nowSec(), tokenHash, id);
+    if (result.changes === 0) throw new Error(`Email verification not found or already consumed: ${id}`);
+    return this.getEmailVerification(id);
   },
 };
 

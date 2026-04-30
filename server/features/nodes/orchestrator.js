@@ -6,6 +6,8 @@ import { benchmarkNode }     from '../../utils/benchmark.js';
 import { provisionNodeDNS }  from '../../utils/dns.js';
 import NodeStore             from '../../data/node_store.js';
 import { observeNode }       from '../ip-pool/observer.ts';
+import { classifyIpRegion }  from '../../utils/region.ts';
+import { assertEmailVerification, isValidEmail, startEmailVerification, verifyEmailCode } from '../../utils/email-verification.ts';
 
 
 function requireLoopback(req, res, next) {
@@ -96,6 +98,39 @@ function verifyAndConsumeJoinRequest({ join_id, join_signature, pubkey_ed25519_p
 export function registerNodes(app, httpsServer, x402Server, config) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
+  app.post('/node/email/start', async (req, res) => {
+    try {
+      const email = String(req.body?.email ?? '').trim();
+      const verification = await startEmailVerification(email);
+      res.json({ success: true, ...verification });
+    } catch (error) {
+      res.status(400).json({ error: 'Email verification failed', message: error.message });
+    }
+  });
+
+  app.post('/node/email/verify', async (req, res) => {
+    try {
+      const verified = verifyEmailCode({
+        verification_id: String(req.body?.verification_id ?? ''),
+        email: String(req.body?.email ?? ''),
+        code: String(req.body?.code ?? ''),
+      });
+      res.json({ success: true, email: verified.email, email_verification_token: verified.token, expires_at: verified.expires_at });
+    } catch (error) {
+      res.status(400).json({ error: 'Email verification failed', message: error.message });
+    }
+  });
+
+  app.get('/node/region/:ipv4', async (req, res) => {
+    try {
+      if (!isIPv4(req.params.ipv4)) return res.status(400).json({ error: 'Invalid IPv4 address format' });
+      const geo = await classifyIpRegion(req.params.ipv4);
+      res.json({ success: true, ...geo });
+    } catch (error) {
+      res.status(400).json({ error: 'Region classification failed', message: error.message });
+    }
+  });
+
   const joinHandlers = [];
   if (process.env.FREE_MODE !== 'true') {
     joinHandlers.push(paymentMiddleware(
@@ -128,8 +163,8 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           ipv4,
           port,
           test_endpoint,
-          region,
           contact,
+          email_verification_token,
           evm_address,
           solana_address,
           icp_address,
@@ -138,25 +173,25 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           join_signature,
         } = req.body;
 
-        if (!ipv6 || !port || !test_endpoint || !region || !contact ||
+        if (!ipv4 || !port || !test_endpoint || !contact ||
             !evm_address || !solana_address || !icp_address) {
           return res.status(400).json({
             error:    'Missing required fields',
-            required: ['ipv6', 'port', 'test_endpoint', 'region', 'contact', 'evm_address', 'solana_address', 'icp_address'],
+            required: ['ipv4', 'port', 'test_endpoint', 'contact', 'email_verification_token', 'evm_address', 'solana_address', 'icp_address'],
           });
         }
 
-        if (String(region).length  > 64)  return res.status(400).json({ error: 'region too long (max 64)'   });
         if (String(contact).length > 256) return res.status(400).json({ error: 'contact too long (max 256)' });
+        if (!isValidEmail(String(contact))) return res.status(400).json({ error: 'contact must be a valid email address' });
 
         if (!pubkey_secp256k1_pem && !pubkey_ed25519_pem) {
           return res.status(400).json({ error: 'At least one public key is required', fields: ['pubkey_secp256k1_pem', 'pubkey_ed25519_pem'] });
         }
 
-        if (!isIPv6(ipv6)) {
+        if (ipv6 != null && ipv6 !== '' && !isIPv6(ipv6)) {
           return res.status(400).json({ error: 'Invalid IPv6 address format' });
         }
-        if (ipv4 != null && ipv4 !== '' && !isIPv4(String(ipv4))) {
+        if (!isIPv4(String(ipv4))) {
           return res.status(400).json({ error: 'Invalid IPv4 address format' });
         }
 
@@ -177,6 +212,20 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         if (await isPrivateTarget(test_endpoint)) {
           return res.status(400).json({ error: 'test_endpoint must be a public address' });
         }
+
+        try {
+          assertEmailVerification({ email: String(contact), token: email_verification_token });
+        } catch (error) {
+          return res.status(401).json({ error: 'Email is not verified', message: error.message });
+        }
+
+        let geoRegion;
+        try {
+          geoRegion = await classifyIpRegion(String(ipv4));
+        } catch (error) {
+          return res.status(400).json({ error: 'Failed to classify IPv4 region', message: error.message });
+        }
+        const region = geoRegion.region;
 
         let pubkeySecp256k1 = null;
         let pubkeyEd25519   = null;
@@ -199,13 +248,14 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         }
 
         console.log('\nPayment verified — processing node registration');
-        console.log(`   IPv6: ${ipv6}:${port}`);
+        console.log(`   IPv4: ${ipv4}:${port}`);
+        if (ipv6) console.log(`   IPv6: ${ipv6}:${port}`);
         console.log(`   Region: ${region}`);
         console.log(`   Keys: ${[pubkey_secp256k1_pem && 'secp256k1', pubkey_ed25519_pem && 'ed25519'].filter(Boolean).join(', ')}`);
 
-        const duplicate = NodeStore.listNodes().find((n) => n.capabilities?.ipv6 === ipv6);
+        const duplicate = NodeStore.listNodes().find((n) => n.capabilities?.ipv4 === ipv4 || (ipv6 && n.capabilities?.ipv6 === ipv6));
         if (duplicate) {
-          return res.status(409).json({ error: 'IPv6 already registered', existing_node_id: duplicate.id });
+          return res.status(409).json({ error: 'IP already registered', existing_node_id: duplicate.id });
         }
 
         console.log('\nRunning benchmark tests...');
@@ -230,7 +280,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         console.log('\nProvisioning DNS...');
 
         try {
-          await provisionNodeDNS(subdomain, ipv6, ipv4);
+          await provisionNodeDNS(subdomain, ipv6 || null, ipv4);
           console.log(' DNS provisioned');
         } catch (dnsError) {
           console.error(`DNS failed: ${dnsError.message}\n`);
@@ -253,9 +303,11 @@ export function registerNodes(app, httpsServer, x402Server, config) {
             benchmark_score:  benchmarkResult.score,
             fetch_latency_ms: benchmarkResult.details.fetch.avg_latency_ms,
             cpu_performance:  benchmarkResult.details.cpu.hashes_per_second,
-            ipv4:             ipv4 || null,
-            ipv6,
+            memory_score:     benchmarkResult.details.memory.score,
+            ipv4,
+            ipv6:             ipv6 || null,
             port,
+            geo:              geoRegion,
           },
           evm_address,
           solana_address,
@@ -266,7 +318,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         NodeStore.setDomain(nodeId, subdomain);
         console.log(' Node stored');
 
-        observeNode(nodeId, ipv4 || null, ipv6).catch((err) =>
+        observeNode(nodeId, ipv4, ipv6 || null).catch((err) =>
           console.error(`[Observer] Initial observation failed for ${nodeId}:`, err),
         );
 
@@ -277,9 +329,11 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           success:            true,
           node_id:            nodeId,
           domain:             subdomain,
-          ipv6,
-          ipv4:               ipv4 || null,
+          ipv6:               ipv6 || null,
+          ipv4,
           port,
+          region,
+          geo:                geoRegion,
           status:             'active',
           benchmark_score:    benchmarkResult.score,
           price_paid:         paidPrice,

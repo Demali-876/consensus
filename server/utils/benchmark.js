@@ -3,20 +3,21 @@ import crypto from 'crypto';
 const BENCHMARK_CONFIG = {
   fetch: {
     max_avg_latency_ms: 2000,
+    max_p95_latency_ms: 3500,
     min_success_rate: 0.8,
     test_urls: [
       'https://httpbin.org/json',
       'https://api.github.com/zen',
       'https://jsonplaceholder.typicode.com/posts/1',
     ],
-    iterations: 5,
+    iterations: 9,
   },
   cpu: {
     min_hashes_per_second: 5000,
     iterations: 5000,
   },
   memory: {
-    min_free_mb: 256,
+    min_allocated_mb: 128,
   },
   min_total_score: 80,
 };
@@ -31,7 +32,7 @@ export async function benchmarkNode(nodeTestEndpoint) {
     const cpuResults = await testCPUPerformance(nodeTestEndpoint);
     console.log(` CPU test: ${cpuResults.grade} (${cpuResults.hashes_per_second} h/s)`);
     const memResults = await testMemory(nodeTestEndpoint);
-    console.log(` Memory test: ${memResults.grade} (${memResults.free_memory_mb}MB free)`);
+    console.log(` Memory test: ${memResults.grade} (${memResults.allocated_mb ?? 0}MB allocated)`);
 
     const score = calculateScore({ fetch: fetchResults, cpu: cpuResults, memory: memResults });
     const passed = score >= BENCHMARK_CONFIG.min_total_score;
@@ -62,7 +63,7 @@ export async function benchmarkNode(nodeTestEndpoint) {
 }
 
 async function testFetchPerformance(nodeEndpoint) {
-  const { test_urls, iterations, max_avg_latency_ms } = BENCHMARK_CONFIG.fetch;
+  const { test_urls, iterations, max_avg_latency_ms, max_p95_latency_ms } = BENCHMARK_CONFIG.fetch;
   const latencies = [];
   let successful = 0;
 
@@ -89,19 +90,28 @@ async function testFetchPerformance(nodeEndpoint) {
     }
   }
 
+  const sortedLatencies = [...latencies].sort((a, b) => a - b);
   const avgLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+  const p95Latency = percentile(sortedLatencies, 0.95);
   const successRate = successful / iterations;
 
   const latencyScore = Math.max(0, 100 - (avgLatency / max_avg_latency_ms) * 100);
+  const tailLatencyScore = Math.max(0, 100 - (p95Latency / max_p95_latency_ms) * 100);
   const reliabilityScore = successRate * 100;
-  const fetchScore = latencyScore * 0.7 + reliabilityScore * 0.3;
+  const fetchScore = latencyScore * 0.45 + tailLatencyScore * 0.25 + reliabilityScore * 0.3;
 
   return {
     avg_latency_ms: Math.round(avgLatency),
+    p95_latency_ms: Math.round(p95Latency),
     success_rate: successRate,
     successful,
     failed: iterations - successful,
-    grade: avgLatency < 500 ? 'A' : avgLatency < 1000 ? 'B' : avgLatency < 2000 ? 'C' : 'F',
+    grade: successRate < BENCHMARK_CONFIG.fetch.min_success_rate
+      ? 'F'
+      : avgLatency < 500 && p95Latency < 1000 ? 'A'
+        : avgLatency < 1000 && p95Latency < 2000 ? 'B'
+          : avgLatency < 2000 && p95Latency < 3500 ? 'C'
+            : 'F',
     score: Math.round(fetchScore),
   };
 }
@@ -147,7 +157,7 @@ async function testCPUPerformance(nodeEndpoint) {
 }
 
 async function testMemory(nodeEndpoint) {
-  const { min_free_mb } = BENCHMARK_CONFIG.memory;
+  const { min_allocated_mb } = BENCHMARK_CONFIG.memory;
 
   try {
     const response = await fetch(nodeEndpoint + '/benchmark/memory-test', {
@@ -170,7 +180,7 @@ async function testMemory(nodeEndpoint) {
         score: 0,
       };
     }
-    const canAllocate = result.allocated_mb >= 100;
+    const canAllocate = result.allocated_mb >= min_allocated_mb;
     const allocationTimeMs = result.duration_ms;
 
     let score = 0;
@@ -183,7 +193,8 @@ async function testMemory(nodeEndpoint) {
     return {
       can_allocate: canAllocate,
       allocation_time_ms: allocationTimeMs,
-      test_size_mb: result.allocated_mb,
+      allocated_mb: result.allocated_mb,
+      test_size_mb: result.requested_mb ?? 256,
       grade: score >= 80 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'F',
       score,
     };
@@ -195,6 +206,12 @@ async function testMemory(nodeEndpoint) {
       score: 0,
     };
   }
+}
+
+function percentile(sortedValues, p) {
+  if (sortedValues.length === 0) return 0;
+  const index = Math.min(sortedValues.length - 1, Math.ceil(sortedValues.length * p) - 1);
+  return sortedValues[index];
 }
 
 function calculateScore(results) {
