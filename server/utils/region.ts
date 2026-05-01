@@ -71,6 +71,31 @@ const AZURE_LIKE_REGIONS = [
   { name: 'australia-southeast', lat: -37.8136, lon: 144.9631 },
 ] as const;
 
+const REGION_COUNTRY_GROUPS: Record<string, readonly string[]> = {
+  US: [
+    'west-us',
+    'west-us-2',
+    'west-us-3',
+    'central-us',
+    'north-central-us',
+    'south-central-us',
+    'east-us',
+    'east-us-2',
+  ],
+  CA: [
+    'canada-central',
+    'canada-east',
+  ],
+  BR: ['brazil-south'],
+  GB: ['uk-south', 'uk-west'],
+  IN: ['india-central', 'india-south'],
+  JP: ['japan-east', 'japan-west'],
+  KR: ['korea-central'],
+  AU: ['australia-east', 'australia-southeast'],
+  ZA: ['south-africa-north'],
+  AE: ['uae-north'],
+};
+
 export async function classifyIpRegion(ip: string): Promise<GeoRegion> {
   const url = new URL(`http://ip-api.com/json/${encodeURIComponent(ip)}`);
   url.searchParams.set('fields', [
@@ -104,7 +129,7 @@ export async function classifyIpRegion(ip: string): Promise<GeoRegion> {
   }
 
   return {
-    region: nearestAzureLikeRegion(body.lat, body.lon),
+    region: nearestAzureLikeRegion(body.lat, body.lon, body.countryCode),
     source: 'ip-api',
     ip: body.query,
     country_code: body.countryCode,
@@ -124,10 +149,14 @@ export async function classifyIpRegion(ip: string): Promise<GeoRegion> {
   };
 }
 
-function nearestAzureLikeRegion(lat: number, lon: number): string {
-  let best: typeof AZURE_LIKE_REGIONS[number] = AZURE_LIKE_REGIONS[0];
+function nearestAzureLikeRegion(lat: number, lon: number, countryCode: string): string {
+  const countryCandidates = REGION_COUNTRY_GROUPS[countryCode.toUpperCase()];
+  const candidates = countryCandidates
+    ? AZURE_LIKE_REGIONS.filter((region) => countryCandidates.includes(region.name))
+    : AZURE_LIKE_REGIONS;
+  let best: typeof AZURE_LIKE_REGIONS[number] = candidates[0] ?? AZURE_LIKE_REGIONS[0];
   let bestKm = Number.POSITIVE_INFINITY;
-  for (const candidate of AZURE_LIKE_REGIONS) {
+  for (const candidate of candidates) {
     const km = distanceKm(lat, lon, candidate.lat, candidate.lon);
     if (km < bestKm) {
       best = candidate;

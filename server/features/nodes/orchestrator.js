@@ -24,7 +24,7 @@ function calculateJoinPrice() {
   return Math.min(BASE_PRICE + NodeStore.listNodes().length * INCREMENT, MAX_PRICE);
 }
 
-function verifyAndConsumeJoinRequest({ join_id, join_signature, pubkey_ed25519_pem }) {
+function verifyJoinRequest({ join_id, join_signature, pubkey_ed25519_pem }) {
   if (!join_id && !join_signature) return null;
   if (!join_id || !join_signature) {
     const error = new Error('join_id and join_signature must be provided together');
@@ -90,7 +90,14 @@ function verifyAndConsumeJoinRequest({ join_id, join_signature, pubkey_ed25519_p
     throw error;
   }
 
-  return NodeStore.consumeJoin(join_id);
+  return join;
+}
+
+function sameKey(left, right) {
+  if (!left || !right) return false;
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 export function registerNodes(app, httpsServer, x402Server, config) {
@@ -227,9 +234,9 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           return res.status(400).json({ error: 'Invalid public key PEM format' });
         }
 
-        let consumedJoin = null;
+        let verifiedJoin = null;
         try {
-          consumedJoin = verifyAndConsumeJoinRequest({ join_id, join_signature, pubkey_ed25519_pem });
+          verifiedJoin = verifyJoinRequest({ join_id, join_signature, pubkey_ed25519_pem });
         } catch (error) {
           return res.status(error.statusCode ?? 400).json({
             error: 'Join request verification failed',
@@ -243,13 +250,20 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         console.log(`   Region: ${region}`);
         console.log(`   Keys: ${[pubkey_secp256k1_pem && 'secp256k1', pubkey_ed25519_pem && 'ed25519'].filter(Boolean).join(', ')}`);
 
-        const duplicate = NodeStore.listNodes().find((n) => n.capabilities?.ipv4 === ipv4 || (ipv6 && n.capabilities?.ipv6 === ipv6));
+        const duplicate = NodeStore.listNodes().find((n) =>
+          sameKey(n.pubkey_ed25519, pubkeyEd25519) ||
+          sameKey(n.pubkey_secp256k1, pubkeySecp256k1)
+        );
         if (duplicate) {
-          return res.status(409).json({ error: 'IP already registered', existing_node_id: duplicate.id });
+          return res.status(409).json({
+            error: 'Node identity already registered',
+            existing_node_id: duplicate.id,
+            existing_domain: duplicate.domain ?? null,
+          });
         }
 
-        const benchmarkScore = consumedJoin?.benchmark_score ?? 0;
-        const benchmarkDetails = consumedJoin?.benchmark_details ?? null;
+        const benchmarkScore = verifiedJoin?.benchmark_score ?? 0;
+        const benchmarkDetails = verifiedJoin?.benchmark_details ?? null;
         console.log(` Encrypted eval benchmark accepted: ${benchmarkScore}/100`);
 
         const nodeId    = crypto.randomBytes(6).toString('hex');
@@ -265,6 +279,13 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         } catch (dnsError) {
           console.error(`DNS failed: ${dnsError.message}\n`);
           return res.status(500).json({ error: 'DNS provisioning failed', message: dnsError.message });
+        }
+
+        let consumedJoin = null;
+        try {
+          consumedJoin = NodeStore.consumeJoin(join_id);
+        } catch (error) {
+          return res.status(409).json({ error: 'Join request already consumed', message: error.message });
         }
 
         console.log('\nStoring node...');
