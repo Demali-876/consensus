@@ -336,7 +336,7 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
     const res = await fetch(`${SERVER}/tunnel`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ type }),
+      body:    JSON.stringify({ type, target: targetHost, port: targetPort }),
     });
     if (!res.ok) {
       const body = await res.text();

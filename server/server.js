@@ -65,8 +65,8 @@ registerWhitepaperSignup(app);
 registerUpdater(app, { adminKey: process.env.ADMIN_KEY });
 
 const server = http.createServer(app);
-const tunnelStats = registerTunnel(app, server);
 const nodeTunnelStats = registerNodeTunnel(app, server, { router });
+const tunnelStats = registerTunnel(app, server, { router, nodeTunnel: nodeTunnelStats });
 const wsStats = registerWebSocket(
   app,
   server,

@@ -48,7 +48,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS nodes_icp_address_idx      ON nodes(icp_address);
 
   CREATE TABLE IF NOT EXISTS heartbeats (
-    node_id     TEXT    NOT NULL,
+    node_id     TEXT    PRIMARY KEY,
     rps         INTEGER,
     p95_ms      INTEGER,
     version     TEXT,
@@ -100,6 +100,36 @@ for (const statement of [
   } catch (error) {
     if (!String(error?.message ?? '').includes('duplicate column name')) throw error;
   }
+}
+
+try {
+  const heartbeatColumns = db.prepare('PRAGMA table_info(heartbeats)').all();
+  const nodeIdColumn = heartbeatColumns.find((column) => column.name === 'node_id');
+  if (nodeIdColumn && !nodeIdColumn.pk) {
+    db.exec(`
+      DROP TABLE IF EXISTS heartbeats_latest;
+      CREATE TABLE IF NOT EXISTS heartbeats_latest (
+        node_id     TEXT PRIMARY KEY,
+        rps         INTEGER,
+        p95_ms      INTEGER,
+        version     TEXT,
+        created_at  INTEGER NOT NULL,
+        FOREIGN KEY (node_id) REFERENCES nodes(id)
+      );
+      INSERT OR REPLACE INTO heartbeats_latest (node_id, rps, p95_ms, version, created_at)
+      SELECT h.node_id, h.rps, h.p95_ms, h.version, h.created_at
+      FROM heartbeats h
+      INNER JOIN (
+        SELECT node_id, MAX(rowid) AS rowid FROM heartbeats GROUP BY node_id
+      ) latest ON latest.rowid = h.rowid;
+      DROP TABLE heartbeats;
+      ALTER TABLE heartbeats_latest RENAME TO heartbeats;
+      CREATE INDEX IF NOT EXISTS heartbeats_node_created_idx ON heartbeats(node_id, created_at DESC);
+    `);
+  }
+} catch (error) {
+  console.error('[NodeStore] heartbeat migration failed:', error);
+  throw error;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -163,9 +193,7 @@ const getNodeWithHeartbeatStmt = db.prepare(`
     n.status, n.created_at, n.updated_at, n.domain,
     hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
   FROM nodes n
-  LEFT JOIN (
-    SELECT h.* FROM heartbeats h WHERE h.node_id = ? ORDER BY h.rowid DESC LIMIT 1
-  ) hb ON hb.node_id = n.id
+  LEFT JOIN heartbeats hb ON hb.node_id = n.id
   WHERE n.id = ?
 `);
 
@@ -176,16 +204,18 @@ const listNodesWithHeartbeatStmt = db.prepare(`
     n.status, n.created_at, n.updated_at, n.domain,
     hb.rps AS hb_rps, hb.p95_ms AS hb_p95_ms, hb.version AS hb_version, hb.created_at AS hb_at
   FROM nodes n
-  LEFT JOIN (
-    SELECT h.* FROM heartbeats h WHERE h.rowid IN (
-      SELECT MAX(rowid) FROM heartbeats GROUP BY node_id
-    )
-  ) hb ON hb.node_id = n.id
+  LEFT JOIN heartbeats hb ON hb.node_id = n.id
   ORDER BY n.created_at DESC
 `);
 
 const insertHeartbeatStmt = db.prepare(`
-  INSERT INTO heartbeats (node_id, rps, p95_ms, version, created_at) VALUES (?, ?, ?, ?, ?)
+  INSERT INTO heartbeats (node_id, rps, p95_ms, version, created_at)
+  VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(node_id) DO UPDATE SET
+    rps = excluded.rps,
+    p95_ms = excluded.p95_ms,
+    version = excluded.version,
+    created_at = excluded.created_at
 `);
 
 const touchNodeStmt = db.prepare(`
@@ -338,7 +368,7 @@ export const NodeStore = {
   },
 
   getNode(id) {
-    return rowToNode(getNodeWithHeartbeatStmt.get(id, id));
+    return rowToNode(getNodeWithHeartbeatStmt.get(id));
   },
 
   listNodes() {

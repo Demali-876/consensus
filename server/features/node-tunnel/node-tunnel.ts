@@ -219,6 +219,21 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
       if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
       return attachProxySession(session, clientWs);
     },
+    attachRawTunnelStream: (
+      nodeId: string,
+      input: {
+        targetHost: string;
+        targetPort: number;
+        initialData?: Buffer;
+        onData: (data: Buffer) => void;
+        onEnd: () => void;
+        onError: (error: Error) => void;
+      },
+    ) => {
+      const session = getControlSession(nodeId);
+      if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
+      return attachRawTunnelStream(session, input);
+    },
     prepareNodeUpdate,
     applyNodeUpdate,
     stopUpdateScheduler: () => scheduler?.stop(),
@@ -700,6 +715,83 @@ function attachProxySession(session: NodeTunnelSession, clientWs: WebSocket): { 
   clientWs.on('error', () => close('client error'));
 
   return { streamId, close };
+}
+
+function attachRawTunnelStream(
+  session: NodeTunnelSession,
+  input: {
+    targetHost: string;
+    targetPort: number;
+    initialData?: Buffer;
+    onData: (data: Buffer) => void;
+    onEnd: () => void;
+    onError: (error: Error) => void;
+  },
+): { streamId: string; send: (data: Buffer) => void; close: (reason?: string) => void } {
+  const streamId = crypto.randomUUID();
+  let closed = false;
+
+  const close = (reason = 'closed') => {
+    if (closed) return;
+    closed = true;
+    session.streams.delete(streamId);
+    void sendEncrypted(session, {
+      type: MESSAGE_TYPE.STREAM_CLOSE,
+      timestamp: nowSeconds(),
+      stream_id: streamId,
+      reason,
+    }).catch(() => undefined);
+  };
+
+  session.streams.set(streamId, {
+    streamId,
+    onData: input.onData,
+    onClose: () => {
+      close('node stream closed');
+      input.onEnd();
+    },
+  });
+
+  void sendEncrypted(session, {
+    type: MESSAGE_TYPE.STREAM_OPEN,
+    timestamp: nowSeconds(),
+    stream_id: streamId,
+    target: JSON.stringify({
+      kind: 'raw-tunnel',
+      host: input.targetHost,
+      port: input.targetPort,
+    }),
+  }).then(() => {
+    if (input.initialData?.length) {
+      return sendEncrypted(session, {
+        type: MESSAGE_TYPE.STREAM_DATA,
+        timestamp: nowSeconds(),
+        stream_id: streamId,
+        data: input.initialData.toString('base64'),
+        encoding: 'base64',
+      });
+    }
+    return undefined;
+  }).catch((error) => {
+    session.streams.delete(streamId);
+    closed = true;
+    input.onError(error instanceof Error ? error : new Error(String(error)));
+  });
+
+  return {
+    streamId,
+    send: (data: Buffer) => {
+      if (closed || session.ws.readyState !== WebSocket.OPEN) return;
+      void sendEncrypted(session, {
+        type: MESSAGE_TYPE.STREAM_DATA,
+        timestamp: nowSeconds(),
+        stream_id: streamId,
+        data: data.toString('base64'),
+        encoding: 'base64',
+      }).catch((error) => input.onError(error instanceof Error ? error : new Error(String(error))));
+    },
+    close,
+  };
 }
 
 function resolvePending(session: NodeTunnelSession, message: TunnelMessage): void {
