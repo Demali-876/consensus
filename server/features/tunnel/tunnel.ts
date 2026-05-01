@@ -281,10 +281,7 @@ export function registerTunnel(app: Express, server: Server) {
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url!, `http://${req.headers.host}`);
 
-    if (url.pathname !== '/tunnel-connect') {
-      if (url.pathname !== '/ws-connect') socket.destroy();
-      return;
-    }
+    if (url.pathname !== '/tunnel-connect') return;
 
     const token   = url.searchParams.get('token');
     const pending = token ? pendingTokens.get(token) : null;
