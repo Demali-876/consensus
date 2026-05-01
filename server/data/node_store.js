@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
+import { log } from '../utils/log.ts';
 
 const DB_PATH = process.env.NODE_DB_PATH || path.resolve(process.cwd(), 'consensus.db');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -106,6 +107,7 @@ try {
   const heartbeatColumns = db.prepare('PRAGMA table_info(heartbeats)').all();
   const nodeIdColumn = heartbeatColumns.find((column) => column.name === 'node_id');
   if (nodeIdColumn && !nodeIdColumn.pk) {
+    log.info('node-store', 'heartbeat-migration-start', {});
     db.exec(`
       DROP TABLE IF EXISTS heartbeats_latest;
       CREATE TABLE IF NOT EXISTS heartbeats_latest (
@@ -126,9 +128,12 @@ try {
       ALTER TABLE heartbeats_latest RENAME TO heartbeats;
       CREATE INDEX IF NOT EXISTS heartbeats_node_created_idx ON heartbeats(node_id, created_at DESC);
     `);
+    log.info('node-store', 'heartbeat-migration-complete', {});
   }
 } catch (error) {
-  console.error('[NodeStore] heartbeat migration failed:', error);
+  log.error('node-store', 'heartbeat-migration-failed', {
+    message: error instanceof Error ? error.message : String(error),
+  });
   throw error;
 }
 
@@ -385,6 +390,13 @@ export const NodeStore = {
     const ts = nowSec();
     insertHeartbeatStmt.run(id, rps, p95_ms, version, ts);
     touchNodeStmt.run(ts, id);
+    log.info('node-store', 'heartbeat-upserted', {
+      node_id: id,
+      rps,
+      p95_ms,
+      version,
+      at: ts,
+    });
     return this.getNode(id);
   },
 
@@ -401,6 +413,12 @@ export const NodeStore = {
     const ts = nowSec();
     db.prepare('UPDATE nodes SET capabilities = ?, updated_at = ? WHERE id = ?')
       .run(toJson(capabilities), ts, id);
+    log.info('node-store', 'verification-updated', {
+      node_id: id,
+      verified: Boolean(verified),
+      version,
+      build_digest,
+    });
     return this.getNode(id);
   },
 
@@ -415,6 +433,7 @@ export const NodeStore = {
     const ts = nowSec();
     db.prepare('UPDATE nodes SET capabilities = ?, updated_at = ? WHERE id = ?')
       .run(toJson(capabilities), ts, id);
+    log.info('node-store', 'verification-cleared', { node_id: id });
     return this.getNode(id);
   },
 
@@ -438,6 +457,13 @@ export const NodeStore = {
     const ts = nowSec();
     db.prepare('UPDATE nodes SET capabilities = ?, updated_at = ? WHERE id = ?')
       .run(toJson(capabilities), ts, id);
+    log.info('node-store', 'update-state-set', {
+      node_id: id,
+      state,
+      update_id: details.update_id ?? null,
+      target_version: details.target_version ?? null,
+      reason: details.reason ?? null,
+    });
     return this.getNode(id);
   },
 
@@ -479,6 +505,13 @@ export const NodeStore = {
 
   upsertManifest(version, manifest, github_url = null, required = true) {
     upsertManifestStmt.run(version, toJson(manifest), github_url, required ? 1 : 0, nowSec());
+    log.info('node-store', 'manifest-upserted', {
+      version,
+      manifest_version: manifest?.version ?? null,
+      platform: manifest?.platform ?? null,
+      commit: manifest?.commit ?? null,
+      required,
+    });
     return this.getManifestByVersion(version);
   },
 

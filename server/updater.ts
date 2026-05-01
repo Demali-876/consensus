@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import type { Express, Request, Response } from "express";
 import NodeStore from "./data/node_store.js";
+import { log } from "./utils/log.ts";
 
 interface NodeReleaseManifest {
   product: "consensus-node";
@@ -31,13 +32,25 @@ interface UpdaterConfig {
 }
 
 export function registerUpdater(app: Express, config: UpdaterConfig = {}): void {
+  log.info("updater", "registered", { admin_key_configured: Boolean(config.adminKey) });
+
   app.get("/update/latest", (_req: Request, res: Response) => {
     try {
       const required = NodeStore.getRequiredManifest();
-      if (!required) return res.status(404).json({ error: "No required version set" });
+      if (!required) {
+        log.warn("updater", "latest-missing", {});
+        return res.status(404).json({ error: "No required version set" });
+      }
+      log.info("updater", "latest-served", {
+        version: required.version,
+        required: required.required,
+        manifest_version: required.manifest?.version,
+        platform: required.manifest?.platform,
+        commit: required.manifest?.commit,
+      });
       res.json(required.manifest);
     } catch (error: any) {
-      console.error("Get latest update error:", error);
+      log.error("updater", "latest-failed", { message: error.message });
       res.status(500).json({ error: "Failed to get update info", message: error.message });
     }
   });
@@ -48,21 +61,50 @@ export function registerUpdater(app: Express, config: UpdaterConfig = {}): void 
       const payload = req.body as IntegrityPayload;
 
       const validation = validateIntegrityPayload(payload);
-      if (validation) return res.status(400).json(validation);
+      if (validation) {
+        log.warn("updater", "integrity-rejected", {
+          node_id,
+          reason: validation.error,
+          missing: "missing" in validation ? validation.missing : undefined,
+        });
+        return res.status(400).json(validation);
+      }
 
       const node = NodeStore.getNode(node_id);
-      if (!node) return res.status(404).json({ error: "Node not found" });
-      if (!node.pubkey_ed25519) return res.status(400).json({ error: "Node has no Ed25519 key" });
+      if (!node) {
+        log.warn("updater", "integrity-rejected", { node_id, reason: "node not found" });
+        return res.status(404).json({ error: "Node not found" });
+      }
+      if (!node.pubkey_ed25519) {
+        log.warn("updater", "integrity-rejected", { node_id, reason: "missing ed25519 key" });
+        return res.status(400).json({ error: "Node has no Ed25519 key" });
+      }
+
+      log.info("updater", "integrity-received", {
+        node_id,
+        version: payload.manifest.version,
+        platform: payload.manifest.platform,
+        commit: payload.manifest.commit,
+        routes_hash: payload.manifest.routes_hash,
+        tarball_sha256: payload.manifest.tarball_sha256 ?? null,
+      });
 
       const nodeKey = crypto.createPublicKey({ key: node.pubkey_ed25519, format: "der", type: "spki" });
       const presentedKey = crypto.createPublicKey(payload.node_public_key_pem).export({ format: "der", type: "spki" });
       const registeredKey = nodeKey.export({ format: "der", type: "spki" });
       if (presentedKey.length !== registeredKey.length || !crypto.timingSafeEqual(Buffer.from(presentedKey), Buffer.from(registeredKey))) {
+        log.warn("updater", "integrity-rejected", { node_id, reason: "public key mismatch" });
         return res.status(403).json({ error: "Integrity public key does not match registered node key" });
       }
 
       const nowSec = Math.floor(Date.now() / 1000);
       if (Math.abs(nowSec - payload.timestamp) > 300) {
+        log.warn("updater", "integrity-rejected", {
+          node_id,
+          reason: "timestamp outside tolerance",
+          timestamp: payload.timestamp,
+          now: nowSec,
+        });
         return res.status(400).json({ error: "Timestamp too old or in the future" });
       }
 
@@ -83,11 +125,21 @@ export function registerUpdater(app: Express, config: UpdaterConfig = {}): void 
         nodeKey,
         Buffer.from(payload.signature, "base64"),
       );
-      if (!valid) return res.status(403).json({ error: "Invalid integrity signature" });
+      if (!valid) {
+        log.warn("updater", "integrity-rejected", { node_id, reason: "invalid signature" });
+        return res.status(403).json({ error: "Invalid integrity signature" });
+      }
 
       const required = NodeStore.getRequiredManifest();
       if (required && !manifestMatchesRequired(payload.manifest, required.manifest)) {
         NodeStore.clearNodeVerification(node_id);
+        log.warn("updater", "integrity-mismatch", {
+          node_id,
+          observed_version: payload.manifest.version,
+          observed_commit: payload.manifest.commit,
+          required_version: required.manifest.version,
+          required_commit: required.manifest.commit,
+        });
         return res.json({
           verified: false,
           reason: "Node manifest does not match required manifest",
@@ -103,6 +155,13 @@ export function registerUpdater(app: Express, config: UpdaterConfig = {}): void 
         payload.manifest.tarball_sha256 ?? payload.manifest.routes_hash,
       );
 
+      log.info("updater", "integrity-verified", {
+        node_id,
+        version: payload.manifest.version,
+        platform: payload.manifest.platform,
+        commit: payload.manifest.commit,
+        routes_hash: payload.manifest.routes_hash,
+      });
       res.json({
         verified: true,
         node_id,
@@ -112,18 +171,27 @@ export function registerUpdater(app: Express, config: UpdaterConfig = {}): void 
         routes_hash: payload.manifest.routes_hash,
       });
     } catch (error: any) {
-      console.error("Verify integrity error:", error);
+      log.error("updater", "integrity-failed", { message: error.message });
       res.status(500).json({ error: "Integrity verification failed", message: error.message });
     }
   });
 
   app.post("/admin/manifest", (req: Request, res: Response) => {
     try {
-      if (!config.adminKey) return res.status(503).json({ error: "Admin key not configured" });
-      if (req.headers["x-admin-key"] !== config.adminKey) return res.status(403).json({ error: "Invalid admin key" });
+      if (!config.adminKey) {
+        log.error("updater", "manifest-rejected", { reason: "admin key not configured" });
+        return res.status(503).json({ error: "Admin key not configured" });
+      }
+      if (req.headers["x-admin-key"] !== config.adminKey) {
+        log.warn("updater", "manifest-rejected", { reason: "invalid admin key" });
+        return res.status(403).json({ error: "Invalid admin key" });
+      }
 
       const { manifest, required } = req.body as { manifest?: NodeReleaseManifest; required?: boolean };
-      if (!manifest?.version) return res.status(400).json({ error: "manifest.version is required" });
+      if (!manifest?.version) {
+        log.warn("updater", "manifest-rejected", { reason: "manifest.version is required" });
+        return res.status(400).json({ error: "manifest.version is required" });
+      }
 
       NodeStore.upsertManifest(
         manifest.version,
@@ -132,13 +200,21 @@ export function registerUpdater(app: Express, config: UpdaterConfig = {}): void 
         required !== false,
       );
 
+      log.info("updater", "manifest-stored", {
+        version: manifest.version,
+        platform: manifest.platform,
+        commit: manifest.commit,
+        routes_hash: manifest.routes_hash,
+        tarball_sha256: manifest.tarball_sha256 ?? null,
+        required: required !== false,
+      });
       res.json({
         success: true,
         version: manifest.version,
         required: required !== false,
       });
     } catch (error: any) {
-      console.error("Admin manifest error:", error);
+      log.error("updater", "manifest-failed", { message: error.message });
       res.status(500).json({ error: "Failed to store manifest", message: error.message });
     }
   });

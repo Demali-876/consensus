@@ -4,6 +4,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import type { Express, Request }      from 'express';
 import type { Server }                from 'http';
 import Router                         from '../../router.ts';
+import { log }                        from '../../utils/log.ts';
 import { generateSlug }               from './slug.ts';
 
 export const FRAME = {
@@ -93,6 +94,14 @@ function openTunnelStream(
   if (tunnel.nodeId && tunnel.targetHost && tunnel.targetPort && activeNodeTunnel?.attachRawTunnelStream) {
     const key = `${tunnel.tunnelId}:${streamId}`;
     try {
+      log.info('public-tunnel', 'node-relay-open', {
+        tunnel_id: tunnel.tunnelId,
+        stream_id: streamId,
+        node_id: tunnel.nodeId,
+        target_host: tunnel.targetHost,
+        target_port: tunnel.targetPort,
+        initial_bytes: initialData.length,
+      });
       const relay = activeNodeTunnel.attachRawTunnelStream(tunnel.nodeId, {
         targetHost: tunnel.targetHost,
         targetPort: tunnel.targetPort,
@@ -100,20 +109,43 @@ function openTunnelStream(
         onData: handlers.onData,
         onEnd: () => {
           nodeRelayStreams.delete(key);
+          log.info('public-tunnel', 'node-relay-ended', {
+            tunnel_id: tunnel.tunnelId,
+            stream_id: streamId,
+            node_id: tunnel.nodeId,
+          });
           handlers.onEnd();
         },
         onError: () => {
           nodeRelayStreams.delete(key);
+          log.error('public-tunnel', 'node-relay-error', {
+            tunnel_id: tunnel.tunnelId,
+            stream_id: streamId,
+            node_id: tunnel.nodeId,
+          });
           handlers.onReset();
         },
       });
       nodeRelayStreams.set(key, relay);
     } catch {
+      log.error('public-tunnel', 'node-relay-open-failed', {
+        tunnel_id: tunnel.tunnelId,
+        stream_id: streamId,
+        node_id: tunnel.nodeId,
+        target_host: tunnel.targetHost,
+        target_port: tunnel.targetPort,
+      });
       handlers.onReset();
     }
     return;
   }
 
+  log.info('public-tunnel', 'legacy-stream-open', {
+    tunnel_id: tunnel.tunnelId,
+    stream_id: streamId,
+    initial_bytes: initialData.length,
+    reason: tunnel.nodeId ? 'node relay unavailable' : 'no node assigned',
+  });
   tunnel.ws.send(encodeFrame(FRAME.STREAM_OPEN, streamId));
   if (initialData.length > 0) tunnel.ws.send(encodeFrame(FRAME.STREAM_DATA, streamId, initialData));
 }
@@ -222,7 +254,7 @@ function startTcpGateway(): void {
       if (!routed) {
         socket.destroy();
         const code = (err as NodeJS.ErrnoException).code;
-        if (code !== 'ECONNRESET') console.error('[TCP Gateway] pre-route error:', err.message);
+        if (code !== 'ECONNRESET') log.error('public-tunnel', 'tcp-pre-route-error', { message: err.message, code });
       }
     });
 
@@ -274,19 +306,27 @@ function startTcpGateway(): void {
       socket.on('close', () => { tunnel.streams.delete(streamId); });
 
       socket.on('error', (err: Error) => {
-        console.error(`[TCP] ${tunnelId}:${streamId}:`, err.message);
+        log.error('public-tunnel', 'tcp-stream-error', {
+          tunnel_id: tunnelId,
+          stream_id: streamId,
+          message: err.message,
+        });
         tunnel.streams.delete(streamId);
         closeTunnelStream(tunnel, streamId, 'tcp client error');
       });
     });
   });
 
-  server.listen(TCP_PORT, () => console.log(`[TCP Gateway] listening on :${TCP_PORT}`));
-  server.on('error', (err: Error) => console.error('[TCP Gateway] error:', err.message));
+  server.listen(TCP_PORT, () => log.info('public-tunnel', 'tcp-gateway-listening', { port: TCP_PORT }));
+  server.on('error', (err: Error) => log.error('public-tunnel', 'tcp-gateway-error', { message: err.message }));
 }
 
 export function registerTunnel(app: Express, server: Server, options: { router?: Router; nodeTunnel?: NodeTunnelControl } = {}) {
   activeNodeTunnel = options.nodeTunnel;
+  log.info('public-tunnel', 'registered', {
+    tcp_port: TCP_PORT,
+    node_relay: Boolean(options.nodeTunnel?.attachRawTunnelStream),
+  });
   startTcpGateway();
 
   app.post('/tunnel', (req, res) => {
@@ -309,6 +349,15 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
     const token   = crypto.randomBytes(32).toString('hex');
     const expires = Date.now() + 60_000;
 
+    log.info('public-tunnel', 'created', {
+      tunnel_id: tunnelId,
+      type,
+      node_id: node?.id ?? null,
+      target_host: targetHost ?? null,
+      target_port: targetPort ?? null,
+      legacy_mode: !targetHost,
+      expires_in_ms: expires - Date.now(),
+    });
     pendingTokens.set(token, {
       tunnelId,
       expires,
@@ -351,6 +400,12 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
     function handleTunnelRequest() {
       const tunnel = activeTunnels.get(subdomain);
       if (!tunnel || tunnel.ws.readyState !== WebSocket.OPEN) {
+        log.warn('public-tunnel', 'http-request-unavailable', {
+          tunnel_id: subdomain,
+          host,
+          method: req.method,
+          url: req.url,
+        });
         res.status(503).json({ error: 'Tunnel not connected' });
         return;
       }
@@ -359,6 +414,15 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
       const rawReq   = buildRawRequest(req);
       const chunks:  Buffer[] = [];
 
+      log.info('public-tunnel', 'http-stream-open', {
+        tunnel_id: subdomain,
+        stream_id: streamId,
+        method: req.method,
+        url: req.url,
+        node_id: tunnel.nodeId ?? null,
+        target_host: tunnel.targetHost ?? null,
+        target_port: tunnel.targetPort ?? null,
+      });
       const timer = setTimeout(() => {
         tunnel.streams.delete(streamId);
         closeTunnelStream(tunnel, streamId, 'http tunnel timeout');
@@ -371,6 +435,12 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
           clearTimeout(timer);
           tunnel.streams.delete(streamId);
           const { status, headers, body } = parseRawResponse(Buffer.concat(chunks));
+          log.info('public-tunnel', 'http-stream-complete', {
+            tunnel_id: subdomain,
+            stream_id: streamId,
+            status,
+            response_bytes: body.length,
+          });
           const skip = new Set(['content-length', 'transfer-encoding', 'connection']);
           for (const [k, v] of Object.entries(headers)) {
             if (!skip.has(k)) res.setHeader(k, v);
@@ -380,6 +450,10 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
         onReset: () => {
           clearTimeout(timer);
           tunnel.streams.delete(streamId);
+          log.warn('public-tunnel', 'http-stream-reset', {
+            tunnel_id: subdomain,
+            stream_id: streamId,
+          });
           if (!res.headersSent) res.status(502).json({ error: 'Tunnel reset stream' });
         },
       };
@@ -399,6 +473,7 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
     const pending = token ? pendingTokens.get(token) : null;
 
     if (!pending) {
+      log.warn('public-tunnel', 'connect-rejected', { reason: 'missing or unknown token' });
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
@@ -406,6 +481,10 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
 
     if (pending.expires < Date.now()) {
       pendingTokens.delete(token!);
+      log.warn('public-tunnel', 'connect-rejected', {
+        tunnel_id: pending.tunnelId,
+        reason: 'token expired',
+      });
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
@@ -436,7 +515,13 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
       targetPort: (ws as any).targetPort,
     };
     activeTunnels.set(tunnelId, tunnel);
-    console.log(`[Tunnel Connected] ${tunnelId}`);
+    log.info('public-tunnel', 'owner-connected', {
+      tunnel_id: tunnelId,
+      type: tunnel.type,
+      node_id: tunnel.nodeId ?? null,
+      target_host: tunnel.targetHost ?? null,
+      target_port: tunnel.targetPort ?? null,
+    });
 
     ws.send(JSON.stringify({ type: 'tunnel_open', tunnelId }));
 
@@ -457,15 +542,23 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
       if (frame.type === FRAME.STREAM_RESET) stream.onReset();
     });
 
-    ws.on('close', () => {
+    ws.on('close', (code, reason) => {
       for (const streamId of tunnel.streams.keys()) {
         closeTunnelStream(tunnel, streamId, 'tunnel owner disconnected');
       }
       activeTunnels.delete(tunnelId);
-      console.log(`[Tunnel Disconnected] ${tunnelId}`);
+      log.warn('public-tunnel', 'owner-disconnected', {
+        tunnel_id: tunnelId,
+        code,
+        reason: reason.toString() || null,
+        streams_closed: tunnel.streams.size,
+      });
     });
 
-    ws.on('error', (err: Error) => console.error(`[Tunnel Error] ${tunnelId}:`, err.message));
+    ws.on('error', (err: Error) => log.error('public-tunnel', 'owner-error', {
+      tunnel_id: tunnelId,
+      message: err.message,
+    }));
   });
 
   setInterval(() => {
