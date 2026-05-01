@@ -422,15 +422,6 @@ async function handleEncryptedMessage(session: NodeTunnelSession, raw: Buffer): 
     session.activeRequests = message.active_requests ?? 0;
     session.activeStreams = message.active_streams ?? 0;
     byNodeId.set(message.node_id, session.id);
-    log.info('node-tunnel', 'heartbeat', {
-      session_id: session.id,
-      node_id: message.node_id,
-      mode: session.mode,
-      version: session.version ?? null,
-      uptime_seconds: message.uptime_seconds,
-      active_requests: message.active_requests ?? 0,
-      active_streams: message.active_streams ?? 0,
-    });
     try {
       NodeStore.heartbeat(message.node_id, {
         rps: message.active_requests ?? null,

@@ -390,13 +390,6 @@ export const NodeStore = {
     const ts = nowSec();
     insertHeartbeatStmt.run(id, rps, p95_ms, version, ts);
     touchNodeStmt.run(ts, id);
-    log.info('node-store', 'heartbeat-upserted', {
-      node_id: id,
-      rps,
-      p95_ms,
-      version,
-      at: ts,
-    });
     return this.getNode(id);
   },
 

@@ -15,7 +15,6 @@ function cleanFields(fields: LogFields = {}): LogFields {
 
 function line(level: string, scope: string, event: string, fields?: LogFields): string {
   return JSON.stringify({
-    ts: new Date().toISOString(),
     level,
     scope,
     event,
@@ -34,4 +33,3 @@ export const log = {
     console.error(line('error', scope, event, fields));
   },
 };
-
