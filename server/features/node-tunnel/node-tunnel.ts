@@ -1118,12 +1118,6 @@ async function scheduleOneUpdate(router?: RouterLike): Promise<void> {
       continue;
     }
     if (session.version === required.version) {
-      log.info('node-update', 'scheduler-skip-session', {
-        session_id: session.id,
-        node_id: session.nodeId,
-        version: session.version,
-        reason: 'already required version',
-      });
       continue;
     }
     if (!isSessionIdle(session, router)) {
@@ -1163,9 +1157,6 @@ async function scheduleOneUpdate(router?: RouterLike): Promise<void> {
     await applyNodeUpdate(session.nodeId, { updateId: ready.update_id });
     return;
   }
-  log.info('node-update', 'scheduler-no-candidate', {
-    required_version: required.version,
-  });
 }
 
 function getStats() {
