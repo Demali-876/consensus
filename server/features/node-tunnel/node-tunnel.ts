@@ -1102,11 +1102,6 @@ async function scheduleOneUpdate(router?: RouterLike): Promise<void> {
     });
     return;
   }
-
-  log.info('node-update', 'scheduler-scan', {
-    required_version: required.version,
-    sessions: sessions.size,
-  });
   for (const session of sessions.values()) {
     if (!session.nodeId || session.mode !== 'control') {
       log.info('node-update', 'scheduler-skip-session', {
