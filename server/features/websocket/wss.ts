@@ -44,6 +44,10 @@ interface WssConfig {
   ICP_PAY_TO:    string;
 }
 
+interface NodeTunnelControl {
+  attachProxySession(nodeId: string, clientWs: WebSocket): { streamId: string; close: () => void };
+}
+
 const sessions        = new Map<string, Session>();
 const pendingSessions = new Map<string, Purchase>();
 const TOKEN_TTL_MS    = 60_000;
@@ -345,46 +349,125 @@ export function handleNodeProxiedSession(
   });
 }
 
+export function handleNodeTunnelSession(
+  clientWs:   WebSocket,
+  sessionId:  string,
+  model:      string,
+  minutes:    number,
+  megabytes:  number,
+  router:     Router,
+  nodeId:     string,
+  nodeTunnel: NodeTunnelControl,
+): void {
+  const pricing = PRICING_PRESETS[pricingKey(model)];
+  const limits  = calculateSessionLimits(pricing, minutes, megabytes);
+
+  const session: Session = {
+    sessionId,
+    nodeId,
+    pricing,
+    limits,
+    usage:  { bytesReceived: 0, bytesSent: 0, totalBytes: 0, connectedAt: Date.now() },
+    active: true,
+  };
+
+  sessions.set(sessionId, session);
+
+  let released = false;
+  const release = () => {
+    if (!released) {
+      released = true;
+      router.decrementSession(nodeId);
+      sessions.delete(sessionId);
+    }
+  };
+
+  const stream = nodeTunnel.attachProxySession(nodeId, clientWs);
+
+  clientWs.send(JSON.stringify({
+    type:      'session_start',
+    sessionId,
+    model,
+    served_by: nodeId,
+    tunnel:    'control',
+    limits: {
+      timeSeconds: limits.timeLimit / 1000,
+      dataMB:      bytesToMB(limits.dataLimit),
+    },
+    pricing: {
+      totalCost:      calculateSessionCost(pricing, minutes, megabytes),
+      pricePerMinute: pricing.pricePerMinute,
+      pricePerMB:     pricing.pricePerMB,
+    },
+  }));
+
+  session.timer = setTimeout(() => {
+    if (!session.active) return;
+    session.active = false;
+    stream.close();
+    clientWs.close(1000, 'Time limit reached');
+  }, limits.timeLimit);
+
+  clientWs.on('message', (data: Buffer) => {
+    if (!session.active) return;
+    const size = Buffer.byteLength(data);
+    session.usage.bytesReceived += size;
+    session.usage.totalBytes     = session.usage.bytesReceived + session.usage.bytesSent;
+
+    if (session.usage.totalBytes >= limits.dataLimit) {
+      clearTimeout(session.timer);
+      session.active = false;
+      stream.close();
+      clientWs.close(1008, 'Data limit reached');
+    }
+  });
+
+  clientWs.on('close', () => {
+    clearTimeout(session.timer);
+    session.active = false;
+    stream.close();
+    release();
+  });
+
+  clientWs.on('error', () => {
+    clearTimeout(session.timer);
+    session.active = false;
+    stream.close();
+    release();
+  });
+}
+
 export function registerWebSocket(
   app:         Express,
   httpsServer: HttpsServer,
   x402Server:  any,
   config:      WssConfig,
   router:      Router,
+  nodeTunnel?: NodeTunnelControl,
 ) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
-  app.get(
-    '/ws',
-    paymentMiddleware(
+  const wsHandlers: any[] = [];
+  if (process.env.FREE_MODE !== 'true') {
+    wsHandlers.push(paymentMiddleware(
       {
         'GET /ws': {
           accepts: [
-            {
-              scheme:  'exact',
-              price:   sessionPrice,
-              network: 'eip155:84532',
-              payTo:   EVM_PAY_TO,
-            },
-            {
-              scheme:  'exact',
-              price:   sessionPrice,
-              network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
-              payTo:   SOLANA_PAY_TO,
-            },
-            {
-              scheme:  'exact',
-              price:   sessionPriceIcp,
-              network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',
-              payTo:   ICP_PAY_TO,
-            },
+            { scheme: 'exact', price: sessionPrice,    network: 'eip155:84532',                          payTo: EVM_PAY_TO    },
+            { scheme: 'exact', price: sessionPrice,    network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', payTo: SOLANA_PAY_TO },
+            { scheme: 'exact', price: sessionPriceIcp, network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',    payTo: ICP_PAY_TO    },
           ],
           description: 'Pay-per-use WebSockets on demand',
           mimeType:    'application/json',
         },
       },
       x402Server,
-    ),
+    ));
+  }
+
+  app.get(
+    '/ws',
+    ...wsHandlers,
     (req, res) => {
       const model     = (req.query.model     ?? 'hybrid').toString();
       const minutes   = parseInt((req.query.minutes   ?? '5').toString(),  10);
@@ -443,6 +526,16 @@ export function registerWebSocket(
     if (node) {
       console.log(`[WebSocket Route] ${sessionId} → ${node.id} (${node.region})`);
       router.incrementSession(node.id);
+
+      if (nodeTunnel) {
+        try {
+          handleNodeTunnelSession(ws, sessionId, model, minutes, megabytes, router, node.id, nodeTunnel);
+          return;
+        } catch (error) {
+          console.error(`[WebSocket Node Tunnel Error] ${node.id}:`, error instanceof Error ? error.message : String(error));
+          router.decrementSession(node.id);
+        }
+      }
 
       const nodeWs = new WebSocket(`wss://${node.domain}/ws-node`, {
         headers: {

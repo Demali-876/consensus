@@ -50,7 +50,7 @@ export default class Router {
     const sticky = this.requestToNode.get(dedupeKey);
     if (sticky) {
       const node = NodeStore.getNode(sticky.nodeId);
-      if (node && node.status === 'active') {
+      if (node && node.status === 'active' && !isNodeUpdating(node)) {
         this.stats.sticky_hits++;
         return node;
       }
@@ -58,7 +58,9 @@ export default class Router {
     }
 
     const allNodes = NodeStore.listNodes();
-    let eligibleNodes = allNodes.filter((node: any) => node.status === 'active');
+    let eligibleNodes = allNodes.filter((node: any) =>
+      node.status === 'active' && !isNodeUpdating(node),
+    );
 
     eligibleNodes = this.filterByPreferences(eligibleNodes, preferenceHeaders);
 
@@ -160,6 +162,12 @@ export default class Router {
     this.statsCache = null;
   }
 
+  getNodeLoad(nodeId: string): { requests: number; sessions: number; total: number } {
+    const requests = this.activeRequests.get(nodeId) ?? 0;
+    const sessions = this.activeSessions.get(nodeId) ?? 0;
+    return { requests, sessions, total: requests + sessions };
+  }
+
   // Separated so the return type can be inferred for statsCache typing.
   private _buildStats() {
     const allNodes    = NodeStore.listNodes();
@@ -168,11 +176,27 @@ export default class Router {
     let totalReqs = 0; for (const v of this.activeRequests.values()) totalReqs += v;
     let totalSess = 0; for (const v of this.activeSessions.values()) totalSess += v;
 
+    const httpLat = activeNodes
+      .map((n: any) => n.capabilities?.fetch_latency_ms)
+      .filter((v: unknown): v is number => typeof v === 'number' && v > 0);
+    const avgHttpLatencyMs: number | null = httpLat.length
+      ? Math.round(httpLat.reduce((a: number, b: number) => a + b, 0) / httpLat.length)
+      : null;
+
+    const wsLat = activeNodes
+      .map((n: any) => n.heartbeat?.p95_ms)
+      .filter((v: unknown): v is number => typeof v === 'number' && v > 0);
+    const avgWsLatencyMs: number | null = wsLat.length
+      ? Math.round(wsLat.reduce((a: number, b: number) => a + b, 0) / wsLat.length)
+      : null;
+
     return {
       total_nodes:            allNodes.length,
       active_nodes:           activeNodes.length,
       total_active_requests:  totalReqs,
       total_active_sessions:  totalSess,
+      avg_http_latency_ms:    avgHttpLatencyMs,
+      avg_ws_latency_ms:      avgWsLatencyMs,
       sticky_mappings:        this.requestToNode.size,
       selection_stats: {
         total_selections: this.stats.total_selections,
@@ -200,4 +224,9 @@ export default class Router {
     this.statsCache = { value, at: now };
     return value;
   }
+}
+
+function isNodeUpdating(node: any): boolean {
+  const state = node?.capabilities?.update_state;
+  return state === 'preparing' || state === 'ready' || state === 'draining' || state === 'updating';
 }

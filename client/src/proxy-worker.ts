@@ -1,5 +1,6 @@
 import http from 'node:http';
 import net  from 'node:net';
+import { performance } from 'node:perf_hooks';
 
 import { ProxyClient }                          from './proxy-client.js';
 import { createPaymentFetch, type PreferNetwork } from './payment-fetch.js';
@@ -73,6 +74,10 @@ function percentile(values: number[], pct: number): number | undefined {
   const sorted = [...values].sort((a, b) => a - b);
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((pct / 100) * sorted.length) - 1));
   return sorted[idx];
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.max(0, performance.now() - startedAt);
 }
 
 class ResponseCache {
@@ -292,7 +297,7 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
   }
 
   const server = http.createServer(async (req, res) => {
-    const requestStartedAt = Date.now();
+    const requestStartedAt = performance.now();
     counters.requests++;
     const cacheKey = `${req.method}:${req.url}`;
     const tryCache = defaultCacheable(req);
@@ -306,7 +311,7 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
         res.writeHead(rctx.statusCode, { ...rctx.headers, 'x-cache': 'HIT', 'x-cache-hits': String(entry.hits) });
         counters.bytesSent += entry.body.length;
         res.end(entry.body);
-        recordResult(Date.now() - requestStartedAt, true, rctx.statusCode);
+        recordResult(elapsedMs(requestStartedAt), true, rctx.statusCode);
         opts.onStats?.(snapshot());
         return;
       }
@@ -329,12 +334,21 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
       if (verdict === false) {
         res.writeHead(403);
         res.end('Forbidden');
+        recordResult(elapsedMs(requestStartedAt), false, 403);
+        opts.onStats?.(snapshot());
         return;
       }
     } catch (err) {
-      if (opts.hooks?.onError) { opts.hooks.onError(err as Error, req, res); return; }
+      if (opts.hooks?.onError) {
+        opts.hooks.onError(err as Error, req, res);
+        recordResult(elapsedMs(requestStartedAt), false);
+        opts.onStats?.(snapshot());
+        return;
+      }
       res.writeHead(500);
       res.end(`Hook error: ${(err as Error).message}`);
+      recordResult(elapsedMs(requestStartedAt), false, 500);
+      opts.onStats?.(snapshot());
       return;
     }
 
@@ -369,15 +383,21 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
       counters.spend      = client.getBudget().spent_usd;
       res.end(body);
 
-      recordResult(Date.now() - requestStartedAt, true, rctx.statusCode);
+      recordResult(elapsedMs(requestStartedAt), true, rctx.statusCode);
       opts.onStats?.(snapshot());
     } catch (err) {
-      if (opts.hooks?.onError) { opts.hooks.onError(err as Error, req, res); return; }
+      if (opts.hooks?.onError) {
+        opts.hooks.onError(err as Error, req, res);
+        recordResult(elapsedMs(requestStartedAt), false);
+        opts.onStats?.(snapshot());
+        return;
+      }
       if (!res.headersSent) {
         res.writeHead(502);
         res.end(`Bad Gateway: ${(err as Error).message}`);
       }
-      recordResult(Date.now() - requestStartedAt, false, 502);
+      recordResult(elapsedMs(requestStartedAt), false, 502);
+      opts.onStats?.(snapshot());
     }
   });
 
@@ -445,7 +465,7 @@ async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorke
   });
 
   const server = http.createServer(async (req, res) => {
-    const requestStartedAt = Date.now();
+    const requestStartedAt = performance.now();
     counters.requests++;
 
     try {
@@ -473,12 +493,13 @@ async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorke
       counters.spend            = client.getBudget().spent_usd;
       res.end(body);
 
-      recordResult(Date.now() - requestStartedAt, true, result.status);
+      recordResult(elapsedMs(requestStartedAt), true, result.status);
       opts.onStats?.(snapshot());
     } catch (err) {
       res.writeHead(502);
       res.end(err instanceof Error ? err.message : 'Proxy error');
-      recordResult(Date.now() - requestStartedAt, false, 502);
+      recordResult(elapsedMs(requestStartedAt), false, 502);
+      opts.onStats?.(snapshot());
     }
   });
 

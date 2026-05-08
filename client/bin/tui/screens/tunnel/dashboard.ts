@@ -10,6 +10,7 @@ import WebSocket from 'ws';
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { C } from '../../../theme';
 import { makeSpin } from '../../../lib/spinners.ts';
+import { saveSession } from '../../../lib/store.ts';
 import type { TunnelSetupResult } from './setup.ts';
 
 const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
@@ -187,6 +188,17 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   const emptyRef = new TextRenderable(renderer, { content: '  waiting for traffic…', fg: C.dim, bg: C.dark });
   content.add(emptyRef);
 
+  // ── Stats bar ─────────────────────────────────────────────────────────────
+  const statsBar = new BoxRenderable(renderer, {
+    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
+    paddingX: 2, paddingY: 0, backgroundColor: C.dark,
+  });
+  const latencyRef = new TextRenderable(renderer, { content: 'Latency: — / — / —', fg: C.dim, bg: C.dark });
+  const uptimeRef  = new TextRenderable(renderer, { content: '00:00:00',            fg: C.dim, bg: C.dark });
+  statsBar.add(latencyRef);
+  statsBar.add(uptimeRef);
+  root.add(statsBar);
+
   // ── Bottom bar ────────────────────────────────────────────────────────────
   const bottomBar = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
@@ -204,6 +216,10 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   let connected = false;
   const startedAt = Date.now();
   const log: LogEntry[] = [];
+  const sessionId = crypto.randomUUID();
+  let requestCount    = 0;
+  let tunnelPublicUrl = '';
+  const recentLatencies: number[] = [];
 
   // ── Log rendering ─────────────────────────────────────────────────────────
   function renderLog(): void {
@@ -226,10 +242,32 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     }
   }
 
+  const MAX_LATENCY_SAMPLES = 40;
+
+  function renderLatency(): void {
+    if (recentLatencies.length === 0) {
+      latencyRef.content = 'Latency: — / — / —';
+      return;
+    }
+    const cur = recentLatencies.at(-1)!;
+    const avg = recentLatencies.reduce((s, v) => s + v, 0) / recentLatencies.length;
+    const sorted = [...recentLatencies].sort((a, b) => a - b);
+    const p95idx = Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1);
+    const p95 = sorted[p95idx]!;
+    latencyRef.content = `Latency: ${Math.round(cur)}ms  avg ${Math.round(avg)}ms  p95 ${Math.round(p95)}ms`;
+    latencyRef.fg = avg > 1000 ? C.amber : C.dim;
+  }
+
   function pushEntry(entry: LogEntry): void {
     if (!live) return;
+    requestCount++;
     log.unshift(entry);
     if (log.length > MAX_LOG) log.pop();
+    if (entry.latencyMs != null) {
+      recentLatencies.push(entry.latencyMs);
+      if (recentLatencies.length > MAX_LATENCY_SAMPLES) recentLatencies.shift();
+      renderLatency();
+    }
     renderLog();
   }
 
@@ -243,6 +281,7 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   const clockTimer = setInterval(() => {
     if (!live) return;
     connClock.content = fmtHms(Date.now() - startedAt);
+    uptimeRef.content = fmtHms(Date.now() - startedAt);
   }, 1000);
 
   renderLog();
@@ -259,6 +298,19 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     for (const s of sockets.values()) s.destroy();
     sockets.clear();
     try { ws?.close(); } catch { /* ignore */ }
+    const endedAt = Date.now();
+    saveSession({
+      id:         sessionId,
+      type:       setup.protocol === 'http' ? 'tunnel-http' : 'tunnel-tcp',
+      url:        tunnelPublicUrl,
+      target:     [setup.target, setup.port].filter(Boolean).join(':'),
+      startedAt,
+      endedAt,
+      durationMs: endedAt - startedAt,
+      outcome:    'user-quit',
+      spendUsd:   0,
+      requests:   requestCount,
+    });
     renderer.destroy();
   };
 
@@ -304,6 +356,7 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     if (!live) return;
 
     const publicUrl = registration.public_url ?? registration.tcp_addr ?? '';
+    tunnelPublicUrl = publicUrl;
 
     ws = new WebSocket(registration.connect_url, { perMessageDeflate: false });
     ws.binaryType = 'nodebuffer';

@@ -149,7 +149,7 @@ export async function buildTUI(
     flexGrow:        1,
     flexShrink:      1,
     borderStyle:     'rounded',
-    borderColor:     C.sky,
+    borderColor:     C.line2,
     title:           ' Tunnel ',
     padding:         1,
     backgroundColor: C.panel,
@@ -190,7 +190,7 @@ export async function buildTUI(
     flexGrow:       1,
     flexShrink:     1,
     borderStyle:    'rounded',
-    borderColor:    C.cyan,
+    borderColor:    C.accent2,
     title:          ' Traffic ',
     padding:        1,
     backgroundColor: C.panel,
@@ -228,7 +228,7 @@ export async function buildTUI(
     width:          '100%',
     flexGrow:       1,
     borderStyle:    'rounded',
-    borderColor:    C.dim,
+    borderColor:    C.line2,
     title:          ' Activity ',
     marginX:        1,
     marginTop:      1,
@@ -336,7 +336,7 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
     const res = await fetch(`${SERVER}/tunnel`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ type }),
+      body:    JSON.stringify({ type, target: targetHost, port: targetPort }),
     });
     if (!res.ok) {
       const body = await res.text();
@@ -551,4 +551,3 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
     process.exit(1);
   });
 }
-

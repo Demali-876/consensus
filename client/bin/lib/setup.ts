@@ -9,6 +9,7 @@ import path                                  from 'path';
 import inquirer                              from 'inquirer';
 import ora                                   from 'ora';
 import chalk                                 from 'chalk';
+import { loadConfig, saveConfig }            from './store.ts';
 
 const PKG_VERSION: string = (
   JSON.parse(fs.readFileSync(path.join(import.meta.dir, '../../package.json'), 'utf8')) as { version: string }
@@ -83,11 +84,9 @@ export function writeToShellProfile(exports: Record<string, string>): string[] {
 // ─── ConsensusSDK ─────────────────────────────────────────────────────────────
 
 export class ConsensusSDK {
-  private configPath:    string;
-  private x402ProxyUrl:  string;
+  private x402ProxyUrl: string;
 
   constructor() {
-    this.configPath   = path.join(process.cwd(), '.consensus-config.json');
     this.x402ProxyUrl = process.env.X402_PROXY_URL
       ?? 'https://consensus.proxy.canister.software:3001';
   }
@@ -95,29 +94,15 @@ export class ConsensusSDK {
   // ── Config I/O ──────────────────────────────────────────────────────────────
 
   loadConfig(): WalletConfig | null {
-    try {
-      if (fs.existsSync(this.configPath))
-        return JSON.parse(fs.readFileSync(this.configPath, 'utf8')) as WalletConfig;
-    } catch (err) {
-      console.error(chalk.red('Error reading config:'), (err as Error).message);
-    }
-    return null;
+    const cfg = loadConfig();
+    if (!cfg.addresses && !cfg.api_key && !cfg.wallet_name) return null;
+    return cfg as WalletConfig;
   }
 
   saveConfig(config: WalletConfig): void {
     try {
-      fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2));
+      saveConfig(config);
       console.log(chalk.green('✓ Configuration saved'));
-
-      // Keep config out of version control
-      const gitignorePath = path.join(path.resolve(import.meta.dir, '../../'), '.gitignore');
-      const ignoreEntry   = path.basename(this.configPath);
-      let gitignore = '';
-      if (fs.existsSync(gitignorePath)) gitignore = fs.readFileSync(gitignorePath, 'utf8');
-      if (!gitignore.split('\n').includes(ignoreEntry)) {
-        fs.appendFileSync(gitignorePath, `\n# Ignore consensus config\n${ignoreEntry}\n`);
-        console.log(chalk.yellow('⚠️  .config hidden from git'));
-      }
     } catch (err) {
       throw new Error(`Failed to save config: ${(err as Error).message}`);
     }

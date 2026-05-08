@@ -5,7 +5,7 @@
  * so implementation can be dropped in here once the endpoint is available.
  */
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
-import { C } from '../theme';
+import { C } from '../../../theme';
 
 const TITLE = 'REVERSE-PROXY';
 

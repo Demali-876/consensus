@@ -25,7 +25,7 @@ export async function provisionNodeDNS(subdomain, ipv6, ipv4 = null) {
   const nodeSubdomain = subdomain.split('.')[0];
 
   log(`Provisioning DNS for ${subdomain}`);
-  log(`   IPv6: ${ipv6}`);
+  if (ipv6) log(`   IPv6: ${ipv6}`);
   if (ipv4) log(`   IPv4: ${ipv4}`);
 
   try {
@@ -33,12 +33,14 @@ export async function provisionNodeDNS(subdomain, ipv6, ipv4 = null) {
 
     const newRecords = [];
 
-    newRecords.push({
-      hostname: `${nodeSubdomain}.consensus`,
-      type: 'AAAA',
-      address: ipv6,
-      ttl: 300,
-    });
+    if (ipv6) {
+      newRecords.push({
+        hostname: `${nodeSubdomain}.consensus`,
+        type: 'AAAA',
+        address: ipv6,
+        ttl: 300,
+      });
+    }
 
     if (ipv4) {
       newRecords.push({
@@ -120,12 +122,14 @@ export async function updateNodeDNS(subdomain, ipv6, ipv4 = null) {
 
   const newRecords = [];
 
-  newRecords.push({
-    hostname: `${nodeSubdomain}.consensus`,
-    type: 'AAAA',
-    address: ipv6,
-    ttl: 300,
-  });
+  if (ipv6) {
+    newRecords.push({
+      hostname: `${nodeSubdomain}.consensus`,
+      type: 'AAAA',
+      address: ipv6,
+      ttl: 300,
+    });
+  }
 
   if (ipv4) {
     newRecords.push({

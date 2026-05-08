@@ -11,6 +11,7 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "allowArbitraryExtensions": true,
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "declaration": false,
     "types": ["node"]

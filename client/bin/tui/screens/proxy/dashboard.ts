@@ -3,6 +3,8 @@
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { launchManagedApp, probeManagedApp, probeManagedAppUntilReady, stopManagedApp } from '../../../lib/app-manager.js';
 import { writeTraceLog } from '../../../lib/crash-log';
+import { isFreeMode }   from '../../../lib/server-config';
+import { saveSession, recordSpend } from '../../../lib/store.ts';
 import { C } from '../../../theme';
 import type { WorkerEntry } from './hub.js';
 
@@ -63,6 +65,7 @@ export async function showProxyDashboard(
   onStop?: () => void,
 ): Promise<'back'> {
   const isForward = entry.handle.type === 'forward';
+  const freeMode  = await isFreeMode();
   const title = isForward ? 'FORWARD PROXY' : 'REVERSE PROXY';
   writeTraceLog('proxyDashboard.enter', { type: entry.handle.type, port: entry.handle.port, label: entry.label });
 
@@ -131,8 +134,8 @@ export async function showProxyDashboard(
   const requestsRef    = addText('');
   const cacheRef       = addText('');
   const throughputRef  = addText('');
-  const spendRef       = addText('');
-  const budgetRef      = addText('');
+  const spendRef       = freeMode ? null : addText('');
+  const budgetRef      = freeMode ? null : addText('');
 
   addText(' ');
   addText('RECENT CHECKS  ' + '─'.repeat(38), C.dim);
@@ -156,6 +159,7 @@ export async function showProxyDashboard(
   let prevStats = entry.handle.stats();
   let prevTime = Date.now();
   let actionBusy = false;
+  const sessionId = crypto.randomUUID();
 
   const ensureManagedAppRunning = async (): Promise<void> => {
     if (!entry.managedApp) return;
@@ -238,17 +242,21 @@ export async function showProxyDashboard(
       ? '  cache hits     n/a      reverse only'
       : `  cache hits     ${String(cacheHits).padEnd(8)} ${String(hitPct).padStart(3)}%`;
     throughputRef.content = `  throughput    ↑ ${fmtBytes(stats.bytesSent).padEnd(10)} ${fmtRate(sentRate)}   ↓ ${fmtBytes(stats.bytesRecv).padEnd(10)} ${fmtRate(recvRate)}`;
-    spendRef.content = isForward
-      ? `  spend         $${spend.toFixed(6).padEnd(10)} ${fmtLatency(stats.currentLatencyMs)} current`
-      : `  spend         $${spend.toFixed(6).padEnd(10)} cache-aware reverse mode`;
+    if (spendRef) {
+      spendRef.content = isForward
+        ? `  spend         $${spend.toFixed(6).padEnd(10)} ${fmtLatency(stats.currentLatencyMs)} current`
+        : `  spend         $${spend.toFixed(6).padEnd(10)} cache-aware reverse mode`;
+    }
 
-    if (entry.budget != null) {
-      const pct = Math.min(spend / entry.budget, 1);
-      budgetRef.content = `  budget        ${budgetBar(spend, entry.budget)}  ${Math.round(pct * 100)}%   $${Math.max(entry.budget - spend, 0).toFixed(6)} left`;
-      budgetRef.fg = pct > 0.8 ? C.red : pct > 0.5 ? C.amber : C.slate;
-    } else {
-      budgetRef.content = '  budget        unlimited';
-      budgetRef.fg = C.dim;
+    if (budgetRef) {
+      if (entry.budget != null) {
+        const pct = Math.min(spend / entry.budget, 1);
+        budgetRef.content = `  budget        ${budgetBar(spend, entry.budget)}  ${Math.round(pct * 100)}%   $${Math.max(entry.budget - spend, 0).toFixed(6)} left`;
+        budgetRef.fg = pct > 0.8 ? C.red : pct > 0.5 ? C.amber : C.slate;
+      } else {
+        budgetRef.content = '  budget        unlimited';
+        budgetRef.fg = C.dim;
+      }
     }
 
     checksRef.content = `  ${outcomeStrip(stats.recentOutcomes ?? [])}`;
@@ -347,6 +355,37 @@ export async function showProxyDashboard(
       if (key.name === 's' || key.name === 'S') {
         writeTraceLog('proxyDashboard.key', { key: key.name, action: 'stop', port: entry.handle.port });
         clearInterval(ticker);
+        const finalStats = entry.handle.stats();
+        const endedAt    = Date.now();
+        const spendUsd   = finalStats.spend ?? 0;
+        const exhausted  = isForward && entry.budget != null && spendUsd >= entry.budget * 0.99;
+        saveSession({
+          id:         sessionId,
+          type:       isForward ? 'http-proxy' : 'reverse-proxy',
+          label:      entry.label,
+          url:        `http://localhost:${entry.handle.port}`,
+          target:     entry.appPort ? `localhost:${entry.appPort}` : '',
+          startedAt:  endedAt - finalStats.uptime,
+          endedAt,
+          durationMs: finalStats.uptime,
+          outcome:    exhausted ? 'budget-exhausted' : 'user-quit',
+          spendUsd,
+          requests:   finalStats.requests,
+          bytesIn:    finalStats.bytesRecv,
+          bytesOut:   finalStats.bytesSent,
+          region:     entry.nodeRegion,
+          nodeDomain: entry.nodeDomain,
+          network:    entry.preferNetwork,
+        });
+        if (spendUsd > 0) {
+          recordSpend({
+            sessionId,
+            date:      new Date().toISOString().slice(0, 10),
+            type:      'proxy',
+            amountUsd: spendUsd,
+            network:   entry.preferNetwork,
+          });
+        }
         renderer.destroy();
         if (entry.managedApp?.process) await stopManagedApp(entry.managedApp);
         await entry.handle.stop();

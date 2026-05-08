@@ -18,7 +18,11 @@ import { registerWhitepaperSignup } from './data/whitepaperSignup.js';
 import { registerWebSocket } from './features/websocket/wss.ts';
 import { registerNodes } from './features/nodes/orchestrator.js';
 import { registerTunnel } from './features/tunnel/tunnel.ts';
+import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
+import { registerUpdater } from './updater.ts';
+import { assertEmailVerificationEnv } from './utils/email-verification.ts';
+import { log } from './utils/log.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,12 +40,13 @@ const EVM_PAY_TO = process.env.EVM_PAY_TO;
 const SOLANA_PAY_TO = process.env.SOLANA_PAY_TO;
 const ICP_PAY_TO = process.env.ICP_PAY_TO;
 
-if (!process.env.FACILITATOR_URL) {
-  throw new Error('FACILITATOR_URL is missing from .env');
+const FREE_MODE = process.env.FREE_MODE === 'true';
+
+if (!FREE_MODE) {
+  if (!process.env.FACILITATOR_URL) throw new Error('FACILITATOR_URL is missing from .env');
+  if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO');
 }
-if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) {
-  throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO');
-}
+assertEmailVerificationEnv();
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 const x402Server = new x402ResourceServer(facilitatorClient)
@@ -50,7 +55,6 @@ const x402Server = new x402ResourceServer(facilitatorClient)
   .register('icp:1:xafvr-biaaa-aaaai-aql5q-cai', new ExactIcpScheme());
 
 const router = new Router();
-const proxy = new ConsensusProxy({ router: router });
 
 const app = express();
 app.set('trust proxy', 1);
@@ -59,8 +63,11 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 registerWhitepaperSignup(app);
+registerUpdater(app, { adminKey: process.env.ADMIN_KEY });
 
 const server = http.createServer(app);
+const nodeTunnelStats = registerNodeTunnel(app, server, { router });
+const tunnelStats = registerTunnel(app, server, { router, nodeTunnel: nodeTunnelStats });
 const wsStats = registerWebSocket(
   app,
   server,
@@ -70,7 +77,8 @@ const wsStats = registerWebSocket(
     SOLANA_PAY_TO,
     ICP_PAY_TO,
   },
-  router
+  router,
+  nodeTunnelStats
 );
 
 const nodeStats = registerNodes(app, server, x402Server, {
@@ -78,7 +86,7 @@ const nodeStats = registerNodes(app, server, x402Server, {
   SOLANA_PAY_TO,
   ICP_PAY_TO,
 });
-const tunnelStats = registerTunnel(app, server);
+const proxy = new ConsensusProxy({ router: router, nodeTunnel: nodeTunnelStats });
 
 app.get('/', publicLimiter, (req, res) => {
   res.json({
@@ -94,22 +102,31 @@ app.get('/', publicLimiter, (req, res) => {
   });
 });
 
-app.get('/health', publicLimiter, (req, res) => {
-  const stats = proxy.getStats();
-  const ws = wsStats.getStats();
-  const nodes = nodeStats.getStats();
-  const tunnels = tunnelStats.getStats();
+app.get('/config', publicLimiter, (_req, res) => {
+  res.json({ free_mode: FREE_MODE });
+});
+
+app.get('/health', publicLimiter, (_req, res) => {
+  const proxyStats  = proxy.getStats();
+  const ws          = wsStats.getStats();
+  const tunnels     = tunnelStats.getStats();
+  const routerStats = ws.router_stats;
+
   res.json({
-    status: 'healthy',
+    status:    'healthy',
     timestamp: new Date().toISOString(),
     proxy: {
-      cache_size: stats.cache_size,
-      total_requests: stats.total_requests,
-      cache_hits: stats.cache_hits,
+      cache_size:     proxyStats.cache_size,
+      total_requests: proxyStats.total_requests,
+      cache_hits:     proxyStats.cache_hits,
     },
     websocket: ws,
-    nodes: nodes,
     tunnels,
+    node_tunnel: nodeTunnelStats.getStats(),
+    network: {
+      avg_http_latency_ms: routerStats.avg_http_latency_ms,
+      avg_ws_latency_ms:   routerStats.avg_ws_latency_ms,
+    },
   });
 });
 
@@ -149,37 +166,24 @@ app.post('/proxy', async (req, res, next) => {
   next();
 });
 
-app.use(
-  paymentMiddleware(
-    {
-      'POST /proxy': {
-        accepts: [
-          {
-            scheme: 'exact',
-            price: '$0.001',
-            network: 'eip155:84532',
-            payTo: EVM_PAY_TO,
-          },
-          {
-            scheme: 'exact',
-            price: '$0.001',
-            network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
-            payTo: SOLANA_PAY_TO,
-          },
-          {
-            scheme: 'exact',
-            price: '100000',
-            network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',
-            payTo: ICP_PAY_TO,
-          },
-        ],
-        description: 'API Deduplication Service',
-        mimeType: 'application/json',
+if (!FREE_MODE) {
+  app.use(
+    paymentMiddleware(
+      {
+        'POST /proxy': {
+          accepts: [
+            { scheme: 'exact', price: '$0.001', network: 'eip155:84532', payTo: EVM_PAY_TO },
+            { scheme: 'exact', price: '$0.001', network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', payTo: SOLANA_PAY_TO },
+            { scheme: 'exact', price: '100000', network: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai', payTo: ICP_PAY_TO },
+          ],
+          description: 'API Deduplication Service',
+          mimeType: 'application/json',
+        },
       },
-    },
-    x402Server
-  )
-);
+      x402Server
+    )
+  );
+}
 
 app.post('/proxy', async (req, res) => {
   const startTime = Date.now();
@@ -240,16 +244,23 @@ app.post('/proxy', async (req, res) => {
 let observerInterval;
 
 server.listen(PORT, '::', () => {
-  console.log(`Consensus x402 Proxy Service`);
-  console.log(`URL: http://consensus.canister.software:8888`);
+  log.info('server', 'listening', {
+    port: PORT,
+    bind: '::',
+    free_mode: FREE_MODE,
+    auto_updates: process.env.CONSENSUS_NODE_AUTO_UPDATES === 'true',
+  });
   observerInterval = startObservationScheduler();
   upsertServerNode();
 });
 
 ['SIGTERM', 'SIGINT'].forEach((signal) => {
   process.on(signal, () => {
-    console.log(`\n${signal} received, shutting down...`);
+    log.warn('server', 'shutdown-signal', { signal });
     clearInterval(observerInterval);
-    server.close(() => process.exit(0));
+    server.close(() => {
+      log.warn('server', 'shutdown-complete', { signal });
+      process.exit(0);
+    });
   });
 });

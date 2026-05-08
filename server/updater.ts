@@ -1,194 +1,254 @@
 import crypto from "crypto";
 import type { Express, Request, Response } from "express";
 import NodeStore from "./data/node_store.js";
+import { log } from "./utils/log.ts";
 
-interface ManifestAsset {
+interface NodeReleaseManifest {
+  product: "consensus-node";
+  version: string;
   platform: string;
-  url: string;
-  sha256: string;
+  commit: string;
+  routes_hash: string;
+  tarball_sha256?: string;
+  download_url?: string;
+  signature?: string;
+  signing_key_id?: string;
 }
 
-interface Manifest {
+interface IntegrityPayload {
+  product: "consensus-node";
   version: string;
-  released_at: string;
-  github_release_url: string;
-  assets: ManifestAsset[];
-  signature?: string;
+  runtime: "bun";
+  platform: string;
+  node_public_key_pem: string;
+  manifest: NodeReleaseManifest;
+  timestamp: number;
+  nonce: string;
+  signature: string;
 }
 
 interface UpdaterConfig {
   adminKey?: string;
 }
 
-/**
- * Register updater endpoints on the Express app.
- */
-export function registerUpdater(app: Express, config: UpdaterConfig): void {
-  const { adminKey } = config;
+export function registerUpdater(app: Express, config: UpdaterConfig = {}): void {
+  log.info("updater", "registered", { admin_key_configured: Boolean(config.adminKey) });
 
-  /**
-   * GET /update/latest
-   * Returns the currently required version manifest (no auth).
-   */
-  app.get("/update/latest", (req: Request, res: Response) => {
+  app.get("/update/latest", (_req: Request, res: Response) => {
     try {
       const required = NodeStore.getRequiredManifest();
-
       if (!required) {
+        log.warn("updater", "latest-missing", {});
         return res.status(404).json({ error: "No required version set" });
       }
-
+      log.info("updater", "latest-served", {
+        version: required.version,
+        required: required.required,
+        manifest_version: required.manifest?.version,
+        platform: required.manifest?.platform,
+        commit: required.manifest?.commit,
+      });
       res.json(required.manifest);
     } catch (error: any) {
-      console.error("Get latest update error:", error);
+      log.error("updater", "latest-failed", { message: error.message });
       res.status(500).json({ error: "Failed to get update info", message: error.message });
     }
   });
 
-  /**
-   * POST /node/verify-integrity/:node_id
-   * Node submits its version, platform, and build_digest signed with its Ed25519 key.
-   * Server verifies signature, checks digest against manifest, marks node verified/unverified.
-   */
   app.post("/node/verify-integrity/:node_id", (req: Request, res: Response) => {
     try {
       const { node_id } = req.params;
-      const { version, platform, build_digest, timestamp, nonce, signature } = req.body;
+      const payload = req.body as IntegrityPayload;
 
-      if (!version || !platform || !build_digest || !timestamp || !nonce || !signature) {
-        return res.status(400).json({
-          error: "Missing required fields",
-          required: ["version", "platform", "build_digest", "timestamp", "nonce", "signature"],
+      const validation = validateIntegrityPayload(payload);
+      if (validation) {
+        log.warn("updater", "integrity-rejected", {
+          node_id,
+          reason: validation.error,
+          missing: "missing" in validation ? validation.missing : undefined,
         });
+        return res.status(400).json(validation);
       }
 
       const node = NodeStore.getNode(node_id);
       if (!node) {
+        log.warn("updater", "integrity-rejected", { node_id, reason: "node not found" });
         return res.status(404).json({ error: "Node not found" });
       }
-
-      // Verify Ed25519 signature
-      const payload = JSON.stringify(
-        { version, platform, build_digest, timestamp, nonce },
-        ["version", "platform", "build_digest", "timestamp", "nonce"]
-      );
-      const payloadBuffer = Buffer.from(payload, "utf8");
-      const signatureBuffer = Buffer.from(signature, "base64");
-
-      let pubkey: crypto.KeyObject;
-      try {
-        pubkey = crypto.createPublicKey({
-          key: node.pubkey,
-          format: "der",
-          type: "spki",
-        });
-      } catch (keyError: any) {
-        return res.status(400).json({ error: "Invalid node public key", message: keyError.message });
+      if (!node.pubkey_ed25519) {
+        log.warn("updater", "integrity-rejected", { node_id, reason: "missing ed25519 key" });
+        return res.status(400).json({ error: "Node has no Ed25519 key" });
       }
 
-      const valid = crypto.verify(null, payloadBuffer, pubkey, signatureBuffer);
-      if (!valid) {
-        return res.status(403).json({ error: "Invalid signature" });
+      log.info("updater", "integrity-received", {
+        node_id,
+        version: payload.manifest.version,
+        platform: payload.manifest.platform,
+        commit: payload.manifest.commit,
+        routes_hash: payload.manifest.routes_hash,
+        tarball_sha256: payload.manifest.tarball_sha256 ?? null,
+      });
+
+      const nodeKey = crypto.createPublicKey({ key: node.pubkey_ed25519, format: "der", type: "spki" });
+      const presentedKey = crypto.createPublicKey(payload.node_public_key_pem).export({ format: "der", type: "spki" });
+      const registeredKey = nodeKey.export({ format: "der", type: "spki" });
+      if (presentedKey.length !== registeredKey.length || !crypto.timingSafeEqual(Buffer.from(presentedKey), Buffer.from(registeredKey))) {
+        log.warn("updater", "integrity-rejected", { node_id, reason: "public key mismatch" });
+        return res.status(403).json({ error: "Integrity public key does not match registered node key" });
       }
 
-      // Replay protection: reject timestamps older than 5 minutes
       const nowSec = Math.floor(Date.now() / 1000);
-      if (Math.abs(nowSec - timestamp) > 300) {
+      if (Math.abs(nowSec - payload.timestamp) > 300) {
+        log.warn("updater", "integrity-rejected", {
+          node_id,
+          reason: "timestamp outside tolerance",
+          timestamp: payload.timestamp,
+          now: nowSec,
+        });
         return res.status(400).json({ error: "Timestamp too old or in the future" });
       }
 
-      // Load manifest for the submitted version
-      const manifestEntry = NodeStore.getManifestByVersion(version);
-      if (!manifestEntry) {
-        NodeStore.clearNodeVerification(node_id);
-        return res.status(400).json({ error: "Unknown version", version });
+      const signaturePayload = canonicalJson({
+        product: payload.product,
+        version: payload.version,
+        runtime: payload.runtime,
+        platform: payload.platform,
+        node_public_key_pem: payload.node_public_key_pem,
+        manifest: payload.manifest,
+        timestamp: payload.timestamp,
+        nonce: payload.nonce,
+      });
+
+      const valid = crypto.verify(
+        null,
+        Buffer.from(signaturePayload, "utf8"),
+        nodeKey,
+        Buffer.from(payload.signature, "base64"),
+      );
+      if (!valid) {
+        log.warn("updater", "integrity-rejected", { node_id, reason: "invalid signature" });
+        return res.status(403).json({ error: "Invalid integrity signature" });
       }
 
-      const manifest = manifestEntry.manifest as Manifest;
-      const assets: ManifestAsset[] = manifest.assets || [];
-      const matchingAsset = assets.find(
-        (a: ManifestAsset) => a.platform === platform && a.sha256 === build_digest
-      );
-
-      if (!matchingAsset) {
+      const required = NodeStore.getRequiredManifest();
+      if (required && !manifestMatchesRequired(payload.manifest, required.manifest)) {
         NodeStore.clearNodeVerification(node_id);
+        log.warn("updater", "integrity-mismatch", {
+          node_id,
+          observed_version: payload.manifest.version,
+          observed_commit: payload.manifest.commit,
+          required_version: required.manifest.version,
+          required_commit: required.manifest.commit,
+        });
         return res.json({
           verified: false,
-          reason: "Build digest does not match any known asset for this platform",
-          expected_platforms: assets.map((a: ManifestAsset) => a.platform),
+          reason: "Node manifest does not match required manifest",
+          required: required.manifest,
+          observed: payload.manifest,
         });
       }
 
-      // Mark node as verified
-      NodeStore.updateNodeVerification(node_id, true, version, build_digest);
+      NodeStore.updateNodeVerification(
+        node_id,
+        true,
+        payload.manifest.version,
+        payload.manifest.tarball_sha256 ?? payload.manifest.routes_hash,
+      );
 
-      console.log(`[Updater] Node ${node_id} verified: v${version} (${platform})`);
-
+      log.info("updater", "integrity-verified", {
+        node_id,
+        version: payload.manifest.version,
+        platform: payload.manifest.platform,
+        commit: payload.manifest.commit,
+        routes_hash: payload.manifest.routes_hash,
+      });
       res.json({
         verified: true,
-        version,
-        platform,
-        build_digest,
+        node_id,
+        version: payload.manifest.version,
+        platform: payload.manifest.platform,
+        commit: payload.manifest.commit,
+        routes_hash: payload.manifest.routes_hash,
       });
     } catch (error: any) {
-      console.error("Verify integrity error:", error);
+      log.error("updater", "integrity-failed", { message: error.message });
       res.status(500).json({ error: "Integrity verification failed", message: error.message });
     }
   });
 
-  /**
-   * POST /admin/manifest
-   * Admin uploads a signed manifest. Protected by x-admin-key header.
-   * Body: { manifest: {...}, signature: "base64...", required: true/false }
-   */
   app.post("/admin/manifest", (req: Request, res: Response) => {
     try {
-      if (!adminKey) {
+      if (!config.adminKey) {
+        log.error("updater", "manifest-rejected", { reason: "admin key not configured" });
         return res.status(503).json({ error: "Admin key not configured" });
       }
-
-      const providedKey = req.headers["x-admin-key"] as string | undefined;
-      if (providedKey !== adminKey) {
+      if (req.headers["x-admin-key"] !== config.adminKey) {
+        log.warn("updater", "manifest-rejected", { reason: "invalid admin key" });
         return res.status(403).json({ error: "Invalid admin key" });
       }
 
-      const { manifest, signature, required } = req.body;
-
-      if (!manifest || !signature) {
-        return res.status(400).json({
-          error: "Missing required fields",
-          required: ["manifest", "signature"],
-        });
+      const { manifest, required } = req.body as { manifest?: NodeReleaseManifest; required?: boolean };
+      if (!manifest?.version) {
+        log.warn("updater", "manifest-rejected", { reason: "manifest.version is required" });
+        return res.status(400).json({ error: "manifest.version is required" });
       }
-
-      if (!manifest.version || !manifest.assets || !Array.isArray(manifest.assets)) {
-        return res.status(400).json({
-          error: "Invalid manifest: must include version and assets array",
-        });
-      }
-
-      // Store the manifest with its signature
-      const fullManifest: Manifest = { ...manifest, signature };
-      const github_url: string | null = manifest.github_release_url || null;
 
       NodeStore.upsertManifest(
         manifest.version,
-        fullManifest,
-        github_url,
-        required !== false
+        manifest,
+        null,
+        required !== false,
       );
 
-      console.log(`[Updater] Manifest stored: v${manifest.version} (required: ${required !== false})`);
-
+      log.info("updater", "manifest-stored", {
+        version: manifest.version,
+        platform: manifest.platform,
+        commit: manifest.commit,
+        routes_hash: manifest.routes_hash,
+        tarball_sha256: manifest.tarball_sha256 ?? null,
+        required: required !== false,
+      });
       res.json({
         success: true,
         version: manifest.version,
         required: required !== false,
-        assets: manifest.assets.length,
       });
     } catch (error: any) {
-      console.error("Admin manifest error:", error);
+      log.error("updater", "manifest-failed", { message: error.message });
       res.status(500).json({ error: "Failed to store manifest", message: error.message });
     }
   });
+}
+
+function validateIntegrityPayload(payload: Partial<IntegrityPayload> | null | undefined) {
+  const required = ["product", "version", "runtime", "platform", "node_public_key_pem", "manifest", "timestamp", "nonce", "signature"];
+  if (!payload || typeof payload !== "object") return { error: "Integrity payload must be an object" };
+  const missing = required.filter((key) => (payload as Record<string, unknown>)[key] == null);
+  if (missing.length > 0) return { error: "Missing required fields", required, missing };
+  if (payload.product !== "consensus-node") return { error: "Invalid product" };
+  if (payload.runtime !== "bun") return { error: "Invalid runtime" };
+  if (payload.manifest?.product !== "consensus-node") return { error: "Invalid manifest product" };
+  return null;
+}
+
+function manifestMatchesRequired(observed: NodeReleaseManifest, required: NodeReleaseManifest): boolean {
+  return observed.version === required.version &&
+    observed.platform === required.platform &&
+    observed.commit === required.commit &&
+    observed.routes_hash === required.routes_hash &&
+    (required.tarball_sha256 == null || observed.tarball_sha256 === required.tarball_sha256);
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortValue(value));
+}
+
+function sortValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortValue);
+  if (!value || typeof value !== "object") return value;
+
+  const input = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of Object.keys(input).sort()) output[key] = sortValue(input[key]);
+  return output;
 }

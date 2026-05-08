@@ -74,6 +74,7 @@ export interface DepositIpOptions {
 
 export interface DetectAndDepositOptions extends DepositIpOptions {
   reverseDns?: boolean;
+  history?: DeviceIpObservation[];
   historyPath?: string;
 }
 
@@ -269,6 +270,22 @@ export function depositIp(
 
   if (options.persist !== false) savePool(store, options.poolPath);
   return { deposited, rejected: false, clue, store };
+}
+
+export function depositObservation(
+  observation: DeviceIpObservation,
+  options: DetectAndDepositOptions = {},
+): { deposited: string[]; rejected: boolean; clue: DeviceIpClue; store: PoolStore; history: DeviceIpObservation[] } {
+  const history = options.historyPath
+    ? loadPoolHistory('detector-test', options.historyPath)
+    : options.history ?? [];
+  const result = depositIp(
+    'detector-test',
+    observation,
+    history,
+    options,
+  );
+  return { ...result, history: dedupeAndTrimHistory([...history, observation]) };
 }
 
 // ─── Rent ─────────────────────────────────────────────────────────────────────

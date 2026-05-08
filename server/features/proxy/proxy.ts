@@ -21,11 +21,26 @@ type Headers     = Record<string, string>;
 interface NodeRecord {
   id:     string;
   region: string;
-  domain: string;
+  domain?: string | null;
 }
 
 export interface ProxyConfig {
   router?: Router;
+  nodeTunnel?: {
+    requestProxy(nodeId: string, input: {
+      target_url: string;
+      method: string;
+      headers?: Headers;
+      body?: string;
+      body_encoding?: 'utf8' | 'base64';
+    }): Promise<{
+      status: number;
+      status_text?: string;
+      headers?: Record<string, string>;
+      body?: string;
+      body_encoding?: 'utf8' | 'base64';
+    }>;
+  };
 }
 
 export interface ProxyResponse {
@@ -141,6 +156,13 @@ function computeBodyHash(body: RequestBody): string {
   return sha256Hex(stableStringify(body));
 }
 
+function encodeRequestBody(body: RequestBody): string | undefined {
+  if (body === undefined || body === null) return undefined;
+  if (Buffer.isBuffer(body)) return body.toString('utf8');
+  if (typeof body === 'string') return body;
+  return JSON.stringify(body);
+}
+
 function getScope(headers: Headers): string {
   for (const k in headers) {
     if (k.toLowerCase() === 'x-api-key') return sha256Hex(headers[k]!);
@@ -168,6 +190,7 @@ export default class ConsensusProxy {
   private paidKeys:        Map<string, number>;
   private stats:           { total_requests: number; cache_hits: number; cache_misses: number };
   private router:          Router;
+  private nodeTunnel?:     ProxyConfig['nodeTunnel'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
 
   constructor(config: ProxyConfig = {}) {
@@ -182,6 +205,7 @@ export default class ConsensusProxy {
     this.paidKeys        = new Map();
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
+    this.nodeTunnel      = config.nodeTunnel;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -243,7 +267,7 @@ export default class ConsensusProxy {
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
-    if (node && typeof node.id === 'string' && typeof node.domain === 'string') {
+    if (node && typeof node.id === 'string') {
       return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl);
     }
 
@@ -268,6 +292,23 @@ export default class ConsensusProxy {
       const forwardHeaders: Headers = {};
       for (const [k, v] of Object.entries(headers)) {
         if (!STRIP_REQUEST_HEADERS.has(k.toLowerCase())) forwardHeaders[k] = v;
+      }
+
+      if (this.nodeTunnel) {
+        try {
+          const result = await this.executeViaTunnel(node, target_url, method, forwardHeaders, body);
+          if (result.status >= 200 && result.status < 300) {
+            this.cache.set(dedupeKey, result, ttl);
+          }
+          return { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id };
+        } catch (error) {
+          console.error(`[Node Tunnel Error] ${node.id}:`, (error as Error).message);
+        }
+      }
+
+      if (!node.domain) {
+        console.log('[Fallback to Self] Selected node has no domain/control tunnel');
+        return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
       }
 
       const response = await axios({
@@ -296,6 +337,37 @@ export default class ConsensusProxy {
     } finally {
       this.router.decrementRequest(node.id);
     }
+  }
+
+  private async executeViaTunnel(
+    node:       NodeRecord,
+    target_url: string,
+    method:     string,
+    headers:    Headers,
+    body:       RequestBody,
+  ): Promise<ProxyResponse> {
+    const result = await this.nodeTunnel!.requestProxy(node.id, {
+      target_url,
+      method,
+      headers,
+      body: encodeRequestBody(body),
+      body_encoding: 'utf8',
+    });
+
+    const text = result.body_encoding === 'base64'
+      ? Buffer.from(result.body ?? '', 'base64').toString('utf8')
+      : result.body ?? '';
+
+    let data: unknown;
+    try { data = JSON.parse(text); } catch { data = text; }
+
+    return {
+      status:     result.status,
+      statusText: result.status_text ?? '',
+      headers:    result.headers ?? {},
+      data,
+      timestamp:  Date.now(),
+    };
   }
 
   private async executeDirect(
