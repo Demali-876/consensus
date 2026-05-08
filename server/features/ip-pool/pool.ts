@@ -12,24 +12,15 @@ import {
   type IpFamily,
 } from './detector.ts';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
 const DEFAULT_POOL_PATH =
   process.env.IP_POOL_PATH ?? path.resolve(process.cwd(), 'ip-pool.json');
-
 const DEFAULT_HISTORY_PATH =
   process.env.IP_POOL_HISTORY_PATH ?? path.resolve(process.cwd(), 'ip-pool-history.json');
-
-/** How many users may hold a rental on the same IP at once. */
 const DEFAULT_MAX_RENTERS = 10;
-
-/** staticConfidence must be at or above this before an IP enters the pool. */
 const STATIC_CONFIDENCE_THRESHOLD = 0.9;
-
-/** Default rental duration when no TTL is supplied (1 hour). */
 const DEFAULT_RENTAL_TTL_MS = 60 * 60 * 1000;
+export const EVICTION_STRIKE_THRESHOLD = 3;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 
 export type PoolEntryStatus = 'available' | 'at_capacity' | 'removed';
 
@@ -52,14 +43,18 @@ export interface PoolEntry {
   maxRenters: number;
   /** All currently-active (non-expired) rentals. */
   rentals: RentalRecord[];
+  /**
+   * Number of consecutive observation cycles where the node's heartbeat was
+   * stale. Resets to 0 on any healthy observation. Eviction fires once this
+   * reaches EVICTION_STRIKE_THRESHOLD.
+   */
+  consecutiveMisses: number;
 }
 
 export interface PoolStore {
   /** Entries keyed by IP address string. */
   entries: Record<string, PoolEntry>;
 }
-
-// ─── Option bags ──────────────────────────────────────────────────────────────
 
 export interface DepositIpOptions {
   /** Override the default max-renters cap for this IP. */
@@ -74,7 +69,6 @@ export interface DepositIpOptions {
 
 export interface DetectAndDepositOptions extends DepositIpOptions {
   reverseDns?: boolean;
-  history?: DeviceIpObservation[];
   historyPath?: string;
 }
 
@@ -99,6 +93,13 @@ export interface RemoveIpOptions {
   persist?: boolean;
 }
 
+export interface StrikeIpOptions {
+  poolPath?: string;
+  persist?: boolean;
+  /** Override the threshold at which a strike triggers eviction (default: EVICTION_STRIKE_THRESHOLD). */
+  evictionThreshold?: number;
+}
+
 export interface PoolStats {
   /** Active entries (not removed). */
   total: number;
@@ -107,8 +108,6 @@ export interface PoolStats {
   removed: number;
   activeRentals: number;
 }
-
-// ─── Observation-history persistence (per-node, keyed by nodeId) ─────────────
 
 type HistoryStore = Record<string, DeviceIpObservation[]>;
 
@@ -156,8 +155,6 @@ export function savePoolHistory(
   return normalized;
 }
 
-// ─── Pool-store persistence ───────────────────────────────────────────────────
-
 export function loadPool(poolPath = DEFAULT_POOL_PATH): PoolStore {
   if (_poolCache && _poolCache.path === poolPath && Date.now() - _poolCache.at < POOL_READ_CACHE_TTL) {
     return _poolCache.value;
@@ -181,8 +178,6 @@ export function savePool(store: PoolStore, poolPath = DEFAULT_POOL_PATH): void {
   );
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
 /** Drop expired rentals from an entry in-place and return it. */
 function purgeExpiredRentals(entry: PoolEntry): PoolEntry {
   const now = Date.now();
@@ -190,10 +185,6 @@ function purgeExpiredRentals(entry: PoolEntry): PoolEntry {
   return entry;
 }
 
-/**
- * Re-derive `status` from the live rental count.
- * A 'removed' entry stays removed regardless.
- */
 function deriveStatus(entry: PoolEntry): PoolEntryStatus {
   if (entry.status === 'removed') return 'removed';
   return entry.rentals.length >= entry.maxRenters ? 'at_capacity' : 'available';
@@ -207,19 +198,6 @@ function refreshStore(store: PoolStore): void {
   }
 }
 
-// ─── Deposit ──────────────────────────────────────────────────────────────────
-
-/**
- * Deposit a node's IPs into the rental pool.
- *
- * The observation is classified using the provided history. If the result
- * reaches `kind: 'static'` with `staticConfidence >= threshold`, both the
- * IPv4 and IPv6 addresses (whichever are present) are added as `available`
- * pool entries. Re-depositing an existing IP refreshes its classification
- * clue without touching active rentals.
- *
- * If the classification does NOT meet the threshold nothing is written.
- */
 export function depositIp(
   nodeId: string,
   observation: DeviceIpObservation,
@@ -259,12 +237,22 @@ export function depositIp(
         depositedAt: now,
         maxRenters: options.maxRenters ?? DEFAULT_MAX_RENTERS,
         rentals: [],
+        consecutiveMisses: 0,
       };
       deposited.push(ip);
     } else {
-      // Already present — refresh classification, leave rentals intact
-      store.entries[ip]!.clue = clue;
-      store.entries[ip]!.status = deriveStatus(store.entries[ip]!);
+      const existing = store.entries[ip]!;
+      if (existing.status === 'removed') {
+        existing.clue = clue;
+        existing.depositedAt = now;
+        existing.consecutiveMisses = 0;
+        existing.status = 'available';
+        deposited.push(ip);
+      } else {
+        existing.clue = clue;
+        existing.consecutiveMisses = 0;
+        existing.status = deriveStatus(existing);
+      }
     }
   }
 
@@ -272,36 +260,6 @@ export function depositIp(
   return { deposited, rejected: false, clue, store };
 }
 
-export function depositObservation(
-  observation: DeviceIpObservation,
-  options: DetectAndDepositOptions = {},
-): { deposited: string[]; rejected: boolean; clue: DeviceIpClue; store: PoolStore; history: DeviceIpObservation[] } {
-  const history = options.historyPath
-    ? loadPoolHistory('detector-test', options.historyPath)
-    : options.history ?? [];
-  const result = depositIp(
-    'detector-test',
-    observation,
-    history,
-    options,
-  );
-  return { ...result, history: dedupeAndTrimHistory([...history, observation]) };
-}
-
-// ─── Rent ─────────────────────────────────────────────────────────────────────
-
-/**
- * Rent an IP from the pool.
- *
- * Multiple users may share the same IP address simultaneously up to
- * `maxRenters`. When all slots are taken the IP is marked `at_capacity` and
- * skipped during auto-assignment.
- *
- * Auto-assignment picks the `available` entry with the fewest active rentals
- * (least-loaded). Pass `preferFamily` to bias toward IPv4 or IPv6.
- *
- * Returns `null` when no suitable IP is currently available.
- */
 export function rentIp(
   userId: string,
   options: RentIpOptions = {},
@@ -350,13 +308,6 @@ export function rentIp(
   return { rental, entry: target, store };
 }
 
-// ─── Release ──────────────────────────────────────────────────────────────────
-
-/**
- * Release a user's rental on a specific IP, freeing a slot for someone else.
- * All rentals belonging to `userId` on that IP are removed (normally there
- * is only one, but this handles duplicates defensively).
- */
 export function releaseIp(
   ip: string,
   userId: string,
@@ -378,14 +329,7 @@ export function releaseIp(
   return { released: freedSlots > 0, freedSlots, store };
 }
 
-// ─── Remove ───────────────────────────────────────────────────────────────────
 
-/**
- * Permanently remove an IP from the pool (e.g. node went offline or IP
- * was reclassified as dynamic). All active rentals are evicted immediately.
- *
- * Only the node that deposited the IP may remove it.
- */
 export function removeIp(
   ip: string,
   nodeId: string,
@@ -400,13 +344,47 @@ export function removeIp(
 
   const evicted = entry.rentals.length;
   entry.rentals = [];
+  entry.consecutiveMisses = 0;
   entry.status = 'removed';
 
   if (options.persist !== false) savePool(store, options.poolPath);
   return { removed: true, evicted, store };
 }
 
-// ─── Queries ──────────────────────────────────────────────────────────────────
+export function strikeIp(
+  ip: string,
+  nodeId: string,
+  options: StrikeIpOptions = {},
+): { shouldEvict: boolean; strikes: number; store: PoolStore } {
+  const threshold = options.evictionThreshold ?? EVICTION_STRIKE_THRESHOLD;
+  const store = loadPool(options.poolPath);
+  const entry = store.entries[ip];
+
+  if (!entry || entry.nodeId !== nodeId || entry.status === 'removed') {
+    return { shouldEvict: false, strikes: 0, store };
+  }
+
+  entry.consecutiveMisses = (entry.consecutiveMisses ?? 0) + 1;
+  const shouldEvict = entry.consecutiveMisses >= threshold;
+
+  if (options.persist !== false) savePool(store, options.poolPath);
+  return { shouldEvict, strikes: entry.consecutiveMisses, store };
+}
+
+export function clearStrikes(
+  ip: string,
+  nodeId: string,
+  options: Pick<StrikeIpOptions, 'poolPath' | 'persist'> = {},
+): void {
+  const store = loadPool(options.poolPath);
+  const entry = store.entries[ip];
+
+  if (!entry || entry.nodeId !== nodeId || (entry.consecutiveMisses ?? 0) === 0) return;
+
+  entry.consecutiveMisses = 0;
+  if (options.persist !== false) savePool(store, options.poolPath);
+}
+
 
 export function listPool(
   filter?: { status?: PoolEntryStatus; nodeId?: string; family?: IpFamily },
@@ -428,22 +406,13 @@ export function getPoolStats(poolPath = DEFAULT_POOL_PATH): PoolStats {
   const stats: PoolStats = { total: 0, available: 0, atCapacity: 0, removed: 0, activeRentals: 0 };
   for (const e of entries) {
     stats.activeRentals += e.rentals.length;
-    if (e.status === 'available')    { stats.total++; stats.available++; }
+    if (e.status === 'available')      { stats.total++; stats.available++; }
     else if (e.status === 'at_capacity') { stats.total++; stats.atCapacity++; }
-    else if (e.status === 'removed') { stats.removed++; }
+    else if (e.status === 'removed')     { stats.removed++; }
   }
   return stats;
 }
 
-// ─── High-level: detect → classify → deposit ──────────────────────────────────
-
-/**
- * Full pipeline: run the detector, save the observation to history, then
- * attempt to deposit the IPs into the rental pool.
- *
- * Useful for nodes that call this on a schedule to keep their classification
- * evidence fresh and eventually promote themselves into the pool.
- */
 export async function detectAndDepositObservation(
   nodeId: string,
   options: DetectAndDepositOptions = {},
@@ -463,7 +432,6 @@ export async function detectAndDepositObservation(
   return { deposited, rejected, clue, observation, history: nextHistory };
 }
 
-// ─── CLI entry-point ──────────────────────────────────────────────────────────
 
 async function runCli(): Promise<void> {
   const nodeId = process.env.NODE_ID ?? 'local';

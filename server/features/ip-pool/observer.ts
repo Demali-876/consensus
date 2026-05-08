@@ -1,21 +1,18 @@
 import crypto from 'node:crypto';
 import NodeStore from '../../data/node_store.js';
 import { observeRemoteIp, resolvePublicIps, type DeviceIpClue, type DeviceIpObservation } from './detector.ts';
-import { loadPoolHistory, savePoolHistory, depositIp, removeIp } from './pool.ts';
+import {
+  loadPoolHistory,
+  savePoolHistory,
+  depositIp,
+  removeIp,
+  strikeIp,
+  clearStrikes,
+  EVICTION_STRIKE_THRESHOLD,
+} from './pool.ts';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-/** Node ID reserved for the main server — never observed by the scheduler. */
 export const SERVER_NODE_ID = 'server';
-
-/**
- * How long (in seconds) a node may go without a heartbeat before its IPs
- * are evicted from the pool. Matches the 5-min heartbeat interval with a
- * 3x grace multiplier.
- */
-const HEARTBEAT_TIMEOUT_S = 15 * 60;
-
-// ─── Types ────────────────────────────────────────────────────────────────────
+const HEARTBEAT_TIMEOUT_S = 2 * 60 * 60;
 
 export interface ObserveNodeResult {
   nodeId: string;
@@ -25,15 +22,6 @@ export interface ObserveNodeResult {
   observation: DeviceIpObservation;
 }
 
-// ─── Core ─────────────────────────────────────────────────────────────────────
-
-/**
- * Observe a single remote node.
- *
- * Performs a reverse DNS lookup on the node's known IPs, appends a new
- * DeviceIpObservation to that node's history, then attempts to deposit the
- * IPs into the rental pool if the static-confidence threshold is met.
- */
 export async function observeNode(
   nodeId: string,
   ipv4: string | null,
@@ -49,15 +37,6 @@ export async function observeNode(
   return { nodeId, deposited, rejected, clue, observation };
 }
 
-/**
- * Observe every active node the server knows about.
- *
- * Nodes that have gone silent past the heartbeat timeout have their IPs
- * evicted from the pool immediately and are skipped for observation.
- *
- * The main server node (SERVER_NODE_ID) is always skipped — it is upserted
- * directly without going through the observation pipeline.
- */
 export async function observeAllNodes(): Promise<ObserveNodeResult[]> {
   const nodes = NodeStore.listNodes().filter(
     (n: any) => n.status === 'active' && n.id !== SERVER_NODE_ID,
@@ -68,7 +47,7 @@ export async function observeAllNodes(): Promise<ObserveNodeResult[]> {
     return [];
   }
 
-  const now = Math.floor(Date.now() / 1000); // heartbeat.at is stored in seconds
+  const now = Math.floor(Date.now() / 1000);
   const results: ObserveNodeResult[] = [];
 
   for (const node of nodes) {
@@ -77,14 +56,30 @@ export async function observeAllNodes(): Promise<ObserveNodeResult[]> {
 
     if (!ipv4 && !ipv6) continue;
 
-    // Evict stale nodes — only if a heartbeat was ever recorded
     const heartbeatAt = node.heartbeat?.at as number | null | undefined;
     if (heartbeatAt != null && now - heartbeatAt > HEARTBEAT_TIMEOUT_S) {
-      if (ipv4) removeIp(ipv4, node.id);
-      if (ipv6) removeIp(ipv6, node.id);
-      console.log(`[Observer] Node ${node.id} is stale — evicted from pool`);
+      const ips = ([ipv4, ipv6] as Array<string | null>).filter((ip): ip is string => ip !== null);
+      let evict = false;
+
+      for (const ip of ips) {
+        const { shouldEvict, strikes } = strikeIp(ip, node.id);
+        console.log(
+          `[Observer] Node ${node.id} missed heartbeat — strike ${strikes}/${EVICTION_STRIKE_THRESHOLD} on ${ip}`,
+        );
+        if (shouldEvict) evict = true;
+      }
+
+      if (evict) {
+        if (ipv4) removeIp(ipv4, node.id);
+        if (ipv6) removeIp(ipv6, node.id);
+        console.log(`[Observer] Node ${node.id} reached eviction threshold — removed from pool`);
+      }
+
       continue;
     }
+
+    if (ipv4) clearStrikes(ipv4, node.id);
+    if (ipv6) clearStrikes(ipv6, node.id);
 
     try {
       const result = await observeNode(node.id, ipv4, ipv6);
@@ -103,22 +98,10 @@ export async function observeAllNodes(): Promise<ObserveNodeResult[]> {
   return results;
 }
 
-// ─── Server self-registration ─────────────────────────────────────────────────
-
-/**
- * Upsert the main server into NodeStore as a first-class node.
- *
- * The server skips payment, benchmarking, and the observation pipeline —
- * its IPs are resolved directly and it is trusted by definition.
- * Called once on boot, after the HTTP server is listening.
- */
 export async function upsertServerNode(): Promise<void> {
   try {
     const publicIps = await resolvePublicIps();
 
-    // Generate a stable-enough ed25519 public key for the schema's NOT NULL
-    // constraint. The server is the trusted root so this key isn't used for
-    // external verification, but having a real key keeps the data consistent.
     const { publicKey } = crypto.generateKeyPairSync('ed25519');
     const pubkeyBuffer = publicKey.export({ format: 'der', type: 'spki' });
 
@@ -150,17 +133,6 @@ export async function upsertServerNode(): Promise<void> {
   }
 }
 
-// ─── Scheduler ────────────────────────────────────────────────────────────────
-
-/**
- * Start the observation loop.
- *
- * Fires immediately on boot, then twice a day (every 12 hours) for the
- * 7-day window the classifier needs to reach static confidence. That gives
- * each node up to 14 observations before promotion is possible.
- *
- * Returns the interval handle so the caller can clear it on shutdown.
- */
 export function startObservationScheduler(intervalMs = 12 * 60 * 60 * 1000): ReturnType<typeof setInterval> {
   console.log(`[Observer] Scheduler started — running every 12 h (2x/day for 7-day window)`);
 
