@@ -29,14 +29,17 @@ const VALID_TYPES = new Set<number>(Object.values(FRAME_TYPE));
 export function encodeFrame(parts: FrameParts): Buffer {
   validateParts(parts);
 
-  const header = Buffer.allocUnsafe(HEADER_SIZE);
-  header.writeUInt8(parts.version, 0);
-  header.writeUInt8(parts.type, 1);
-  header.writeBigUInt64BE(parts.sequence, 2);
-  parts.nonce.copy(header, 10);
-  header.writeUInt32BE(parts.ciphertext.length, 22);
-
-  return Buffer.concat([header, parts.ciphertext, parts.tag]);
+  const total = HEADER_SIZE + parts.ciphertext.length + parts.tag.length;
+  const out = Buffer.allocUnsafe(total);
+  out.writeUInt8(parts.version, 0);
+  out.writeUInt8(parts.type, 1);
+  out.writeBigUInt64BE(parts.sequence, 2);
+  parts.nonce.copy(out, 10);
+  out.writeUInt32BE(parts.ciphertext.length, 22);
+  parts.ciphertext.copy(out, HEADER_SIZE);
+  parts.tag.copy(out, HEADER_SIZE + parts.ciphertext.length);
+  return out;
+  
 }
 
 export function decodeFrame(raw: Buffer): FrameParts {
