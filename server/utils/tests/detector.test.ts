@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { classifyDeviceIps, type DeviceIpObservation } from '../../features/ip-pool/detector.ts';
-import { depositObservation } from '../../features/ip-pool/pool.ts';
+import { depositIp } from '../../features/ip-pool/pool.ts';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -106,19 +106,19 @@ describe('IP detector', () => {
       observation(6 * DAY, '203.0.113.44', '2603:7081:7a3e:ba00:cccc:cccc:cccc:cccc'),
     ];
 
-    const result = depositObservation(
-      {
-        observedAt: 8 * DAY,
-        publicIps: {
-          ipv4: '203.0.113.44',
-          ipv6: '2603:7081:7a3e:ba00:dddd:dddd:dddd:dddd',
-        },
-        localAssignment: 'manual',
+    const currentObs: DeviceIpObservation = {
+      observedAt: 8 * DAY,
+      publicIps: {
+        ipv4: '203.0.113.44',
+        ipv6: '2603:7081:7a3e:ba00:dddd:dddd:dddd:dddd',
       },
-      { history, persist: false },
-    );
+      localAssignment: 'manual',
+    };
 
-    assert.equal(result.history.length, 4);
-    assert.equal(result.clue.kind, 'static');
+    const { clue } = depositIp('test-node', currentObs, history, { persist: false });
+    const fullHistory = [...history, currentObs];
+
+    assert.equal(fullHistory.length, 4);
+    assert.equal(clue.kind, 'static');
   });
 });
