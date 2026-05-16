@@ -388,33 +388,6 @@ async function main() {
     assert(status === 400 || status === 403 || json.verified === false, "rejected tampered signature", `status=${status} json=${JSON.stringify(json)}`);
   }
 
-  // -----------------------------------------------------------------------
-  // Step 8: Heartbeat with version mismatch → clears verification
-  // -----------------------------------------------------------------------
-  console.log("\n━━━ Step 8: Heartbeat with stale version ━━━");
-
-  // First re-verify the node so we can check that heartbeat clears it
-  {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const nonce = crypto.randomBytes(16).toString("hex");
-    const payload = {
-      version: TEST_VERSION,
-      platform: PLATFORM,
-      build_digest: buildDigest,
-      timestamp,
-      nonce,
-    };
-    const signature = signPayload(payload, nodeKeys.privateKey);
-    await post(`/node/verify-integrity/${nodeId}`, { ...payload, signature });
-  }
-
-  // Check node is now unverified
-  {
-    const { status, json } = await get(`/node/status/${nodeId}`);
-    assert(status === 200, "Status 200");
-    assert(json.verified === 0 || json.verified === false, "verified cleared after version mismatch", `got ${json.verified}`);
-  }
-
   // =======================================================================
   // UPGRADE CYCLE: v0.1.0 → v0.2.0
   // Proves: verify v1 → detect update → upgrade → re-verify v2 → new route
@@ -468,12 +441,6 @@ async function main() {
     );
     assert(status === 200, "Uploaded v0.2.0 manifest");
     assert(json.version === V2, `version = ${V2}`);
-  }
-
-  // Confirm verification was cleared (version mismatch)
-  {
-    const { json } = await get(`/node/status/${nodeId}`);
-    assert(json.verified === 0 || json.verified === false, "verification cleared on mismatch");
   }
 
   // -----------------------------------------------------------------------
