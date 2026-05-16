@@ -57,7 +57,13 @@ export function verifyEmailCode(input: { verification_id: string; email: string;
   if (verification.email !== normalized) throw new Error('Email verification email mismatch');
   if (verification.attempts >= 5) throw new Error('Email verification attempt limit exceeded');
 
-  if (verification.code_hash !== hashCode(input.code.trim())) {
+  const expectedHash = Buffer.from(verification.code_hash, 'hex');
+  const actualHash   = Buffer.from(hashCode(input.code.trim()), 'hex');
+  const codeMatches  =
+    expectedHash.length === actualHash.length &&
+    crypto.timingSafeEqual(expectedHash, actualHash);
+
+  if (!codeMatches) {
     NodeStore.incrementEmailVerificationAttempts(input.verification_id);
     throw new Error('Invalid email verification code');
   }
