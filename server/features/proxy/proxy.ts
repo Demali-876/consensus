@@ -78,6 +78,7 @@ interface DedupeParams {
 // ── Request/response size caps ─────────────────────────────────────────────────
 const MAX_RESPONSE_BYTES = 50 * 1024 * 1024;  // 50 MB
 const MAX_BODY_BYTES     = 10 * 1024 * 1024;  // 10 MB
+const MAX_CACHE_TTL      = 3_600;             // 1 hour — hard ceiling on caller-supplied TTL
 
 const STRIP_REQUEST_HEADERS = new Set([
   'host', 'content-length', 'content-encoding', 'transfer-encoding', 'connection',
@@ -242,9 +243,10 @@ export default class ConsensusProxy {
     const ttlRaw      = headers['x-cache-ttl']
       ?? Object.entries(headers).find(([k]) => k.toLowerCase() === 'x-cache-ttl')?.[1];
     const ttlFromHdr  = ttlRaw !== undefined ? Number(ttlRaw) : NaN;
-    const resolvedTTL = cacheTTL !== undefined ? cacheTTL
-                      : Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0 ? ttlFromHdr
-                      : 300;
+    const callerTTL   = Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0
+                          ? Math.min(ttlFromHdr, MAX_CACHE_TTL)   // cap caller-supplied value
+                          : 300;
+    const resolvedTTL = cacheTTL !== undefined ? cacheTTL : callerTTL;
     const ttl = resolvedTTL === 0 ? 1 : Math.max(1, resolvedTTL);
 
     this.stats.total_requests++;
@@ -451,6 +453,10 @@ export default class ConsensusProxy {
       if      (enc === 'gzip')    raw = await gunzipAsync(raw);
       else if (enc === 'deflate') raw = await inflateAsync(raw);
       else if (enc === 'br')      raw = await brotliDecompressAsync(raw);
+
+      if (raw.length > MAX_RESPONSE_BYTES) {
+        throw new Error(`Decompressed response body exceeds limit (${raw.length} > ${MAX_RESPONSE_BYTES} bytes)`);
+      }
 
       const text = raw.toString('utf8');
       let data: unknown;

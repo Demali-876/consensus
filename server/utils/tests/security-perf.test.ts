@@ -76,8 +76,9 @@ describe('BUG-1 · Decompression Bomb — no post-decompression size limit', () 
     assert.equal(decompressed.length, PLAIN_SIZE, 'Output is the full 60 MB — no built-in limit fired');
   });
 
-  it('PROVES THE BUG: proxy.ts makeRequest has no post-decompression size check', async () => {
-    // Load the proxy source as text and verify no guard exists after each decompression call.
+  it('REGRESSION GUARD: proxy.ts must have a post-decompression size check (prevents reintroduction)', async () => {
+    // Load the proxy source and confirm the guard added by the fix is present after
+    // every decompression call. If this test fails, the bomb protection was removed.
     const fs   = await import('node:fs/promises');
     const path = await import('node:path');
     const url  = await import('node:url');
@@ -88,28 +89,23 @@ describe('BUG-1 · Decompression Bomb — no post-decompression size limit', () 
     );
     const source = await fs.readFile(proxyPath, 'utf8');
 
-    // Find all decompression calls.
-    const decompressionCalls = ['gunzipAsync', 'inflateAsync', 'brotliDecompressAsync'];
-    for (const fn of decompressionCalls) {
-      const callIdx = source.indexOf(`= await ${fn}(`);
-      if (callIdx === -1) continue; // function not used
+    // Find the block that runs after all three decompression branches.
+    // The fix adds a single guard covering all three, so we check that the
+    // guard phrase appears somewhere between the last branch and `raw.toString`.
+    const lastBranch = source.lastIndexOf('brotliDecompressAsync(raw)');
+    assert.ok(lastBranch !== -1, 'brotliDecompressAsync branch must exist in proxy.ts');
 
-      // Look at the 200 characters immediately following the decompression call.
-      const snippet = source.slice(callIdx, callIdx + 200);
+    const afterBranches = source.slice(lastBranch, lastBranch + 300);
+    const hasGuard =
+      afterBranches.includes('raw.length >') ||
+      afterBranches.includes('> MAX_RESPONSE_BYTES');
 
-      // There must be NO length / size check in that window.
-      const hasLengthCheck =
-        snippet.includes('.length >') ||
-        snippet.includes('.length>=') ||
-        snippet.includes('> MAX_RESPONSE') ||
-        snippet.includes('exceeds');
-
-      assert.ok(
-        !hasLengthCheck,
-        `Expected no size check after ${fn}() — but found one at char ${callIdx}.\n` +
-        `This means BUG-1 has already been fixed. Snippet:\n${snippet}`,
-      );
-    }
+    assert.ok(
+      hasGuard,
+      'BUG-1 REGRESSION: decompression size guard was removed from proxy.ts.\n' +
+      `Searched the 300 chars after brotliDecompressAsync and found no size check.\n` +
+      `Snippet:\n${afterBranches}`,
+    );
   });
 });
 
@@ -144,31 +140,30 @@ describe('BUG-1 · Decompression Bomb — no post-decompression size limit', () 
 // ══════════════════════════════════════════════════════════════════════════════
 
 describe('BUG-2 · Unbounded Cache TTL — global cache poisoning via x-cache-ttl', () => {
-  it('PROVES THE BUG: proxy TTL parsing accepts Number.MAX_SAFE_INTEGER without capping', () => {
-    // Replicate the exact TTL-derivation logic from proxy.ts lines 242-248.
+  it('REGRESSION GUARD: caller-supplied x-cache-ttl is capped at MAX_CACHE_TTL (1 hour)', () => {
+    // Replicate the fixed TTL-derivation logic from proxy.ts.
+    const MAX_CACHE_TTL = 3_600;
     function deriveTtl(headers: Record<string, string>, cacheTTL?: number): number {
-      const ttlRaw     = headers['x-cache-ttl'] ??
+      const ttlRaw      = headers['x-cache-ttl'] ??
         Object.entries(headers).find(([k]) => k.toLowerCase() === 'x-cache-ttl')?.[1];
-      const ttlFromHdr = ttlRaw !== undefined ? Number(ttlRaw) : NaN;
-      const resolvedTTL = cacheTTL !== undefined ? cacheTTL
-                        : Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0 ? ttlFromHdr
-                        : 300;
+      const ttlFromHdr  = ttlRaw !== undefined ? Number(ttlRaw) : NaN;
+      const callerTTL   = Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0
+                            ? Math.min(ttlFromHdr, MAX_CACHE_TTL)
+                            : 300;
+      const resolvedTTL = cacheTTL !== undefined ? cacheTTL : callerTTL;
       return resolvedTTL === 0 ? 1 : Math.max(1, resolvedTTL);
     }
 
-    const poisonTTL = deriveTtl({ 'x-cache-ttl': String(Number.MAX_SAFE_INTEGER) });
+    // Any caller-supplied value above 3600 must be clamped to 3600.
+    assert.equal(deriveTtl({ 'x-cache-ttl': String(Number.MAX_SAFE_INTEGER) }), MAX_CACHE_TTL);
+    assert.equal(deriveTtl({ 'x-cache-ttl': '99999999' }),                       MAX_CACHE_TTL);
+    assert.equal(deriveTtl({ 'x-cache-ttl': '3601' }),                            MAX_CACHE_TTL);
 
-    // The derived TTL equals Number.MAX_SAFE_INTEGER — ~285 million years.
-    assert.equal(
-      poisonTTL,
-      Number.MAX_SAFE_INTEGER,
-      `TTL derivation must return MAX_SAFE_INTEGER uncapped. Got: ${poisonTTL}`,
-    );
-
-    // Sanity check: legitimate values still work.
-    assert.equal(deriveTtl({}, 300),           300);
-    assert.equal(deriveTtl({ 'x-cache-ttl': '60' }), 60);
-    assert.equal(deriveTtl({ 'x-cache-ttl': '0' }),   1); // floor is 1
+    // Values at or below the cap pass through normally.
+    assert.equal(deriveTtl({ 'x-cache-ttl': '3600' }), 3_600);
+    assert.equal(deriveTtl({ 'x-cache-ttl': '60' }),      60);
+    assert.equal(deriveTtl({ 'x-cache-ttl': '0' }),         1); // floor is 1
+    assert.equal(deriveTtl({}, 300),                       300); // explicit cacheTTL bypasses header
   });
 
   it('global-scope key (no x-api-key) is shared across all callers — confirms cross-user impact', () => {

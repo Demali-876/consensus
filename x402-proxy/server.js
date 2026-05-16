@@ -57,7 +57,7 @@ function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'Missing API key' });
 
-  const walletData = walletStore.getWalletByApiKey(apiKey);
+  const walletData = walletStore.getWalletMetaByApiKey(apiKey);
   if (!walletData) return res.status(401).json({ error: 'Invalid API key' });
 
   req.walletName = walletData.walletName;
