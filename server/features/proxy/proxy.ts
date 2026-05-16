@@ -41,6 +41,8 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /** Override the SSRF check — defaults to isPrivateTarget. Inject a permissive stub in tests. */
+  ssrfCheck?: (url: string) => Promise<boolean>;
 }
 
 export interface ProxyResponse {
@@ -193,6 +195,7 @@ export default class ConsensusProxy {
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
+  private ssrfCheck:       (url: string) => Promise<boolean>;
 
   constructor(config: ProxyConfig = {}) {
     this.cache = new NodeCache({
@@ -207,6 +210,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.ssrfCheck       = config.ssrfCheck ?? isPrivateTarget;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -233,7 +237,7 @@ export default class ConsensusProxy {
     try { new URL(target_url); } catch {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
-    if (await isPrivateTarget(target_url)) {
+    if (await this.ssrfCheck(target_url)) {
       throw new TypeError(`Forbidden target_url — private/internal addresses are not allowed`);
     }
 
@@ -383,6 +387,7 @@ export default class ConsensusProxy {
     let settle!: (r: ProxyResponse) => void;
     let reject!: (e: unknown) => void;
     const promise = new Promise<ProxyResponse>((res, rej) => { settle = res; reject = rej; });
+    promise.catch(() => {}); // prevent unhandledRejection when no concurrent waiter holds this reference
     this.pendingRequests.set(dedupeKey, promise);
     const leakGuard = setTimeout(() => {
       if (this.pendingRequests.has(dedupeKey)) {
