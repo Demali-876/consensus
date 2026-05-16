@@ -41,6 +41,8 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /** Override the SSRF check — defaults to isPrivateTarget. Inject a permissive stub in tests. */
+  ssrfCheck?: (url: string) => Promise<boolean>;
 }
 
 export interface ProxyResponse {
@@ -78,6 +80,7 @@ interface DedupeParams {
 // ── Request/response size caps ─────────────────────────────────────────────────
 const MAX_RESPONSE_BYTES = 50 * 1024 * 1024;  // 50 MB
 const MAX_BODY_BYTES     = 10 * 1024 * 1024;  // 10 MB
+const MAX_CACHE_TTL      = 3_600;             // 1 hour — hard ceiling on caller-supplied TTL
 
 const STRIP_REQUEST_HEADERS = new Set([
   'host', 'content-length', 'content-encoding', 'transfer-encoding', 'connection',
@@ -192,6 +195,7 @@ export default class ConsensusProxy {
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
+  private ssrfCheck:       (url: string) => Promise<boolean>;
 
   constructor(config: ProxyConfig = {}) {
     this.cache = new NodeCache({
@@ -206,6 +210,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.ssrfCheck       = config.ssrfCheck ?? isPrivateTarget;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -232,7 +237,7 @@ export default class ConsensusProxy {
     try { new URL(target_url); } catch {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
-    if (await isPrivateTarget(target_url)) {
+    if (await this.ssrfCheck(target_url)) {
       throw new TypeError(`Forbidden target_url — private/internal addresses are not allowed`);
     }
 
@@ -242,9 +247,10 @@ export default class ConsensusProxy {
     const ttlRaw      = headers['x-cache-ttl']
       ?? Object.entries(headers).find(([k]) => k.toLowerCase() === 'x-cache-ttl')?.[1];
     const ttlFromHdr  = ttlRaw !== undefined ? Number(ttlRaw) : NaN;
-    const resolvedTTL = cacheTTL !== undefined ? cacheTTL
-                      : Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0 ? ttlFromHdr
-                      : 300;
+    const callerTTL   = Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0
+                          ? Math.min(ttlFromHdr, MAX_CACHE_TTL)   // cap caller-supplied value
+                          : 300;
+    const resolvedTTL = cacheTTL !== undefined ? cacheTTL : callerTTL;
     const ttl = resolvedTTL === 0 ? 1 : Math.max(1, resolvedTTL);
 
     this.stats.total_requests++;
@@ -381,6 +387,7 @@ export default class ConsensusProxy {
     let settle!: (r: ProxyResponse) => void;
     let reject!: (e: unknown) => void;
     const promise = new Promise<ProxyResponse>((res, rej) => { settle = res; reject = rej; });
+    promise.catch(() => {}); // prevent unhandledRejection when no concurrent waiter holds this reference
     this.pendingRequests.set(dedupeKey, promise);
     const leakGuard = setTimeout(() => {
       if (this.pendingRequests.has(dedupeKey)) {
@@ -451,6 +458,10 @@ export default class ConsensusProxy {
       if      (enc === 'gzip')    raw = await gunzipAsync(raw);
       else if (enc === 'deflate') raw = await inflateAsync(raw);
       else if (enc === 'br')      raw = await brotliDecompressAsync(raw);
+
+      if (raw.length > MAX_RESPONSE_BYTES) {
+        throw new Error(`Decompressed response body exceeds limit (${raw.length} > ${MAX_RESPONSE_BYTES} bytes)`);
+      }
 
       const text = raw.toString('utf8');
       let data: unknown;
