@@ -4,6 +4,7 @@ import { paymentMiddleware } from '@x402/express';
 import { provisionNodeDNS }  from '../../utils/dns.js';
 import NodeStore             from '../../data/node_store.js';
 import { observeNode }       from '../ip-pool/observer.ts';
+import { loadPoolHistory }   from '../ip-pool/pool.ts';
 import { classifyIpRegion }  from '../../utils/region.ts';
 import { assertEmailVerification, isValidEmail, startEmailVerification, verifyEmailCode } from '../../utils/email-verification.ts';
 
@@ -14,6 +15,61 @@ function requireLoopback(req, res, next) {
   if (ok) return next();
   console.warn(`[Nodes] Blocked unauthorised DELETE from ${remote}`);
   return res.status(403).json({ error: 'Forbidden' });
+}
+
+function normalizeRemoteIp(ip) {
+  if (!ip) return null;
+  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}
+
+// Heartbeat auth: bind a node_id to the network identity that proved control
+// of it. Trust order:
+//   1. registration_ip — captured server-side from req.ip at registration.
+//                        This is the only IP the operator has proven they
+//                        control (TCP source spoofing aside).
+//   2. pool history    — IPs the observer has previously recorded for this
+//                        node. Covers legitimate IP rotation across
+//                        re-registrations on dynamic-IP nodes.
+//   3. self-reported   — capabilities.ipv4 / ipv6 from the registration body.
+//      ipv4 / ipv6       Grandfather for nodes registered before this fix
+//                        landed; new nodes always populate (1).
+function isAuthorizedHeartbeatIp(node, observedIp) {
+  if (!observedIp) return false;
+  const caps = node.capabilities ?? {};
+
+  if (caps.registration_ip && caps.registration_ip === observedIp) return true;
+
+  try {
+    const history = loadPoolHistory(node.id);
+    for (const obs of history) {
+      if (obs.publicIps?.ipv4 === observedIp) return true;
+      if (obs.publicIps?.ipv6 === observedIp) return true;
+    }
+  } catch (err) {
+    console.warn(`[Heartbeat] Pool history lookup failed for ${node.id}: ${err.message}`);
+  }
+
+  if (!caps.registration_ip) {
+    if (caps.ipv4 && caps.ipv4 === observedIp) return true;
+    if (caps.ipv6 && caps.ipv6 === observedIp) return true;
+  }
+
+  return false;
+}
+
+function requireHeartbeatAuth(req, res, next) {
+  const { node_id } = req.params;
+  const node = NodeStore.getNode(node_id);
+  if (!node) return res.status(404).json({ error: 'Node not found' });
+
+  const observedIp = normalizeRemoteIp(req.ip);
+  if (!isAuthorizedHeartbeatIp(node, observedIp)) {
+    console.warn(`[Heartbeat] Rejected from ${observedIp ?? 'unknown'} for node ${node_id}`);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  req.node = node;
+  next();
 }
 
 const BASE_PRICE = 100;
@@ -288,6 +344,8 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           return res.status(409).json({ error: 'Join request already consumed', message: error.message });
         }
 
+        const registrationIp = normalizeRemoteIp(req.ip);
+
         console.log('\nStoring node...');
         NodeStore.upsertNode({
           id:               nodeId,
@@ -310,6 +368,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
             ipv6:             ipv6 || null,
             port,
             geo:              geoRegion,
+            registration_ip:  registrationIp,
           },
           evm_address,
           solana_address,
@@ -354,13 +413,10 @@ export function registerNodes(app, httpsServer, x402Server, config) {
     },
   );
 
-  app.post('/node/heartbeat/:node_id', (req, res) => {
+  app.post('/node/heartbeat/:node_id', requireHeartbeatAuth, (req, res) => {
     try {
       const { node_id } = req.params;
       const { rps, p95_ms, version } = req.body;
-
-      const node = NodeStore.getNode(node_id);
-      if (!node) return res.status(404).json({ error: 'Node not found' });
 
       NodeStore.heartbeat(node_id, { rps, p95_ms, version });
       res.json({ success: true, node_id, message: 'Heartbeat recorded', next_heartbeat_in: 300 });
