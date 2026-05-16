@@ -213,6 +213,13 @@ const listNodesWithHeartbeatStmt = db.prepare(`
   ORDER BY n.created_at DESC
 `);
 
+// Narrow query for the hot routing path — no JOIN, only the 5 columns Router needs.
+const listNodesForRoutingStmt = db.prepare(`
+  SELECT id, region, status, domain, capabilities
+  FROM nodes
+  ORDER BY created_at DESC
+`);
+
 const insertHeartbeatStmt = db.prepare(`
   INSERT INTO heartbeats (node_id, rps, p95_ms, version, created_at)
   VALUES (?, ?, ?, ?, ?)
@@ -378,6 +385,18 @@ export const NodeStore = {
 
   listNodes() {
     return listNodesWithHeartbeatStmt.all().map(rowToNode);
+  },
+
+  // Lightweight alternative for the routing hot path — returns only the fields
+  // Router needs (id, region, status, domain, capabilities). No heartbeat JOIN.
+  listNodesForRouting() {
+    return listNodesForRoutingStmt.all().map((row) => ({
+      id:           row.id,
+      region:       row.region,
+      status:       row.status,
+      domain:       row.domain,
+      capabilities: fromJson(row.capabilities, {}),
+    }));
   },
 
   setDomain(id, domain) {
