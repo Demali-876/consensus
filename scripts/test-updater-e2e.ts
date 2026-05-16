@@ -20,7 +20,6 @@ const PLATFORM = `${os.platform()}-${os.arch()}`; // e.g. darwin-arm64
 const V1 = "0.1.0";
 const V2 = "0.2.0";
 const TEST_VERSION = V2;
-const CURRENT_VERSION = V1;
 
 let passed = 0;
 let failed = 0;
@@ -409,23 +408,6 @@ async function main() {
     await post(`/node/verify-integrity/${nodeId}`, { ...payload, signature });
   }
 
-  {
-    const { status, json } = await post(`/node/heartbeat/${nodeId}`, {
-      rps: 10,
-      p95_ms: 50,
-      version: CURRENT_VERSION, // older than required TEST_VERSION
-    });
-    assert(status === 200, "Status 200", `got ${status}`);
-    assert(json.update_available !== undefined, "update_available present", JSON.stringify(json));
-    if (json.update_available) {
-      assert(
-        json.update_available.version === TEST_VERSION,
-        `update version = ${TEST_VERSION}`,
-        `got ${json.update_available?.version}`
-      );
-    }
-  }
-
   // Check node is now unverified
   {
     const { status, json } = await get(`/node/status/${nodeId}`);
@@ -488,20 +470,6 @@ async function main() {
     assert(json.version === V2, `version = ${V2}`);
   }
 
-  // -----------------------------------------------------------------------
-  // Step 11: Heartbeat at v0.1.0 → server says update available
-  // -----------------------------------------------------------------------
-  console.log("\n━━━ Step 11: Heartbeat detects update ━━━");
-  {
-    const { json } = await post(`/node/heartbeat/${nodeId}`, {
-      rps: 10,
-      p95_ms: 50,
-      version: V1,
-    });
-    assert(json.update_available !== undefined, "update_available present");
-    assert(json.update_available?.version === V2, `update to ${V2}`, `got ${json.update_available?.version}`);
-  }
-
   // Confirm verification was cleared (version mismatch)
   {
     const { json } = await get(`/node/status/${nodeId}`);
@@ -555,16 +523,6 @@ async function main() {
     assert(json.software_version === V2, `software_version = ${V2}`, `got ${json.software_version}`);
     assert(json.build_digest === v2Digest, "build_digest = v0.2.0 digest");
     assert(json.verified === 1 || json.verified === true, "verified = true");
-  }
-
-  // Heartbeat at v0.2.0 — no update available
-  {
-    const { json } = await post(`/node/heartbeat/${nodeId}`, {
-      rps: 15,
-      p95_ms: 40,
-      version: V2,
-    });
-    assert(json.update_available == null, "no update_available (already current)", JSON.stringify(json));
   }
 
   await upgradedStub.close();

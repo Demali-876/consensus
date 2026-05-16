@@ -343,7 +343,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           processing_time_ms: processingTime,
           next_steps: [
             'DNS propagation may take up to 5 minutes',
-            `Send heartbeat every 5 minutes to /node/heartbeat/${nodeId}`,
             `Monitor status at /node/status/${nodeId}`,
           ],
         });
@@ -353,22 +352,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
       }
     },
   );
-
-  app.post('/node/heartbeat/:node_id', (req, res) => {
-    try {
-      const { node_id } = req.params;
-      const { rps, p95_ms, version } = req.body;
-
-      const node = NodeStore.getNode(node_id);
-      if (!node) return res.status(404).json({ error: 'Node not found' });
-
-      NodeStore.heartbeat(node_id, { rps, p95_ms, version });
-      res.json({ success: true, node_id, message: 'Heartbeat recorded', next_heartbeat_in: 300 });
-    } catch (error) {
-      console.error('Heartbeat error:', error);
-      res.status(500).json({ error: 'Heartbeat failed', message: error.message });
-    }
-  });
 
   app.get('/node/status/:node_id', (req, res) => {
     try {
