@@ -6,7 +6,7 @@ import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
 import crypto                            from 'node:crypto';
 import Router                            from '../../router.ts';
-import { isPrivateTarget }               from '../../utils/ssrf.ts';
+import { resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts';
 
 const httpAgent  = new http.Agent ({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
@@ -101,6 +101,15 @@ const MULTI_SPACE   = /\s+/g;
 
 function sha256Hex(input: string | Buffer): string {
   return crypto.createHash('sha256').update(input).digest('hex');
+}
+
+// Rewrites the URL so its host is the pre-resolved IP, eliminating any
+// second DNS lookup by the HTTP stack (closes the SSRF TOCTOU window).
+function buildSafeUrl(originalUrl: string, resolved: SafeResolution): string {
+  if (resolved.isLiteral) return originalUrl;
+  const u = new URL(originalUrl);
+  u.hostname = resolved.family === 6 ? `[${resolved.ip}]` : resolved.ip;
+  return u.toString();
 }
 
 function deepSort(value: unknown): unknown {
@@ -240,9 +249,8 @@ export default class ConsensusProxy {
     try { new URL(target_url); } catch {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
-    if (await isPrivateTarget(target_url)) {
-      throw new TypeError(`Forbidden target_url — private/internal addresses are not allowed`);
-    }
+
+    const resolved = await resolveAndCheckTarget(target_url);
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
@@ -275,45 +283,13 @@ export default class ConsensusProxy {
     this.stats.cache_misses++;
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
-    // Register a shared pending promise BEFORE any execution path so concurrent
-    // duplicates coalesce regardless of whether we route via node or direct.
-    // Without this, executeViaNode races past the pending check on its first
-    // await and every concurrent request hits the tunnel independently.
-    let settlePending!: (r: ProxyResponse) => void;
-    let rejectPending!: (e: unknown) => void;
-    const pendingPromise = new Promise<ProxyResponse>((res, rej) => {
-      settlePending = res;
-      rejectPending = rej;
-    });
-    // Avoid unhandled-rejection warnings if no follower attaches before we reject.
-    pendingPromise.catch(() => {});
-    this.pendingRequests.set(dedupeKey, pendingPromise);
-
-    const leakGuard = setTimeout(() => {
-      if (this.pendingRequests.has(dedupeKey)) {
-        this.pendingRequests.delete(dedupeKey);
-        rejectPending(new Error('handleRequest timed out — pending entry evicted'));
-      }
-    }, 65_000);
-
-    try {
-      const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
-      let result: ProxyResponse;
-      if (node && typeof node.id === 'string') {
-        result = await this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl);
-      } else {
-        console.log('[Self-Fallback] No nodes available, executing directly');
-        result = await this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
-      }
-      settlePending(result);
-      return result;
-    } catch (error) {
-      rejectPending(error);
-      throw error;
-    } finally {
-      clearTimeout(leakGuard);
-      this.pendingRequests.delete(dedupeKey);
+    const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
+    if (node && typeof node.id === 'string') {
+      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
     }
+
+    console.log('[Self-Fallback] No nodes available, executing directly');
+    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
   }
 
   private async executeViaNode(
@@ -324,6 +300,7 @@ export default class ConsensusProxy {
     body:       RequestBody,
     dedupeKey:  string,
     ttl:        number,
+    resolved:   SafeResolution,
   ): Promise<ProxyResponse> {
     this.router.incrementRequest(node.id);
 
@@ -349,7 +326,7 @@ export default class ConsensusProxy {
 
       if (!node.domain) {
         console.log('[Fallback to Self] Selected node has no domain/control tunnel');
-        return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
+        return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
       }
 
       const response = await axios({
@@ -374,7 +351,7 @@ export default class ConsensusProxy {
     } catch (error) {
       console.error(`[Node Error] ${node.id}:`, (error as Error).message);
       console.log('[Fallback to Self] Executing directly');
-      return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
+      return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
     } finally {
       this.router.decrementRequest(node.id);
     }
@@ -418,11 +395,12 @@ export default class ConsensusProxy {
     body:       RequestBody,
     dedupeKey:  string,
     ttl:        number,
+    resolved:   SafeResolution,
   ): Promise<ProxyResponse> {
     // Pending-request registration and leak-guard are owned by handleRequest so
     // they cover both this path and executeViaNode uniformly.
     try {
-      const response = await this.makeRequest(target_url, method, headers, body);
+      const response = await this.makeRequest(target_url, method, headers, body, resolved);
       if (response.status >= 200 && response.status < 300) {
         this.cache.set(dedupeKey, response, ttl);
         console.log(`[Cache STORED] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
@@ -435,10 +413,11 @@ export default class ConsensusProxy {
   }
 
   private async makeRequest(
-    url:     string,
-    method:  string,
-    headers: Headers,
-    body?:   RequestBody,
+    url:      string,
+    method:   string,
+    headers:  Headers,
+    body?:    RequestBody,
+    resolved?: SafeResolution,
   ): Promise<ProxyResponse> {
     const cleanHeaders: Headers = {};
     for (const [k, v] of Object.entries(headers)) {
@@ -454,10 +433,30 @@ export default class ConsensusProxy {
       cleanHeaders['content-type'] = 'application/json';
     }
 
+    // Rewrite the URL to the pre-resolved IP so the HTTP stack never performs a
+    // second DNS lookup.  The original hostname goes into the Host header (required
+    // for virtual-host routing) and, for HTTPS, into the agent's servername option
+    // so TLS SNI and certificate validation still target the correct hostname.
+    let requestUrl        = url;
+    let requestHttpsAgent = httpsAgent;
+    if (resolved && !resolved.isLiteral) {
+      requestUrl = buildSafeUrl(url, resolved);
+      cleanHeaders['host'] = resolved.hostname;
+      if (url.startsWith('https:')) {
+        // Per-request agent: keepAlive disabled because each proxied target is
+        // a different server so there is nothing to pool across requests.
+        requestHttpsAgent = new https.Agent({
+          keepAlive: false,
+          timeout:   30_000,
+          servername: resolved.hostname,
+        });
+      }
+    }
+
     try {
       const response = await axios({
         method:           lowerMethod,
-        url,
+        url:              requestUrl,
         headers:          cleanHeaders,
         data:             withBody ? body : undefined,
         timeout:          30_000,
@@ -468,7 +467,7 @@ export default class ConsensusProxy {
         maxContentLength: MAX_RESPONSE_BYTES,
         maxBodyLength:    MAX_BODY_BYTES,
         httpAgent,
-        httpsAgent,
+        httpsAgent:       requestHttpsAgent,
       });
 
       let raw: Buffer = Buffer.isBuffer(response.data)

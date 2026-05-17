@@ -12,6 +12,7 @@ interface RouterStats {
 const STICKY_TTL_MS    = 10 * 60 * 1000;
 const STICKY_SWEEP_MS  = 60 * 1000;
 const STATS_CACHE_MS   = 1_000;
+const NODE_CACHE_TTL_MS = 3_000;  // node list refreshed at most once per 3 s
 
 export default class Router {
   private activeRequests: Map<string, number>;           // nodeId → HTTP request count
@@ -19,6 +20,7 @@ export default class Router {
   private requestToNode:  Map<string, { nodeId: string; at: number }>; // dedupeKey → sticky
   private stats: RouterStats;
   private statsCache: { value: ReturnType<Router['_buildStats']>; at: number } | null = null;
+  private nodeCache:  { nodes: any[]; at: number } | null = null;
   private sweepTimer: ReturnType<typeof setInterval>;
 
   constructor() {
@@ -44,12 +46,24 @@ export default class Router {
    * @param preferenceHeaders - User preferences (x-node-region, etc.)
    * @returns Selected node or null if none available
    */
+  private getNodes(): any[] {
+    const now = Date.now();
+    if (this.nodeCache && (now - this.nodeCache.at) < NODE_CACHE_TTL_MS) {
+      return this.nodeCache.nodes;
+    }
+    const nodes = NodeStore.listNodesForRouting();
+    this.nodeCache = { nodes, at: now };
+    return nodes;
+  }
+
   selectNode(dedupeKey: string, preferenceHeaders: Record<string, string> = {}): any | null {
     this.stats.total_selections++;
 
+    const allNodes = this.getNodes();
+
     const sticky = this.requestToNode.get(dedupeKey);
     if (sticky) {
-      const node = NodeStore.getNode(sticky.nodeId);
+      const node = allNodes.find((n: any) => n.id === sticky.nodeId);
       if (node && node.status === 'active' && !isNodeUpdating(node)) {
         this.stats.sticky_hits++;
         return node;
@@ -57,7 +71,6 @@ export default class Router {
       this.requestToNode.delete(dedupeKey);
     }
 
-    const allNodes = NodeStore.listNodes();
     let eligibleNodes = allNodes.filter((node: any) =>
       node.status === 'active' && !isNodeUpdating(node),
     );
@@ -121,12 +134,10 @@ export default class Router {
   private powerOfTwoChoices(eligibleNodes: any[]): any {
     if (eligibleNodes.length === 1) return eligibleNodes[0];
 
-    const idx1 = Math.floor(Math.random() * eligibleNodes.length);
-    let idx2 = Math.floor(Math.random() * eligibleNodes.length);
-
-    while (idx2 === idx1 && eligibleNodes.length > 1) {
-      idx2 = Math.floor(Math.random() * eligibleNodes.length);
-    }
+    const n    = eligibleNodes.length;
+    const idx1 = Math.floor(Math.random() * n);
+    // O(1): pick a uniformly-distributed index that is guaranteed !== idx1
+    const idx2 = (idx1 + 1 + Math.floor(Math.random() * (n - 1))) % n;
 
     const node1 = eligibleNodes[idx1];
     const node2 = eligibleNodes[idx2];
@@ -148,7 +159,9 @@ export default class Router {
   }
 
   decrementRequest(nodeId: string): void {
-    this.activeRequests.set(nodeId, Math.max(0, (this.activeRequests.get(nodeId) ?? 0) - 1));
+    const next = Math.max(0, (this.activeRequests.get(nodeId) ?? 0) - 1);
+    if (next === 0) this.activeRequests.delete(nodeId);
+    else this.activeRequests.set(nodeId, next);
     this.statsCache = null;
   }
 
@@ -158,7 +171,9 @@ export default class Router {
   }
 
   decrementSession(nodeId: string): void {
-    this.activeSessions.set(nodeId, Math.max(0, (this.activeSessions.get(nodeId) ?? 0) - 1));
+    const next = Math.max(0, (this.activeSessions.get(nodeId) ?? 0) - 1);
+    if (next === 0) this.activeSessions.delete(nodeId);
+    else this.activeSessions.set(nodeId, next);
     this.statsCache = null;
   }
 
