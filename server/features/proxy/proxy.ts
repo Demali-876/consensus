@@ -79,6 +79,14 @@ interface DedupeParams {
 const MAX_RESPONSE_BYTES = 50 * 1024 * 1024;  // 50 MB
 const MAX_BODY_BYTES     = 10 * 1024 * 1024;  // 10 MB
 
+// ── Cache TTL bounds ──────────────────────────────────────────────────────────
+// Upper bound for any caller-supplied cache TTL (x-cache-ttl header or arg).
+// Prevents a misconfigured/malicious caller from locking a poisoned response in
+// the shared global-scope cache for an unbounded period.  1 hour is enough for
+// typical micro-cache use cases; long-TTL data should come from upstream cache
+// headers, not from a caller hint.
+const MAX_CACHE_TTL_SEC = 3_600;
+
 const STRIP_REQUEST_HEADERS = new Set([
   'host', 'content-length', 'content-encoding', 'transfer-encoding', 'connection',
   'x-idempotency-key', 'idempotency-key',
@@ -253,7 +261,8 @@ export default class ConsensusProxy {
     const resolvedTTL = cacheTTL !== undefined ? cacheTTL
                       : Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0 ? ttlFromHdr
                       : 300;
-    const ttl = resolvedTTL === 0 ? 1 : Math.max(1, resolvedTTL);
+    // Clamp to [1, MAX_CACHE_TTL_SEC] — prevents cache-poisoning via huge TTL hints
+    const ttl = Math.min(MAX_CACHE_TTL_SEC, resolvedTTL === 0 ? 1 : Math.max(1, resolvedTTL));
 
     this.stats.total_requests++;
     const cached = this.cache.get<ProxyResponse>(dedupeKey);
@@ -388,32 +397,18 @@ export default class ConsensusProxy {
     ttl:        number,
     resolved:   SafeResolution,
   ): Promise<ProxyResponse> {
-    let settle!: (r: ProxyResponse) => void;
-    let reject!: (e: unknown) => void;
-    const promise = new Promise<ProxyResponse>((res, rej) => { settle = res; reject = rej; });
-    this.pendingRequests.set(dedupeKey, promise);
-    const leakGuard = setTimeout(() => {
-      if (this.pendingRequests.has(dedupeKey)) {
-        this.pendingRequests.delete(dedupeKey);
-        reject(new Error('executeDirect timed out — pending request evicted'));
-      }
-    }, 65_000);
-
+    // Pending-request registration and leak-guard are owned by handleRequest so
+    // they cover both this path and executeViaNode uniformly.
     try {
       const response = await this.makeRequest(target_url, method, headers, body, resolved);
       if (response.status >= 200 && response.status < 300) {
         this.cache.set(dedupeKey, response, ttl);
         console.log(`[Cache STORED] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
       }
-      settle(response);
       return { ...response, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: 'proxy-direct' };
     } catch (error) {
       this.removePaidStatus(dedupeKey);
-      reject(error);
       throw error;
-    } finally {
-      clearTimeout(leakGuard);
-      this.pendingRequests.delete(dedupeKey);
     }
   }
 
