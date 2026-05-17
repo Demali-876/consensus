@@ -49,11 +49,14 @@ export class ChaChaPoly1305 {
     return plaintext;
   }
   /**
-   * Hash API key for secure storage
-   * @param {string} apiKey - The API key to hash
-   * @returns {string} SHA-256 hash as hex string
+   * Hash API key for secure storage using HMAC-SHA256.
+   * Requires NODE_API_KEY_SECRET env var (min 32 bytes of entropy).
+   * @param {string} apiKey
+   * @returns {string} HMAC-SHA256 hex digest
    */
   hashAPIKey(apiKey) {
-    return crypto.createHash('sha256').update(apiKey).digest('hex');
+    const secret = process.env.NODE_API_KEY_SECRET;
+    if (!secret) throw new Error('NODE_API_KEY_SECRET env var is required for API key hashing');
+    return crypto.createHmac('sha256', secret).update(apiKey).digest('hex');
   }
 }

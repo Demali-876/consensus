@@ -121,12 +121,10 @@ export default class Router {
   private powerOfTwoChoices(eligibleNodes: any[]): any {
     if (eligibleNodes.length === 1) return eligibleNodes[0];
 
-    const idx1 = Math.floor(Math.random() * eligibleNodes.length);
-    let idx2 = Math.floor(Math.random() * eligibleNodes.length);
-
-    while (idx2 === idx1 && eligibleNodes.length > 1) {
-      idx2 = Math.floor(Math.random() * eligibleNodes.length);
-    }
+    const n    = eligibleNodes.length;
+    const idx1 = Math.floor(Math.random() * n);
+    // O(1): pick a uniformly-distributed index that is guaranteed !== idx1
+    const idx2 = (idx1 + 1 + Math.floor(Math.random() * (n - 1))) % n;
 
     const node1 = eligibleNodes[idx1];
     const node2 = eligibleNodes[idx2];
@@ -148,7 +146,9 @@ export default class Router {
   }
 
   decrementRequest(nodeId: string): void {
-    this.activeRequests.set(nodeId, Math.max(0, (this.activeRequests.get(nodeId) ?? 0) - 1));
+    const next = Math.max(0, (this.activeRequests.get(nodeId) ?? 0) - 1);
+    if (next === 0) this.activeRequests.delete(nodeId);
+    else this.activeRequests.set(nodeId, next);
     this.statsCache = null;
   }
 
@@ -158,7 +158,9 @@ export default class Router {
   }
 
   decrementSession(nodeId: string): void {
-    this.activeSessions.set(nodeId, Math.max(0, (this.activeSessions.get(nodeId) ?? 0) - 1));
+    const next = Math.max(0, (this.activeSessions.get(nodeId) ?? 0) - 1);
+    if (next === 0) this.activeSessions.delete(nodeId);
+    else this.activeSessions.set(nodeId, next);
     this.statsCache = null;
   }
 

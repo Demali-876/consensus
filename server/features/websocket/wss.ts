@@ -11,6 +11,7 @@ import {
   bytesToMB,
   msToMinutes,
 } from '../../utils/types.js';
+import { isPrivateTarget } from '../../utils/ssrf.ts';
 
 export interface Purchase {
   model:     string;
@@ -122,6 +123,14 @@ async function executeProxyRequest(ws: WebSocket, session: Session, data: Buffer
       id:      req.id,
       error:   'invalid_request',
       message: 'Missing required field: url',
+    } satisfies ProxyError);
+  }
+
+  if (await isPrivateTarget(req.url)) {
+    return sendProxyResult(ws, session, {
+      id:      req.id,
+      error:   'fetch_failed',
+      message: 'Forbidden: private or internal addresses are not allowed',
     } satisfies ProxyError);
   }
 
