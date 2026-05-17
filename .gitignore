@@ -12,3 +12,6 @@ setting*
 ip-pool-history*
 ssrf-poc.ts
 test-server.ts
+*.db
+*.db-wal
+*.db-shm
