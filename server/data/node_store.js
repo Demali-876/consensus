@@ -202,6 +202,12 @@ const getNodeWithHeartbeatStmt = db.prepare(`
   WHERE n.id = ?
 `);
 
+const countNodesStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM nodes`);
+
+const deleteExpiredEmailVerificationsStmt = db.prepare(`
+  DELETE FROM email_verifications WHERE expires_at < ?
+`);
+
 const listNodesWithHeartbeatStmt = db.prepare(`
   SELECT
     n.id, n.pubkey_secp256k1, n.pubkey_ed25519, n.region, n.contact,
@@ -378,6 +384,14 @@ export const NodeStore = {
 
   listNodes() {
     return listNodesWithHeartbeatStmt.all().map(rowToNode);
+  },
+
+  countNodes() {
+    return countNodesStmt.get().cnt;
+  },
+
+  deleteExpiredEmailVerifications() {
+    return deleteExpiredEmailVerificationsStmt.run(nowSec()).changes;
   },
 
   setDomain(id, domain) {

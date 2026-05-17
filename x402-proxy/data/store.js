@@ -224,6 +224,7 @@ export class WalletStore {
               evmPrivateKey: evmPrivateKey,
               solanaAddress: row.solana_address,
               solanaPrivateKey: solanaPrivateKey,
+              apiKeyHash: row.api_key_hash,
             };
           } catch (error) {
             console.error(`Failed to decrypt wallet ${row.wallet_name}`);

@@ -1,12 +1,17 @@
 import crypto                from 'crypto';
 import { isIPv4, isIPv6 }   from 'node:net';
 import { paymentMiddleware } from '@x402/express';
+import rateLimit            from 'express-rate-limit';
 import { provisionNodeDNS }  from '../../utils/dns.js';
 import NodeStore             from '../../data/node_store.js';
 import { observeNode }       from '../ip-pool/observer.ts';
 import { classifyIpRegion }  from '../../utils/region.ts';
 import { assertEmailVerification, isValidEmail, startEmailVerification, verifyEmailCode } from '../../utils/email-verification.ts';
 
+const HEARTBEAT_TIMESTAMP_SKEW_SEC = 60;
+const EMAIL_START_MIN_INTERVAL_MS  = 60_000;
+const EMAIL_CLEANUP_INTERVAL_MS    = 5 * 60_000;
+const emailStartLastAt = new Map();
 
 function requireLoopback(req, res, next) {
   const remote = req.socket.remoteAddress ?? '';
@@ -21,7 +26,84 @@ const INCREMENT  = 50;
 const MAX_PRICE  = 1000;
 
 function calculateJoinPrice() {
-  return Math.min(BASE_PRICE + NodeStore.listNodes().length * INCREMENT, MAX_PRICE);
+  return Math.min(BASE_PRICE + NodeStore.countNodes() * INCREMENT, MAX_PRICE);
+}
+
+function canonicalHeartbeatBytes({ node_id, rps, p95_ms, version, timestamp, nonce }) {
+  return Buffer.from(JSON.stringify({
+    node_id,
+    rps:       rps ?? null,
+    p95_ms:    p95_ms ?? null,
+    version:   version ?? null,
+    timestamp,
+    nonce,
+  }), 'utf8');
+}
+
+function verifyHeartbeatSignature(node, body) {
+  if (!node.pubkey_ed25519) {
+    const error = new Error('Node has no ed25519 key on file — heartbeat signature cannot be verified');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const { timestamp, nonce, signature } = body;
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+    const error = new Error('Heartbeat body must include numeric timestamp (unix seconds)');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (typeof nonce !== 'string' || nonce.length < 8) {
+    const error = new Error('Heartbeat body must include nonce (string, ≥8 chars)');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (typeof signature !== 'string' || signature.length === 0) {
+    const error = new Error('Heartbeat body must include base64 signature');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - timestamp) > HEARTBEAT_TIMESTAMP_SKEW_SEC) {
+    const error = new Error(`Heartbeat timestamp outside ±${HEARTBEAT_TIMESTAMP_SKEW_SEC}s skew`);
+    error.statusCode = 401;
+    throw error;
+  }
+
+  let pubKey;
+  try {
+    pubKey = crypto.createPublicKey({ key: node.pubkey_ed25519, format: 'der', type: 'spki' });
+  } catch {
+    const error = new Error('Stored node ed25519 public key is invalid');
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const canonical = canonicalHeartbeatBytes({
+    node_id:   node.id,
+    rps:       body.rps,
+    p95_ms:    body.p95_ms,
+    version:   body.version,
+    timestamp,
+    nonce,
+  });
+
+  let signatureBuf;
+  try {
+    signatureBuf = Buffer.from(signature, 'base64');
+  } catch {
+    const error = new Error('Heartbeat signature is not valid base64');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const verified = crypto.verify(null, canonical, pubKey, signatureBuf);
+  if (!verified) {
+    const error = new Error('Heartbeat signature verification failed');
+    error.statusCode = 401;
+    throw error;
+  }
 }
 
 function verifyJoinRequest({ join_id, join_signature, pubkey_ed25519_pem }) {
@@ -103,9 +185,46 @@ function sameKey(left, right) {
 export function registerNodes(app, httpsServer, x402Server, config) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
-  app.post('/node/email/start', async (req, res) => {
+  const emailCleanupTimer = setInterval(() => {
     try {
-      const email = String(req.body?.email ?? '').trim();
+      const deleted = NodeStore.deleteExpiredEmailVerifications();
+      if (deleted > 0) console.log(`[Email] Pruned ${deleted} expired verifications`);
+    } catch (error) {
+      console.error('[Email] Cleanup failed:', error.message);
+    }
+    const cutoff = Date.now() - EMAIL_START_MIN_INTERVAL_MS;
+    for (const [email, ts] of emailStartLastAt) {
+      if (ts < cutoff) emailStartLastAt.delete(email);
+    }
+  }, EMAIL_CLEANUP_INTERVAL_MS);
+  emailCleanupTimer.unref();
+
+  const emailStartIpLimiter = rateLimit({
+    windowMs:        15 * 60_000,
+    max:             10,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    message:         { error: 'Too many email verification requests from this IP' },
+  });
+
+  app.post('/node/email/start', emailStartIpLimiter, async (req, res) => {
+    try {
+      const email = String(req.body?.email ?? '').trim().toLowerCase();
+      if (!email) return res.status(400).json({ error: 'email is required' });
+      if (!isValidEmail(email)) return res.status(400).json({ error: 'Invalid email address' });
+
+      const now  = Date.now();
+      const last = emailStartLastAt.get(email);
+      if (last && now - last < EMAIL_START_MIN_INTERVAL_MS) {
+        const retryAfter = Math.ceil((EMAIL_START_MIN_INTERVAL_MS - (now - last)) / 1000);
+        res.set('Retry-After', String(retryAfter));
+        return res.status(429).json({
+          error:        'Email verification recently requested',
+          retry_after:  retryAfter,
+        });
+      }
+      emailStartLastAt.set(email, now);
+
       const verification = await startEmailVerification(email);
       res.json({ success: true, ...verification });
     } catch (error) {
@@ -357,10 +476,19 @@ export function registerNodes(app, httpsServer, x402Server, config) {
   app.post('/node/heartbeat/:node_id', (req, res) => {
     try {
       const { node_id } = req.params;
-      const { rps, p95_ms, version } = req.body;
+      const { rps, p95_ms, version } = req.body ?? {};
 
       const node = NodeStore.getNode(node_id);
       if (!node) return res.status(404).json({ error: 'Node not found' });
+
+      try {
+        verifyHeartbeatSignature(node, req.body ?? {});
+      } catch (error) {
+        return res.status(error.statusCode ?? 401).json({
+          error:   'Heartbeat authentication failed',
+          message: error.message,
+        });
+      }
 
       NodeStore.heartbeat(node_id, { rps, p95_ms, version });
       res.json({ success: true, node_id, message: 'Heartbeat recorded', next_heartbeat_in: 300 });

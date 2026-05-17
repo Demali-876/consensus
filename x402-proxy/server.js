@@ -7,6 +7,7 @@ import express from 'express';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
+import crypto from 'crypto';
 import { WalletStore } from './data/store.js';
 import { privateKeyToAccount } from 'viem/accounts';
 import { wrapFetchWithPayment } from '@x402/fetch';
@@ -35,6 +36,13 @@ const consensusServerUrl =
 const walletStore = new WalletStore();
 const registeredWallets = new Map();
 const walletClients = new Map();
+// Maps SHA-256(apiKey) → walletName so validateApiKey can resolve a request
+// with a single Map.get(), avoiding ChaCha20-Poly1305 decryption per request.
+const apiKeyHashToWallet = new Map();
+
+function sha256Hex(input) {
+  return crypto.createHash('sha256').update(input).digest('hex');
+}
 app.set('trust proxy', 1);
 
 app.use(helmet());
@@ -57,13 +65,20 @@ function validateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'Missing API key' });
 
-  const walletData = walletStore.getWalletByApiKey(apiKey);
-  if (!walletData) return res.status(401).json({ error: 'Invalid API key' });
+  const walletName = apiKeyHashToWallet.get(sha256Hex(apiKey));
+  if (!walletName) return res.status(401).json({ error: 'Invalid API key' });
 
-  req.walletName = walletData.walletName;
+  const walletData = registeredWallets.get(walletName);
+  if (!walletData) {
+    // Cache references a wallet that is no longer in memory — bail safely.
+    apiKeyHashToWallet.delete(sha256Hex(apiKey));
+    return res.status(401).json({ error: 'Invalid API key' });
+  }
+
+  req.walletName = walletName;
   req.walletData = {
-    evm_address: walletData.evmAddress,
-    solana_address: walletData.solanaAddress,
+    evm_address:    walletData.evm_address,
+    solana_address: walletData.solana_address,
   };
 
   next();
@@ -109,6 +124,7 @@ async function restoreWallets() {
       });
 
       walletClients.set(wallet.walletName, fetchWithPayment);
+      if (wallet.apiKeyHash) apiKeyHashToWallet.set(wallet.apiKeyHash, wallet.walletName);
 
       return wallet.walletName;
     })
@@ -156,6 +172,7 @@ app.post('/register-wallet', requireLoopback, async (req, res) => {
       solana_address: solana.address,
     });
     walletClients.set(wallet_name, fetchWithPayment);
+    apiKeyHashToWallet.set(sha256Hex(storeResult.apiKey), wallet_name);
 
     console.log(`✓ Registered wallet: ${wallet_name}`);
     res.json({

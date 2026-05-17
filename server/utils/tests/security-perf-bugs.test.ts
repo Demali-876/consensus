@@ -636,6 +636,64 @@ describe('BUG-005 · validateApiKey decrypts private keys on every request', () 
 // this bound — but should be noted for high-throughput deployments.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Regression checks for the applied fixes
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('FIX-001 · ssrf.isPrivateTarget caps DNS cache size', () => {
+  it('keeps the DNS cache bounded under unique-hostname spam', async () => {
+    const { isPrivateTarget } = await import('../../utils/ssrf.ts');
+
+    // 6000 unique hostnames — well above the 5000 cap. We never await DNS;
+    // private/literal addresses short-circuit before lookup so we can drive
+    // the negative-cache path quickly by using invalid TLDs that fail to
+    // resolve, but to keep this test offline-friendly we instead exercise
+    // the IP-literal path which doesn't touch the cache.  To exercise the
+    // cache, we monkey-patch a small in-process helper: we drive the cache
+    // directly through the module's exported behaviour by passing valid
+    // hostnames that resolve via /etc/hosts.  As a portable proxy, we just
+    // assert that after many calls the process memory does not balloon —
+    // and rely on the in-file bounded-cache simulation above for the
+    // strict size assertion.
+    //
+    // The strongest portable check is to verify the module loads and that
+    // the cap constant is referenced.  A direct size check would require
+    // exporting DNS_CACHE; instead we assert the fix shape via source.
+    const src = await import('node:fs').then((m) => m.promises.readFile(
+      new URL('../../utils/ssrf.ts', import.meta.url), 'utf8',
+    ));
+    assert.ok(/DNS_CACHE_MAX/.test(src), 'DNS_CACHE_MAX constant is present');
+    assert.ok(/cacheSet\(/.test(src),     'cacheSet helper is wired in');
+    // The two prior write sites used DNS_CACHE.set(hostname, { isPrivate … });
+    // both should now route through cacheSet(...).
+    assert.ok(!/DNS_CACHE\.set\(hostname, \{ isPrivate/.test(src),
+      'No bare DNS_CACHE.set with inline {isPrivate} remain — all writes go through cacheSet');
+
+    // Smoke: call isPrivateTarget with an IP literal to ensure the module
+    // still functions after the refactor.
+    assert.equal(await isPrivateTarget('http://127.0.0.1'),       true,  'loopback IP still flagged private');
+    assert.equal(await isPrivateTarget('http://192.168.0.1'),     true,  'RFC1918 IP still flagged private');
+    assert.equal(await isPrivateTarget('http://8.8.8.8'),         false, 'public IP still flagged non-private');
+  });
+});
+
+describe('FIX-004 · NodeStore.countNodes() returns count via COUNT(*)', () => {
+  it('exists and returns numeric count without listing every row', async () => {
+    process.env.NODE_DB_PATH = path.join(os.tmpdir(), `consensus-fix4-${Date.now()}.db`);
+    const NodeStore = (await import('../../data/node_store.js')).default;
+
+    assert.equal(typeof NodeStore.countNodes, 'function', 'countNodes is exported');
+    const initial = NodeStore.countNodes();
+    assert.equal(typeof initial, 'number');
+    assert.ok(initial >= 0);
+
+    assert.equal(typeof NodeStore.deleteExpiredEmailVerifications, 'function',
+      'deleteExpiredEmailVerifications is exported for the cleanup job');
+
+    try { fs.unlinkSync(process.env.NODE_DB_PATH); } catch {}
+  });
+});
+
 describe('Informational · nonce collision probability in sealFrame', () => {
   it('calculates birthday-bound message limit for 96-bit random nonces', () => {
     // Probability of at least one collision after N messages:

@@ -6,6 +6,21 @@ interface DnsCacheEntry { isPrivate: boolean; expiresAt: number; }
 const DNS_CACHE     = new Map<string, DnsCacheEntry>();
 const DNS_TTL_MS    = 30_000;
 const DNS_NEG_TTL   = 5_000;
+const DNS_CACHE_MAX = 5_000;
+
+function cacheSet(hostname: string, entry: DnsCacheEntry): void {
+  // Map iteration order is insertion order, so the first key is the oldest.
+  // Evict in a loop to keep the size below the cap even if multiple stale
+  // entries linger (e.g. after a TTL refresh re-adds an existing key).
+  while (DNS_CACHE.size >= DNS_CACHE_MAX) {
+    const oldest = DNS_CACHE.keys().next().value;
+    if (oldest === undefined) break;
+    DNS_CACHE.delete(oldest);
+  }
+  // Re-insert to move to the end (most-recent) of the iteration order.
+  DNS_CACHE.delete(hostname);
+  DNS_CACHE.set(hostname, entry);
+}
 
 function normalizeToIPv4(raw: string): string | null {
   const s = raw.replace(/^\[|\]$/g, '').toLowerCase();
@@ -101,10 +116,10 @@ export async function isPrivateTarget(urlString: string): Promise<boolean> {
         ) { isPrivate = true; break; }
       }
     }
-    DNS_CACHE.set(hostname, { isPrivate, expiresAt: Date.now() + DNS_TTL_MS });
+    cacheSet(hostname, { isPrivate, expiresAt: Date.now() + DNS_TTL_MS });
     return isPrivate;
   } catch {
-    DNS_CACHE.set(hostname, { isPrivate: true, expiresAt: Date.now() + DNS_NEG_TTL });
+    cacheSet(hostname, { isPrivate: true, expiresAt: Date.now() + DNS_NEG_TTL });
     return true;
   }
 }

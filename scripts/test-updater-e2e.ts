@@ -58,6 +58,25 @@ function signPayload(payload: Record<string, unknown>, privateKeyPem: string): s
   return crypto.sign(null, buf, key).toString("base64");
 }
 
+function signedHeartbeat(
+  nodeId: string,
+  fields: { rps: number | null; p95_ms: number | null; version: string | null },
+  privateKeyPem: string,
+): Record<string, unknown> {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomBytes(16).toString("hex");
+  const canonical = JSON.stringify({
+    node_id:   nodeId,
+    rps:       fields.rps ?? null,
+    p95_ms:    fields.p95_ms ?? null,
+    version:   fields.version ?? null,
+    timestamp,
+    nonce,
+  });
+  const signature = crypto.sign(null, Buffer.from(canonical, "utf8"), crypto.createPrivateKey(privateKeyPem)).toString("base64");
+  return { ...fields, timestamp, nonce, signature };
+}
+
 // ---------------------------------------------------------------------------
 // Tiny benchmark stub server
 // ---------------------------------------------------------------------------
@@ -410,11 +429,10 @@ async function main() {
   }
 
   {
-    const { status, json } = await post(`/node/heartbeat/${nodeId}`, {
-      rps: 10,
-      p95_ms: 50,
-      version: CURRENT_VERSION, // older than required TEST_VERSION
-    });
+    const { status, json } = await post(
+      `/node/heartbeat/${nodeId}`,
+      signedHeartbeat(nodeId, { rps: 10, p95_ms: 50, version: CURRENT_VERSION }, nodeKeys.privateKey),
+    );
     assert(status === 200, "Status 200", `got ${status}`);
     assert(json.update_available !== undefined, "update_available present", JSON.stringify(json));
     if (json.update_available) {
@@ -493,11 +511,10 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log("\n━━━ Step 11: Heartbeat detects update ━━━");
   {
-    const { json } = await post(`/node/heartbeat/${nodeId}`, {
-      rps: 10,
-      p95_ms: 50,
-      version: V1,
-    });
+    const { json } = await post(
+      `/node/heartbeat/${nodeId}`,
+      signedHeartbeat(nodeId, { rps: 10, p95_ms: 50, version: V1 }, nodeKeys.privateKey),
+    );
     assert(json.update_available !== undefined, "update_available present");
     assert(json.update_available?.version === V2, `update to ${V2}`, `got ${json.update_available?.version}`);
   }
@@ -559,11 +576,10 @@ async function main() {
 
   // Heartbeat at v0.2.0 — no update available
   {
-    const { json } = await post(`/node/heartbeat/${nodeId}`, {
-      rps: 15,
-      p95_ms: 40,
-      version: V2,
-    });
+    const { json } = await post(
+      `/node/heartbeat/${nodeId}`,
+      signedHeartbeat(nodeId, { rps: 15, p95_ms: 40, version: V2 }, nodeKeys.privateKey),
+    );
     assert(json.update_available == null, "no update_available (already current)", JSON.stringify(json));
   }
 
