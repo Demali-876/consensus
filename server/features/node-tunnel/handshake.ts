@@ -162,6 +162,8 @@ function assertHandshakeReject(value: unknown): asserts value is HandshakeReject
   assertString(message.message, 'message');
 }
 
+const HANDSHAKE_FRESHNESS_SECS = 120;
+
 function assertHandshakeBase(value: unknown, type: string): Record<string, unknown> {
   if (!value || typeof value !== 'object') throw new TypeError('Handshake message must be an object');
   const message = value as Record<string, unknown>;
@@ -170,6 +172,10 @@ function assertHandshakeBase(value: unknown, type: string): Record<string, unkno
   if (message.version !== HANDSHAKE_VERSION) throw new TypeError(`Unsupported handshake version: ${String(message.version)}`);
   if (typeof message.timestamp !== 'number' || !Number.isFinite(message.timestamp)) {
     throw new TypeError('Handshake timestamp must be a finite number');
+  }
+  const ageSecs = Math.abs(nowSeconds() - (message.timestamp as number));
+  if (ageSecs > HANDSHAKE_FRESHNESS_SECS) {
+    throw new TypeError(`Handshake timestamp is stale: ${ageSecs}s old (max ${HANDSHAKE_FRESHNESS_SECS}s)`);
   }
   return message;
 }
