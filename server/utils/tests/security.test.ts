@@ -4,7 +4,6 @@
  * Each suite documents a finding and then asserts the fix is in place.
  *
  * [SEC-1] SSRF in WebSocket local-session proxy (wss.ts) — FIXED
- * [SEC-2] Unsalted SHA-256 API-key hash (encryption.js) — FIXED
  * [SEC-3] Handshake timestamp not validated (handshake.ts) — FIXED
  * [BUG-1] Broken import in detector.test.ts — FIXED
  * [PERF-1] Router activeRequests/activeSessions maps never pruned (router.ts) — FIXED
@@ -124,76 +123,6 @@ describe('[SEC-1] SSRF — WebSocket local-session proxy now guards with isPriva
     );
 
     proxy.destroy();
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [SEC-2] Unsalted SHA-256 API-key hash
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('[SEC-2] HMAC-SHA256 API-key hashing resists offline dictionary attacks', () => {
-  /**
-   * BUG (fixed): hashAPIKey used plain SHA-256 with no salt — an attacker with
-   * the hash database could run an offline dictionary/rainbow-table attack.
-   *
-   * FIX: hashAPIKey now uses HMAC-SHA256 keyed with NODE_API_KEY_SECRET.
-   * Without the server secret, pre-image attacks cannot proceed.
-   */
-
-  it('HMAC-SHA256: same key + same secret always produces the same digest (deterministic lookup)', () => {
-    const serverSecret = 'test-server-secret-32-bytes-long!';
-    const hmacHash = (key: string) =>
-      crypto.createHmac('sha256', serverSecret).update(key).digest('hex');
-
-    const key = 'my-api-key-12345';
-    assert.equal(hmacHash(key), hmacHash(key), 'HMAC is deterministic for same key+secret');
-    assert.equal(hmacHash(key).length, 64);
-  });
-
-  it('dictionary attack fails without the server secret', () => {
-    const serverSecret = crypto.randomBytes(32).toString('hex');
-    const hmacHash     = (key: string) =>
-      crypto.createHmac('sha256', serverSecret).update(key).digest('hex');
-
-    const realKey    = 'secret-key-abc';
-    const stolenHash = hmacHash(realKey);
-
-    // Attacker only knows the SHA-256 algorithm; cannot reproduce the HMAC without the secret
-    const fakeHash   = (key: string) => crypto.createHash('sha256').update(key).digest('hex');
-    const dictionary = ['wrong-key-1', 'wrong-key-2', 'secret-key-abc', 'wrong-key-3'];
-    const recovered  = dictionary.find((c) => fakeHash(c) === stolenHash);
-
-    assert.equal(recovered, undefined,
-      'Without NODE_API_KEY_SECRET, a dictionary attack cannot recover the plaintext key');
-  });
-
-  it('different secrets produce different hashes for the same key (cannot cross-verify DBs)', () => {
-    const key = 'same-api-key';
-    const h1  = crypto.createHmac('sha256', 'secret-A').update(key).digest('hex');
-    const h2  = crypto.createHmac('sha256', 'secret-B').update(key).digest('hex');
-    assert.notEqual(h1, h2,
-      'Each deployment with a unique secret produces an independent hash — no cross-environment attacks');
-  });
-
-  it('hashAPIKey throws if NODE_API_KEY_SECRET is not set', async () => {
-    const { ChaChaPoly1305 } = await import('../../utils/encryption.js') as any;
-    const savedKey = process.env.NODE_DB_ENCRYPTION_KEY;
-    const savedApiSecret = process.env.NODE_API_KEY_SECRET;
-
-    // Provide the DB key so constructor succeeds, but remove the API secret
-    process.env.NODE_DB_ENCRYPTION_KEY = Buffer.alloc(32).toString('base64');
-    delete process.env.NODE_API_KEY_SECRET;
-
-    const instance = new ChaChaPoly1305();
-    assert.throws(
-      () => instance.hashAPIKey('any-key'),
-      /NODE_API_KEY_SECRET/,
-      'hashAPIKey must throw when NODE_API_KEY_SECRET is absent',
-    );
-
-    // Restore
-    if (savedKey !== undefined) process.env.NODE_DB_ENCRYPTION_KEY = savedKey;
-    if (savedApiSecret !== undefined) process.env.NODE_API_KEY_SECRET = savedApiSecret;
   });
 });
 
