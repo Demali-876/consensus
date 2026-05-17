@@ -220,6 +220,8 @@ const listNodesForRoutingStmt = db.prepare(`
   ORDER BY created_at DESC
 `);
 
+const countNodesStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM nodes`);
+
 const insertHeartbeatStmt = db.prepare(`
   INSERT INTO heartbeats (node_id, rps, p95_ms, version, created_at)
   VALUES (?, ?, ?, ?, ?)
@@ -397,6 +399,11 @@ export const NodeStore = {
       domain:       row.domain,
       capabilities: fromJson(row.capabilities, {}),
     }));
+  },
+
+  // O(1) row count — use instead of listNodes().length wherever only the count matters.
+  countNodes() {
+    return (countNodesStmt.get()).cnt;
   },
 
   setDomain(id, domain) {

@@ -2,10 +2,31 @@ import dns from 'node:dns/promises';
 
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 
-interface DnsCacheEntry { isPrivate: boolean; expiresAt: number; }
-const DNS_CACHE     = new Map<string, DnsCacheEntry>();
-const DNS_TTL_MS    = 30_000;
-const DNS_NEG_TTL   = 5_000;
+/**
+ * Returned by resolveAndCheckTarget() for every URL that passes the SSRF check.
+ * Callers must bind the outgoing TCP connection to `ip` (via a custom lookup or
+ * URL rewrite) so no second DNS query is ever made — closing the TOCTOU window.
+ */
+export interface SafeResolution {
+  /** Verified non-private IPv4 dotted-decimal or raw IPv6 string. */
+  ip:        string;
+  family:    4 | 6;
+  /** Original hostname as it appeared in the URL — needed for Host header & TLS SNI. */
+  hostname:  string;
+  /** True when the URL contained a literal IP address; no DNS was performed. */
+  isLiteral: boolean;
+}
+
+interface DnsCacheEntry {
+  isPrivate: boolean;
+  ip?:       string;   // first verified-safe address; present only when isPrivate === false
+  family?:   4 | 6;
+  expiresAt: number;
+}
+
+const DNS_CACHE   = new Map<string, DnsCacheEntry>();
+const DNS_TTL_MS  = 30_000;
+const DNS_NEG_TTL = 5_000;
 
 function normalizeToIPv4(raw: string): string | null {
   const s = raw.replace(/^\[|\]$/g, '').toLowerCase();
@@ -63,48 +84,89 @@ function isPrivateIPv4(ip: string): boolean {
   );
 }
 
-export async function isPrivateTarget(urlString: string): Promise<boolean> {
-  let parsed: URL;
-  try { parsed = new URL(urlString); } catch { return true; }
+// `bare` must already be lowercased and bracket-stripped.
+function isPrivateIPv6Bare(bare: string): boolean {
+  if (bare === '::1') return true;
+  if (/^fe80:/i.test(bare)) return true;
+  if (/^f[cd][0-9a-f]{2}:/i.test(bare)) return true;
+  const mapped = normalizeToIPv4(bare);
+  return mapped !== null && isPrivateIPv4(mapped);
+}
 
-  if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) return true;
-  if (parsed.hostname !== decodeURIComponent(parsed.hostname)) return true;
+const FORBIDDEN = 'Forbidden target_url — private/internal addresses are not allowed';
+
+/**
+ * Resolves and validates a URL target.  Throws TypeError for every forbidden
+ * case (invalid URL, disallowed protocol, private address, DNS failure).
+ *
+ * The returned SafeResolution contains the verified IP address.  Callers MUST
+ * bind the outgoing TCP connection to that IP — do not let the HTTP stack
+ * re-resolve the hostname — so the SSRF check and the actual connection share
+ * a single DNS result with no TOCTOU window between them.
+ */
+export async function resolveAndCheckTarget(urlString: string): Promise<SafeResolution> {
+  let parsed: URL;
+  try { parsed = new URL(urlString); } catch { throw new TypeError(FORBIDDEN); }
+
+  if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) throw new TypeError(FORBIDDEN);
+  if (parsed.hostname !== decodeURIComponent(parsed.hostname)) throw new TypeError(FORBIDDEN);
 
   const hostname = parsed.hostname.toLowerCase();
   const bare     = hostname.replace(/^\[|\]$/g, '');
 
-  if (bare === '::1')                    return true;
-  if (/^fe80:/i.test(bare))             return true;
-  if (/^f[cd][0-9a-f]{2}:/i.test(bare)) return true;
+  // IPv6 literal — check private ranges before touching DNS
+  if (isPrivateIPv6Bare(bare)) throw new TypeError(FORBIDDEN);
 
+  // IPv4 literal (or IPv6-mapped variant) — no DNS needed
   const normalized = normalizeToIPv4(bare);
   if (normalized !== null) {
-    return isPrivateIPv4(normalized);
+    if (isPrivateIPv4(normalized)) throw new TypeError(FORBIDDEN);
+    return { ip: normalized, family: 4, hostname: normalized, isLiteral: true };
   }
 
+  // Hostname — serve from cache when still fresh
   const cached = DNS_CACHE.get(hostname);
-  if (cached && Date.now() < cached.expiresAt) return cached.isPrivate;
+  if (cached && Date.now() < cached.expiresAt) {
+    if (cached.isPrivate || !cached.ip) throw new TypeError(FORBIDDEN);
+    return { ip: cached.ip, family: cached.family!, hostname, isLiteral: false };
+  }
 
+  // DNS resolution — check every record; reject if any is private
   try {
     const records = await dns.lookup(hostname, { all: true, verbatim: true });
-    let isPrivate = false;
+
+    let safeIp:     string | undefined;
+    let safeFamily: 4 | 6  | undefined;
+    let anyPrivate = false;
+
     for (const { address, family } of records) {
       if (family === 4) {
-        if (isPrivateIPv4(address)) { isPrivate = true; break; }
+        if (isPrivateIPv4(address)) { anyPrivate = true; }
+        else if (!safeIp)           { safeIp = address; safeFamily = 4; }
       } else if (family === 6) {
-        const addr = address.toLowerCase();
-        if (
-          addr === '::1'                    ||
-          /^fe80:/i.test(addr)              ||
-          /^f[cd][0-9a-f]{2}:/i.test(addr) ||
-          (normalizeToIPv4(addr) !== null && isPrivateIPv4(normalizeToIPv4(addr)!))
-        ) { isPrivate = true; break; }
+        if (isPrivateIPv6Bare(address.toLowerCase())) { anyPrivate = true; }
+        else if (!safeIp)                             { safeIp = address; safeFamily = 6; }
       }
     }
-    DNS_CACHE.set(hostname, { isPrivate, expiresAt: Date.now() + DNS_TTL_MS });
-    return isPrivate;
-  } catch {
+
+    if (anyPrivate || !safeIp) {
+      DNS_CACHE.set(hostname, { isPrivate: true, expiresAt: Date.now() + DNS_TTL_MS });
+      throw new TypeError(FORBIDDEN);
+    }
+
+    DNS_CACHE.set(hostname, { isPrivate: false, ip: safeIp, family: safeFamily, expiresAt: Date.now() + DNS_TTL_MS });
+    return { ip: safeIp, family: safeFamily!, hostname, isLiteral: false };
+
+  } catch (err) {
+    if (err instanceof TypeError) throw err;
+    // DNS failure — fail closed (treat as private)
     DNS_CACHE.set(hostname, { isPrivate: true, expiresAt: Date.now() + DNS_NEG_TTL });
-    return true;
+    throw new TypeError(FORBIDDEN);
   }
+}
+
+/** Backward-compatible boolean wrapper kept for existing call sites and tests. */
+export async function isPrivateTarget(urlString: string): Promise<boolean> {
+  try { await resolveAndCheckTarget(urlString); return false; }
+  catch { return true; }
 }
