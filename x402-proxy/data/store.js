@@ -159,7 +159,30 @@ export class WalletStore {
     }
   }
   /**
-   * Get wallet by API key and decrypt private keys
+   * Authenticate by API key — returns wallet metadata only, no key decryption.
+   * Use this in middleware where private keys are not needed.
+   */
+  getWalletMetaByApiKey(apiKey) {
+    try {
+      const apiKeyHash = this.cipher.hashAPIKey(apiKey);
+      const stmt = this.db.prepare(
+        'SELECT wallet_name, evm_address, solana_address FROM wallets WHERE api_key_hash = ?',
+      );
+      const row = stmt.get(apiKeyHash);
+      if (!row) return null;
+      return {
+        walletName:     row.wallet_name,
+        evmAddress:     row.evm_address,
+        solanaAddress:  row.solana_address,
+      };
+    } catch (error) {
+      console.error('Failed to get wallet meta by API key:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Get wallet by API key and decrypt private keys (use only when signing is needed)
    */
   getWalletByApiKey(apiKey) {
     try {

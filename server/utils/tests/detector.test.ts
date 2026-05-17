@@ -106,7 +106,7 @@ describe('IP detector', () => {
       observation(6 * DAY, '203.0.113.44', '2603:7081:7a3e:ba00:cccc:cccc:cccc:cccc'),
     ];
 
-    const currentObs: DeviceIpObservation = {
+    const current: DeviceIpObservation = {
       observedAt: 8 * DAY,
       publicIps: {
         ipv4: '203.0.113.44',
@@ -115,10 +115,9 @@ describe('IP detector', () => {
       localAssignment: 'manual',
     };
 
-    const { clue } = depositIp('test-node', currentObs, history, { persist: false });
-    const fullHistory = [...history, currentObs];
+    const result = depositIp('test-node-001', current, history, { persist: false });
 
-    assert.equal(fullHistory.length, 4);
-    assert.equal(clue.kind, 'static');
+    assert.ok(result.deposited.includes('203.0.113.44'));
+    assert.equal(result.clue.kind, 'static');
   });
 });

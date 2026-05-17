@@ -9,3 +9,4 @@ main.csr
 /node-certs
 data/*.json
 consensus.*
+ip-pool.*

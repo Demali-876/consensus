@@ -21,7 +21,7 @@ const INCREMENT  = 50;
 const MAX_PRICE  = 1000;
 
 function calculateJoinPrice() {
-  return Math.min(BASE_PRICE + NodeStore.listNodes().length * INCREMENT, MAX_PRICE);
+  return Math.min(BASE_PRICE + NodeStore.countNodes() * INCREMENT, MAX_PRICE);
 }
 
 function verifyJoinRequest({ join_id, join_signature, pubkey_ed25519_pem }) {
