@@ -6,7 +6,7 @@ import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
 import crypto                            from 'node:crypto';
 import Router                            from '../../router.ts';
-import { isPrivateTarget }               from '../../utils/ssrf.ts';
+import { resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts';
 
 const httpAgent  = new http.Agent ({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
@@ -41,8 +41,6 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
-  /** Override the SSRF check — defaults to isPrivateTarget. Inject a permissive stub in tests. */
-  ssrfCheck?: (url: string) => Promise<boolean>;
 }
 
 export interface ProxyResponse {
@@ -80,7 +78,6 @@ interface DedupeParams {
 // ── Request/response size caps ─────────────────────────────────────────────────
 const MAX_RESPONSE_BYTES = 50 * 1024 * 1024;  // 50 MB
 const MAX_BODY_BYTES     = 10 * 1024 * 1024;  // 10 MB
-const MAX_CACHE_TTL      = 3_600;             // 1 hour — hard ceiling on caller-supplied TTL
 
 const STRIP_REQUEST_HEADERS = new Set([
   'host', 'content-length', 'content-encoding', 'transfer-encoding', 'connection',
@@ -96,6 +93,15 @@ const MULTI_SPACE   = /\s+/g;
 
 function sha256Hex(input: string | Buffer): string {
   return crypto.createHash('sha256').update(input).digest('hex');
+}
+
+// Rewrites the URL so its host is the pre-resolved IP, eliminating any
+// second DNS lookup by the HTTP stack (closes the SSRF TOCTOU window).
+function buildSafeUrl(originalUrl: string, resolved: SafeResolution): string {
+  if (resolved.isLiteral) return originalUrl;
+  const u = new URL(originalUrl);
+  u.hostname = resolved.family === 6 ? `[${resolved.ip}]` : resolved.ip;
+  return u.toString();
 }
 
 function deepSort(value: unknown): unknown {
@@ -195,7 +201,6 @@ export default class ConsensusProxy {
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
-  private ssrfCheck:       (url: string) => Promise<boolean>;
 
   constructor(config: ProxyConfig = {}) {
     this.cache = new NodeCache({
@@ -210,7 +215,6 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
-    this.ssrfCheck       = config.ssrfCheck ?? isPrivateTarget;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -237,9 +241,8 @@ export default class ConsensusProxy {
     try { new URL(target_url); } catch {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
-    if (await this.ssrfCheck(target_url)) {
-      throw new TypeError(`Forbidden target_url — private/internal addresses are not allowed`);
-    }
+
+    const resolved = await resolveAndCheckTarget(target_url);
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
@@ -247,10 +250,9 @@ export default class ConsensusProxy {
     const ttlRaw      = headers['x-cache-ttl']
       ?? Object.entries(headers).find(([k]) => k.toLowerCase() === 'x-cache-ttl')?.[1];
     const ttlFromHdr  = ttlRaw !== undefined ? Number(ttlRaw) : NaN;
-    const callerTTL   = Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0
-                          ? Math.min(ttlFromHdr, MAX_CACHE_TTL)   // cap caller-supplied value
-                          : 300;
-    const resolvedTTL = cacheTTL !== undefined ? cacheTTL : callerTTL;
+    const resolvedTTL = cacheTTL !== undefined ? cacheTTL
+                      : Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0 ? ttlFromHdr
+                      : 300;
     const ttl = resolvedTTL === 0 ? 1 : Math.max(1, resolvedTTL);
 
     this.stats.total_requests++;
@@ -274,11 +276,11 @@ export default class ConsensusProxy {
 
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
     if (node && typeof node.id === 'string') {
-      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl);
+      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
     }
 
     console.log('[Self-Fallback] No nodes available, executing directly');
-    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
+    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
   }
 
   private async executeViaNode(
@@ -289,6 +291,7 @@ export default class ConsensusProxy {
     body:       RequestBody,
     dedupeKey:  string,
     ttl:        number,
+    resolved:   SafeResolution,
   ): Promise<ProxyResponse> {
     this.router.incrementRequest(node.id);
 
@@ -314,7 +317,7 @@ export default class ConsensusProxy {
 
       if (!node.domain) {
         console.log('[Fallback to Self] Selected node has no domain/control tunnel');
-        return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
+        return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
       }
 
       const response = await axios({
@@ -339,7 +342,7 @@ export default class ConsensusProxy {
     } catch (error) {
       console.error(`[Node Error] ${node.id}:`, (error as Error).message);
       console.log('[Fallback to Self] Executing directly');
-      return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl);
+      return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
     } finally {
       this.router.decrementRequest(node.id);
     }
@@ -383,11 +386,11 @@ export default class ConsensusProxy {
     body:       RequestBody,
     dedupeKey:  string,
     ttl:        number,
+    resolved:   SafeResolution,
   ): Promise<ProxyResponse> {
     let settle!: (r: ProxyResponse) => void;
     let reject!: (e: unknown) => void;
     const promise = new Promise<ProxyResponse>((res, rej) => { settle = res; reject = rej; });
-    promise.catch(() => {}); // prevent unhandledRejection when no concurrent waiter holds this reference
     this.pendingRequests.set(dedupeKey, promise);
     const leakGuard = setTimeout(() => {
       if (this.pendingRequests.has(dedupeKey)) {
@@ -397,7 +400,7 @@ export default class ConsensusProxy {
     }, 65_000);
 
     try {
-      const response = await this.makeRequest(target_url, method, headers, body);
+      const response = await this.makeRequest(target_url, method, headers, body, resolved);
       if (response.status >= 200 && response.status < 300) {
         this.cache.set(dedupeKey, response, ttl);
         console.log(`[Cache STORED] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
@@ -415,10 +418,11 @@ export default class ConsensusProxy {
   }
 
   private async makeRequest(
-    url:     string,
-    method:  string,
-    headers: Headers,
-    body?:   RequestBody,
+    url:      string,
+    method:   string,
+    headers:  Headers,
+    body?:    RequestBody,
+    resolved?: SafeResolution,
   ): Promise<ProxyResponse> {
     const cleanHeaders: Headers = {};
     for (const [k, v] of Object.entries(headers)) {
@@ -434,10 +438,30 @@ export default class ConsensusProxy {
       cleanHeaders['content-type'] = 'application/json';
     }
 
+    // Rewrite the URL to the pre-resolved IP so the HTTP stack never performs a
+    // second DNS lookup.  The original hostname goes into the Host header (required
+    // for virtual-host routing) and, for HTTPS, into the agent's servername option
+    // so TLS SNI and certificate validation still target the correct hostname.
+    let requestUrl        = url;
+    let requestHttpsAgent = httpsAgent;
+    if (resolved && !resolved.isLiteral) {
+      requestUrl = buildSafeUrl(url, resolved);
+      cleanHeaders['host'] = resolved.hostname;
+      if (url.startsWith('https:')) {
+        // Per-request agent: keepAlive disabled because each proxied target is
+        // a different server so there is nothing to pool across requests.
+        requestHttpsAgent = new https.Agent({
+          keepAlive: false,
+          timeout:   30_000,
+          servername: resolved.hostname,
+        });
+      }
+    }
+
     try {
       const response = await axios({
         method:           lowerMethod,
-        url,
+        url:              requestUrl,
         headers:          cleanHeaders,
         data:             withBody ? body : undefined,
         timeout:          30_000,
@@ -448,7 +472,7 @@ export default class ConsensusProxy {
         maxContentLength: MAX_RESPONSE_BYTES,
         maxBodyLength:    MAX_BODY_BYTES,
         httpAgent,
-        httpsAgent,
+        httpsAgent:       requestHttpsAgent,
       });
 
       let raw: Buffer = Buffer.isBuffer(response.data)
@@ -458,10 +482,6 @@ export default class ConsensusProxy {
       if      (enc === 'gzip')    raw = await gunzipAsync(raw);
       else if (enc === 'deflate') raw = await inflateAsync(raw);
       else if (enc === 'br')      raw = await brotliDecompressAsync(raw);
-
-      if (raw.length > MAX_RESPONSE_BYTES) {
-        throw new Error(`Decompressed response body exceeds limit (${raw.length} > ${MAX_RESPONSE_BYTES} bytes)`);
-      }
 
       const text = raw.toString('utf8');
       let data: unknown;
