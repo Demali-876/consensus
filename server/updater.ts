@@ -182,7 +182,7 @@ export function registerUpdater(app: Express, config: UpdaterConfig = {}): void 
         log.error("updater", "manifest-rejected", { reason: "admin key not configured" });
         return res.status(503).json({ error: "Admin key not configured" });
       }
-      if (req.headers["x-admin-key"] !== config.adminKey) {
+      if (!isAdminKeyValid(req.headers["x-admin-key"], config.adminKey)) {
         log.warn("updater", "manifest-rejected", { reason: "invalid admin key" });
         return res.status(403).json({ error: "Invalid admin key" });
       }
@@ -237,6 +237,28 @@ function manifestMatchesRequired(observed: NodeReleaseManifest, required: NodeRe
     observed.commit === required.commit &&
     observed.routes_hash === required.routes_hash &&
     (required.tarball_sha256 == null || observed.tarball_sha256 === required.tarball_sha256);
+}
+
+/**
+ * Constant-time comparison for the admin key.  The naive `presented === expected`
+ * short-circuits at the first differing byte and leaks character positions via
+ * response timing, allowing byte-by-byte recovery of the key over many requests.
+ *
+ * crypto.timingSafeEqual requires equal-length inputs; we normalise both values
+ * to the longer of the two so timing does not vary with the presented length.
+ * A separate length check then enforces the actual length match.
+ */
+function isAdminKeyValid(presentedHeader: unknown, expected: string): boolean {
+  const presented = typeof presentedHeader === "string" ? presentedHeader : "";
+  const presentedBuf = Buffer.from(presented, "utf8");
+  const expectedBuf  = Buffer.from(expected,  "utf8");
+  const padLen       = Math.max(presentedBuf.length, expectedBuf.length);
+  const padPresented = Buffer.alloc(padLen);
+  const padExpected  = Buffer.alloc(padLen);
+  presentedBuf.copy(padPresented);
+  expectedBuf.copy(padExpected);
+  const equal = crypto.timingSafeEqual(padPresented, padExpected);
+  return presentedBuf.length === expectedBuf.length && equal;
 }
 
 function canonicalJson(value: unknown): string {

@@ -51,15 +51,19 @@ function normalizeToIPv4(raw: string): string | null {
 function isPrivateIPv4(ip: string): boolean {
   const p = ip.split('.').map(Number);
   if (p.length !== 4 || p.some((n) => isNaN(n) || n < 0 || n > 255)) return false;
-  const [a, b] = p as [number, number, number, number];
+  const [a, b, c] = p as [number, number, number, number];
   return (
-    a === 127                         ||
-    a === 0                           ||
-    a === 10                          ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168)          ||
-    (a === 169 && b === 254)          ||
-    (a === 100 && b >= 64 && b <= 127)
+    a === 127                                  ||
+    a === 0                                    ||
+    a === 10                                   ||
+    (a === 172 && b >= 16 && b <= 31)          ||
+    (a === 192 && b === 168)                   ||
+    (a === 169 && b === 254)                   ||
+    (a === 100 && b >= 64 && b <= 127)         ||
+    // RFC 5737 reserved documentation/test ranges — must not be routed publicly
+    (a === 192 && b === 0   && c === 2)        ||  // TEST-NET-1   192.0.2.0/24
+    (a === 198 && b === 51  && c === 100)      ||  // TEST-NET-2   198.51.100.0/24
+    (a === 203 && b === 0   && c === 113)          // TEST-NET-3   203.0.113.0/24
   );
 }
 
