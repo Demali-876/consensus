@@ -1010,9 +1010,13 @@ function attachRawTunnelStream(
   session.streams.set(streamId, {
     streamId,
     onData: input.onData,
-    onClose: () => {
+    onClose: (reason?: string) => {
       close('node stream closed');
-      input.onEnd();
+      if (reason && reason !== 'target closed') {
+        input.onError(new Error(reason));
+      } else {
+        input.onEnd();
+      }
     },
   });
 
