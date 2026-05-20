@@ -314,6 +314,31 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
       if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
       return attachRawTunnelStream(session, input);
     },
+    attachTunnelOwnerSession: (
+      nodeId: string,
+      input: {
+        tunnelId: string;
+        ownerWs: WebSocket;
+      },
+    ) => {
+      const session = getControlSession(nodeId);
+      if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
+      return attachTunnelOwnerSession(session, input);
+    },
+    attachPublicTunnelStream: (
+      nodeId: string,
+      input: {
+        tunnelId: string;
+        initialData?: Buffer;
+        onData: (data: Buffer) => void;
+        onEnd: () => void;
+        onError: (error: Error) => void;
+      },
+    ) => {
+      const session = getControlSession(nodeId);
+      if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
+      return attachPublicTunnelStream(session, input);
+    },
     prepareNodeUpdate,
     applyNodeUpdate,
     stopUpdateScheduler: () => scheduler?.stop(),
@@ -1049,6 +1074,192 @@ function attachRawTunnelStream(
       stream_id: streamId,
       target_host: input.targetHost,
       target_port: input.targetPort,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    input.onError(error instanceof Error ? error : new Error(String(error)));
+  });
+
+  return {
+    streamId,
+    send: (data: Buffer) => {
+      if (closed || session.ws.readyState !== WebSocket.OPEN) return;
+      void sendEncrypted(session, {
+        type: MESSAGE_TYPE.STREAM_DATA,
+        timestamp: nowSeconds(),
+        stream_id: streamId,
+        data: data.toString('base64'),
+        encoding: 'base64',
+      }).catch((error) => input.onError(error instanceof Error ? error : new Error(String(error))));
+    },
+    close,
+  };
+}
+
+function attachTunnelOwnerSession(
+  session: NodeTunnelSession,
+  input: {
+    tunnelId: string;
+    ownerWs: WebSocket;
+  },
+): { streamId: string; close: (reason?: string) => void } {
+  const streamId = crypto.randomUUID();
+  let closed = false;
+
+  log.info('node-tunnel', 'tunnel-owner-open', {
+    session_id: session.id,
+    node_id: session.nodeId ?? null,
+    tunnel_id: input.tunnelId,
+    stream_id: streamId,
+  });
+
+  const close = (reason = 'closed') => {
+    if (closed) return;
+    closed = true;
+    session.streams.delete(streamId);
+    log.info('node-tunnel', 'tunnel-owner-close-send', {
+      session_id: session.id,
+      node_id: session.nodeId ?? null,
+      tunnel_id: input.tunnelId,
+      stream_id: streamId,
+      reason,
+    });
+    void sendEncrypted(session, {
+      type: MESSAGE_TYPE.STREAM_CLOSE,
+      timestamp: nowSeconds(),
+      stream_id: streamId,
+      reason,
+    }).catch(() => undefined);
+  };
+
+  session.streams.set(streamId, {
+    streamId,
+    onData: (data) => {
+      if (input.ownerWs.readyState === WebSocket.OPEN) input.ownerWs.send(data);
+    },
+    onClose: (reason?: string) => {
+      close('node owner stream closed');
+      if (input.ownerWs.readyState === WebSocket.OPEN) {
+        input.ownerWs.close(1011, reason ?? 'node owner stream closed');
+      }
+    },
+  });
+
+  void sendEncrypted(session, {
+    type: MESSAGE_TYPE.STREAM_OPEN,
+    timestamp: nowSeconds(),
+    stream_id: streamId,
+    target: JSON.stringify({
+      kind: 'public-tunnel-owner',
+      tunnel_id: input.tunnelId,
+    }),
+  }).catch((error) => {
+    session.streams.delete(streamId);
+    closed = true;
+    log.error('node-tunnel', 'tunnel-owner-open-failed', {
+      session_id: session.id,
+      node_id: session.nodeId ?? null,
+      tunnel_id: input.tunnelId,
+      stream_id: streamId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    if (input.ownerWs.readyState === WebSocket.OPEN) {
+      input.ownerWs.close(1011, error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  input.ownerWs.on('message', (data: WebSocket.RawData) => {
+    if (closed || session.ws.readyState !== WebSocket.OPEN) return;
+    void sendEncrypted(session, {
+      type: MESSAGE_TYPE.STREAM_DATA,
+      timestamp: nowSeconds(),
+      stream_id: streamId,
+      data: toBuffer(data).toString('base64'),
+      encoding: 'base64',
+    }).catch((error) => {
+      if (input.ownerWs.readyState === WebSocket.OPEN) {
+        input.ownerWs.close(1011, error instanceof Error ? error.message : String(error));
+      }
+    });
+  });
+
+  input.ownerWs.on('close', () => close('owner websocket closed'));
+  input.ownerWs.on('error', () => close('owner websocket error'));
+
+  return { streamId, close };
+}
+
+function attachPublicTunnelStream(
+  session: NodeTunnelSession,
+  input: {
+    tunnelId: string;
+    initialData?: Buffer;
+    onData: (data: Buffer) => void;
+    onEnd: () => void;
+    onError: (error: Error) => void;
+  },
+): { streamId: string; send: (data: Buffer) => void; close: (reason?: string) => void } {
+  const streamId = crypto.randomUUID();
+  let closed = false;
+
+  log.info('node-tunnel', 'public-tunnel-stream-open', {
+    session_id: session.id,
+    node_id: session.nodeId ?? null,
+    tunnel_id: input.tunnelId,
+    stream_id: streamId,
+    initial_bytes: input.initialData?.length ?? 0,
+  });
+
+  const close = (reason = 'closed') => {
+    if (closed) return;
+    closed = true;
+    session.streams.delete(streamId);
+    log.info('node-tunnel', 'public-tunnel-stream-close-send', {
+      session_id: session.id,
+      node_id: session.nodeId ?? null,
+      tunnel_id: input.tunnelId,
+      stream_id: streamId,
+      reason,
+    });
+    void sendEncrypted(session, {
+      type: MESSAGE_TYPE.STREAM_CLOSE,
+      timestamp: nowSeconds(),
+      stream_id: streamId,
+      reason,
+    }).catch(() => undefined);
+  };
+
+  session.streams.set(streamId, {
+    streamId,
+    onData: input.onData,
+    onClose: (reason?: string) => {
+      if (closed) return;
+      closed = true;
+      session.streams.delete(streamId);
+      if (reason && reason !== 'target closed') {
+        input.onError(new Error(reason));
+      } else {
+        input.onEnd();
+      }
+    },
+  });
+
+  void sendEncrypted(session, {
+    type: MESSAGE_TYPE.STREAM_OPEN,
+    timestamp: nowSeconds(),
+    stream_id: streamId,
+    target: JSON.stringify({
+      kind: 'public-tunnel-stream',
+      tunnel_id: input.tunnelId,
+      initial_data: input.initialData?.length ? input.initialData.toString('base64') : undefined,
+    }),
+  }).catch((error) => {
+    session.streams.delete(streamId);
+    closed = true;
+    log.error('node-tunnel', 'public-tunnel-stream-open-failed', {
+      session_id: session.id,
+      node_id: session.nodeId ?? null,
+      tunnel_id: input.tunnelId,
+      stream_id: streamId,
       message: error instanceof Error ? error.message : String(error),
     });
     input.onError(error instanceof Error ? error : new Error(String(error)));

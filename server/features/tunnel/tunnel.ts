@@ -51,6 +51,7 @@ interface TunnelEntry {
   nodeId?:  string | null;
   targetHost?: string;
   targetPort?: number;
+  ownerRelay?: { streamId: string; close: (reason?: string) => void };
 }
 
 interface TunnelStream {
@@ -70,16 +71,23 @@ const WS_BACKPRESSURE_BYTES = parseInt(process.env.TUNNEL_WS_BACKPRESSURE_BYTES 
 const STRIP_HEADERS = new Set(['connection', 'content-length', 'transfer-encoding']);
 
 interface RelayStream {
+  streamId?: string;
   send(data: Buffer): void;
   close(reason?: string): void;
 }
 
 interface NodeTunnelControl {
-  attachRawTunnelStream?(
+  attachTunnelOwnerSession?(
     nodeId: string,
     input: {
-      targetHost: string;
-      targetPort: number;
+      tunnelId: string;
+      ownerWs: WebSocket;
+    },
+  ): { streamId: string; close: (reason?: string) => void };
+  attachPublicTunnelStream?(
+    nodeId: string,
+    input: {
+      tunnelId: string;
       initialData?: Buffer;
       onData: (data: Buffer) => void;
       onEnd: () => void;
@@ -89,8 +97,7 @@ interface NodeTunnelControl {
   getNodeSession?(nodeId: string): { mode?: string; ws?: { readyState?: number } } | null;
 }
 
-const nodeRelayStreams = new Map<string, ReturnType<NonNullable<NodeTunnelControl['attachRawTunnelStream']>>>();
-const serverRelayStreams = new Map<string, RelayStream>();
+const nodeRelayStreams = new Map<string, RelayStream>();
 
 function openTunnelStream(
   tunnel: TunnelEntry,
@@ -98,13 +105,25 @@ function openTunnelStream(
   initialData: Buffer,
   handlers: Omit<TunnelStream, 'streamId'>,
 ): void {
-  if (tunnel.nodeId === 'server' && tunnel.targetHost && tunnel.targetPort) {
-    openServerRelayStream(tunnel, streamId, initialData, handlers);
-    return;
-  }
-
-  if (tunnel.nodeId && tunnel.targetHost && tunnel.targetPort && activeNodeTunnel?.attachRawTunnelStream) {
+  if (
+    tunnel.nodeId &&
+    tunnel.nodeId !== 'server' &&
+    tunnel.targetHost &&
+    tunnel.targetPort &&
+    activeNodeTunnel?.attachPublicTunnelStream
+  ) {
     const key = `${tunnel.tunnelId}:${streamId}`;
+    if (!tunnel.ownerRelay) {
+      log.warn('public-tunnel', 'node-relay-unavailable', {
+        tunnel_id: tunnel.tunnelId,
+        stream_id: streamId,
+        node_id: tunnel.nodeId,
+        reason: 'owner relay not connected',
+      });
+      handlers.onReset();
+      return;
+    }
+
     try {
       log.info('public-tunnel', 'node-relay-open', {
         tunnel_id: tunnel.tunnelId,
@@ -112,11 +131,11 @@ function openTunnelStream(
         node_id: tunnel.nodeId,
         target_host: tunnel.targetHost,
         target_port: tunnel.targetPort,
+        owner_stream_id: tunnel.ownerRelay.streamId,
         initial_bytes: initialData.length,
       });
-      const relay = activeNodeTunnel.attachRawTunnelStream(tunnel.nodeId, {
-        targetHost: tunnel.targetHost,
-        targetPort: tunnel.targetPort,
+      const relay = activeNodeTunnel.attachPublicTunnelStream(tunnel.nodeId, {
+        tunnelId: tunnel.tunnelId,
         initialData,
         onData: handlers.onData,
         onEnd: () => {
@@ -144,98 +163,26 @@ function openTunnelStream(
         tunnel_id: tunnel.tunnelId,
         stream_id: streamId,
         node_id: tunnel.nodeId,
-        target_host: tunnel.targetHost,
-        target_port: tunnel.targetPort,
       });
       handlers.onReset();
     }
     return;
   }
 
-  log.info('public-tunnel', 'fallback-stream-open', {
+  log.info('public-tunnel', tunnel.nodeId === 'server' ? 'fallback-stream-open' : 'owner-stream-open', {
     tunnel_id: tunnel.tunnelId,
     stream_id: streamId,
+    node_id: tunnel.nodeId ?? null,
     initial_bytes: initialData.length,
-    reason: tunnel.nodeId ? 'node relay unavailable' : 'no node assigned',
+    fallback_mode: tunnel.nodeId === 'server',
+    reason: tunnel.nodeId === 'server' ? 'server fallback' : 'owner websocket relay',
   });
   tunnel.ws.send(encodeFrame(FRAME.STREAM_OPEN, streamId));
   if (initialData.length > 0) tunnel.ws.send(encodeFrame(FRAME.STREAM_DATA, streamId, initialData));
 }
 
-function openServerRelayStream(
-  tunnel: TunnelEntry,
-  streamId: number,
-  initialData: Buffer,
-  handlers: Omit<TunnelStream, 'streamId'>,
-): void {
-  if (!tunnel.targetHost || !tunnel.targetPort) {
-    handlers.onReset();
-    return;
-  }
-
-  const key = `${tunnel.tunnelId}:${streamId}`;
-  let completed = false;
-
-  log.info('public-tunnel', 'server-relay-open', {
-    tunnel_id: tunnel.tunnelId,
-    stream_id: streamId,
-    target_host: tunnel.targetHost,
-    target_port: tunnel.targetPort,
-    initial_bytes: initialData.length,
-  });
-
-  const socket = net.createConnection({ host: tunnel.targetHost, port: tunnel.targetPort });
-
-  const finish = (reset: boolean, reason?: string) => {
-    if (completed) return;
-    completed = true;
-    serverRelayStreams.delete(key);
-    if (reset) {
-      log.error('public-tunnel', 'server-relay-error', {
-        tunnel_id: tunnel.tunnelId,
-        stream_id: streamId,
-        target_host: tunnel.targetHost,
-        target_port: tunnel.targetPort,
-        reason: reason ?? null,
-      });
-      handlers.onReset();
-      return;
-    }
-    log.info('public-tunnel', 'server-relay-ended', {
-      tunnel_id: tunnel.tunnelId,
-      stream_id: streamId,
-    });
-    handlers.onEnd();
-  };
-
-  socket.on('data', handlers.onData);
-  socket.on('end', () => finish(false));
-  socket.on('close', (hadError) => {
-    if (!completed) finish(Boolean(hadError), hadError ? 'socket closed with error' : undefined);
-  });
-  socket.on('error', (error) => finish(true, error.message));
-
-  serverRelayStreams.set(key, {
-    send: (data) => socket.write(data),
-    close: () => {
-      if (completed) return;
-      completed = true;
-      serverRelayStreams.delete(key);
-      socket.destroy();
-    },
-  });
-
-  if (initialData.length > 0) socket.write(initialData);
-}
-
 function sendTunnelData(tunnel: TunnelEntry, streamId: number, data: Buffer): void {
   const key = `${tunnel.tunnelId}:${streamId}`;
-  const serverRelay = serverRelayStreams.get(key);
-  if (serverRelay) {
-    serverRelay.send(data);
-    return;
-  }
-
   const relay = nodeRelayStreams.get(key);
   if (relay) {
     relay.send(data);
@@ -247,13 +194,6 @@ function sendTunnelData(tunnel: TunnelEntry, streamId: number, data: Buffer): vo
 
 function closeTunnelStream(tunnel: TunnelEntry, streamId: number, reason: string): void {
   const key = `${tunnel.tunnelId}:${streamId}`;
-  const serverRelay = serverRelayStreams.get(key);
-  if (serverRelay) {
-    serverRelayStreams.delete(key);
-    serverRelay.close(reason);
-    return;
-  }
-
   const relay = nodeRelayStreams.get(key);
   if (relay) {
     nodeRelayStreams.delete(key);
@@ -309,7 +249,11 @@ function selectTunnelNode(
       preferences['x-node-exclude'] = excludePreference(preferences['x-node-exclude'], node.id);
       continue;
     }
-    if (nodeTunnel?.attachRawTunnelStream && hasConnectedControlSession(nodeTunnel, node.id)) return node;
+    if (
+      nodeTunnel?.attachTunnelOwnerSession &&
+      nodeTunnel?.attachPublicTunnelStream &&
+      hasConnectedControlSession(nodeTunnel, node.id)
+    ) return node;
     preferences['x-node-exclude'] = excludePreference(preferences['x-node-exclude'], node.id);
   }
 
@@ -501,7 +445,7 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
   activeNodeTunnel = options.nodeTunnel;
   log.info('public-tunnel', 'registered', {
     tcp_port: TCP_PORT,
-    node_relay: Boolean(options.nodeTunnel?.attachRawTunnelStream),
+    node_relay: Boolean(options.nodeTunnel?.attachTunnelOwnerSession && options.nodeTunnel?.attachPublicTunnelStream),
   });
   startTcpGateway();
 
@@ -704,7 +648,31 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
 
     ws.send(JSON.stringify({ type: 'tunnel_open', tunnelId }));
 
+    if (tunnel.nodeId && tunnel.nodeId !== 'server' && activeNodeTunnel?.attachTunnelOwnerSession) {
+      try {
+        tunnel.ownerRelay = activeNodeTunnel.attachTunnelOwnerSession(tunnel.nodeId, {
+          tunnelId,
+          ownerWs: ws,
+        });
+        log.info('public-tunnel', 'node-owner-relay-open', {
+          tunnel_id: tunnelId,
+          node_id: tunnel.nodeId,
+          owner_stream_id: tunnel.ownerRelay.streamId,
+        });
+      } catch (error) {
+        log.error('public-tunnel', 'node-owner-relay-open-failed', {
+          tunnel_id: tunnelId,
+          node_id: tunnel.nodeId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        ws.close(1011, error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
+
     ws.on('message', (data: Buffer) => {
+      if (tunnel.ownerRelay) return;
+
       let frame: ReturnType<typeof decodeFrame>;
       try { frame = decodeFrame(data); } catch { return; }
 
@@ -722,6 +690,7 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
     });
 
     ws.on('close', (code, reason) => {
+      tunnel.ownerRelay?.close('owner disconnected');
       for (const streamId of tunnel.streams.keys()) {
         closeTunnelStream(tunnel, streamId, 'tunnel owner disconnected');
       }
