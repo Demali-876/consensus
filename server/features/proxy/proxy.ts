@@ -315,10 +315,11 @@ export default class ConsensusProxy {
       if (this.nodeTunnel) {
         try {
           const result = await this.executeViaTunnel(node, target_url, method, forwardHeaders, body);
+          const finalResult = { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id };
           if (result.status >= 200 && result.status < 300) {
-            this.cache.set(dedupeKey, result, ttl);
+            this.cache.set(dedupeKey, finalResult, ttl);
           }
-          return { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id };
+          return finalResult;
         } catch (error) {
           console.error(`[Node Tunnel Error] ${node.id}:`, (error as Error).message);
         }
@@ -344,7 +345,7 @@ export default class ConsensusProxy {
         result && typeof result.status === 'number' &&
         result.status >= 200 && result.status < 300
       ) {
-        this.cache.set(dedupeKey, result, ttl);
+        this.cache.set(dedupeKey, { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id }, ttl);
       }
 
       return { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id };
@@ -401,11 +402,12 @@ export default class ConsensusProxy {
     // they cover both this path and executeViaNode uniformly.
     try {
       const response = await this.makeRequest(target_url, method, headers, body, resolved);
+      const finalResponse = { ...response, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: 'proxy-direct' };
       if (response.status >= 200 && response.status < 300) {
-        this.cache.set(dedupeKey, response, ttl);
+        this.cache.set(dedupeKey, finalResponse, ttl);
         console.log(`[Cache STORED] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
       }
-      return { ...response, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: 'proxy-direct' };
+      return finalResponse;
     } catch (error) {
       this.removePaidStatus(dedupeKey);
       throw error;

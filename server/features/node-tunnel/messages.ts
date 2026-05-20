@@ -10,6 +10,8 @@ export const MESSAGE_TYPE = {
   READY:          'ready',
   PING:           'ping',
   PONG:           'pong',
+  HTTP_REQUEST:   'http_request',
+  HTTP_RESPONSE:  'http_response',
   EVAL_REQUEST:   'eval_request',
   EVAL_RESPONSE:  'eval_response',
   JOIN_READY:     'join_ready',
@@ -23,6 +25,7 @@ export const MESSAGE_TYPE = {
   UPDATE_READY:   'update_ready',
   UPDATE_APPLY:   'update_apply',
   UPDATE_FAILED:  'update_failed',
+  ACK:            'ack',
   ERROR:          'error',
 } as const;
 
@@ -49,8 +52,31 @@ export interface ReadyMessage extends BaseMessage {
   mode: TunnelMode;
 }
 
+export interface PingMessage extends BaseMessage {
+  type: typeof MESSAGE_TYPE.PING;
+}
+
 export interface PongMessage extends BaseMessage {
   type: typeof MESSAGE_TYPE.PONG;
+  reply_to?: string;
+}
+
+export interface HttpRequestMessage extends BaseMessage {
+  type: typeof MESSAGE_TYPE.HTTP_REQUEST;
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  body?: string;
+  body_encoding?: 'utf8' | 'base64';
+}
+
+export interface HttpResponseMessage extends BaseMessage {
+  type: typeof MESSAGE_TYPE.HTTP_RESPONSE;
+  reply_to: string;
+  status: number;
+  headers?: Record<string, string>;
+  body?: string;
+  body_encoding?: 'utf8' | 'base64';
 }
 
 export type EvalAction =
@@ -59,6 +85,8 @@ export type EvalAction =
   | 'benchmark_system'
   | 'benchmark_cpu'
   | 'benchmark_crypto'
+  | 'benchmark_memory'
+  | 'benchmark_event_loop'
   | 'benchmark_memory_pressure';
 
 export interface EvalRequestMessage extends BaseMessage {
@@ -161,6 +189,11 @@ export interface UpdateFailedMessage extends BaseMessage {
   message: string;
 }
 
+export interface AckMessage extends BaseMessage {
+  type: typeof MESSAGE_TYPE.ACK;
+  reply_to: string;
+}
+
 export interface ErrorMessage extends BaseMessage {
   type: typeof MESSAGE_TYPE.ERROR;
   reply_to?: string;
@@ -171,7 +204,10 @@ export interface ErrorMessage extends BaseMessage {
 export type TunnelMessage =
   | HelloMessage
   | ReadyMessage
+  | PingMessage
   | PongMessage
+  | HttpRequestMessage
+  | HttpResponseMessage
   | EvalRequestMessage
   | EvalResponseMessage
   | JoinReadyMessage
@@ -185,6 +221,7 @@ export type TunnelMessage =
   | UpdateReadyMessage
   | UpdateApplyMessage
   | UpdateFailedMessage
+  | AckMessage
   | ErrorMessage;
 
 export function nowSeconds(): number {

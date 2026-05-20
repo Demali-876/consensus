@@ -158,6 +158,7 @@ app.post('/proxy', async (req, res, next) => {
       meta: {
         cached: true,
         dedupe_key: dedupeKey,
+        served_by: cached.served_by ?? null,
         timestamp: new Date().toISOString(),
       },
     });
@@ -218,6 +219,7 @@ app.post('/proxy', async (req, res) => {
       meta: {
         cached: response.cached,
         dedupe_key: response.dedupe_key,
+        served_by: response.served_by ?? null,
         processing_ms: processingTime,
         timestamp: new Date().toISOString(),
       },

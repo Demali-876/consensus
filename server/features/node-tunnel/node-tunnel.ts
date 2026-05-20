@@ -71,9 +71,12 @@ type RouterLike = {
 const sessions = new Map<string, NodeTunnelSession>();
 const byNodeId = new Map<string, string>();
 const EVAL_MIN_CPU_HASHES_PER_SECOND = 5_000;
+const EVAL_MIN_CPU_BYTES_PER_SECOND = 5 * 1024 * 1024;
 const EVAL_MIN_CRYPTO_BYTES_PER_SECOND = 10 * 1024 * 1024;
 const EVAL_MIN_MEMORY_ALLOCATED_MB = 128;
+const EVAL_MIN_MEMORY_BYTES_PER_SECOND = 128 * 1024 * 1024;
 const EVAL_MIN_SYSTEM_MEMORY_MB = 512;
+const EVAL_MAX_EVENT_LOOP_P99_NS = 50_000_000;
 
 // Router-directed node updates are disabled unless
 // CONSENSUS_NODE_AUTO_UPDATES=true. When enabled, the scheduler picks one idle
@@ -434,13 +437,14 @@ async function handleEncryptedMessage(session: NodeTunnelSession, raw: Buffer): 
         message: error instanceof Error ? error.message : String(error),
       });
     }
+    clearCompletedUpdateState(message.node_id, session.version, 'heartbeat');
     return;
   }
   if (message.type === MESSAGE_TYPE.EVAL_RESPONSE) {
     handleEvalResponse(session, message);
     return;
   }
-  if (message.type === MESSAGE_TYPE.PROXY_RESPONSE || message.type === MESSAGE_TYPE.ERROR) {
+  if (message.type === MESSAGE_TYPE.PROXY_RESPONSE || message.type === MESSAGE_TYPE.ERROR || message.type === MESSAGE_TYPE.ACK) {
     resolvePending(session, message);
     return;
   }
@@ -543,6 +547,7 @@ async function handleHello(session: NodeTunnelSession, message: HelloMessage): P
     candidate_id: message.candidate_id ?? null,
     version: message.version ?? null,
   });
+  if (session.nodeId) clearCompletedUpdateState(session.nodeId, session.version, 'hello');
   await sendEncrypted(session, {
     type: MESSAGE_TYPE.READY,
     timestamp: nowSeconds(),
@@ -567,7 +572,8 @@ async function startEval(session: NodeTunnelSession): Promise<void> {
     'benchmark_system',
     'benchmark_cpu',
     'benchmark_crypto',
-    'benchmark_memory_pressure',
+    'benchmark_memory',
+    'benchmark_event_loop',
   ];
   session.eval = {
     status: 'pending',
@@ -657,30 +663,57 @@ function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMes
 
 function scoreEvalResults(results: Partial<Record<EvalAction, unknown>>): { score: number; errors: string[]; details: Partial<Record<EvalAction, unknown>> } {
   const errors: string[] = [];
-  const cpu = results.benchmark_cpu as { hashes_per_second?: number } | undefined;
+  const cpu = results.benchmark_cpu as { bytes_per_second?: number; hashes_per_second?: number } | undefined;
   const cryptoResult = results.benchmark_crypto as { total_bytes_per_second?: number } | undefined;
-  const memory = results.benchmark_memory_pressure as { allocated_mb?: number } | undefined;
+  const memory = results.benchmark_memory as { bytes_per_second?: number } | undefined;
+  const legacyMemory = results.benchmark_memory_pressure as { allocated_mb?: number } | undefined;
   const system = results.benchmark_system as { total_memory_bytes?: number } | undefined;
-  const cpuScore = Math.min(100, (Number(cpu?.hashes_per_second ?? 0) / EVAL_MIN_CPU_HASHES_PER_SECOND) * 70);
+  const eventLoop = results.benchmark_event_loop as { ns_per_op?: { p99?: number } } | undefined;
+  const cpuBytesPerSecond = Number(cpu?.bytes_per_second ?? 0);
+  const cpuHashesPerSecond = Number(cpu?.hashes_per_second ?? 0);
+  const cpuValue = cpuBytesPerSecond > 0 ? cpuBytesPerSecond : cpuHashesPerSecond;
+  const cpuMinimum = cpuBytesPerSecond > 0 ? EVAL_MIN_CPU_BYTES_PER_SECOND : EVAL_MIN_CPU_HASHES_PER_SECOND;
+  const memoryBytesPerSecond = Number(memory?.bytes_per_second ?? 0);
+  const legacyMemoryAllocatedMb = Number(legacyMemory?.allocated_mb ?? 0);
+  const memoryScore = memoryBytesPerSecond > 0
+    ? Math.min(100, (memoryBytesPerSecond / EVAL_MIN_MEMORY_BYTES_PER_SECOND) * 70)
+    : Math.min(100, (legacyMemoryAllocatedMb / EVAL_MIN_MEMORY_ALLOCATED_MB) * 70);
+  const eventLoopP99Ns = Number(eventLoop?.ns_per_op?.p99 ?? 0);
+  const eventLoopScore = eventLoopP99Ns > 0
+    ? Math.min(100, (EVAL_MAX_EVENT_LOOP_P99_NS / eventLoopP99Ns) * 70)
+    : 0;
+  const cpuScore = Math.min(100, (cpuValue / cpuMinimum) * 70);
   const cryptoScore = Math.min(100, (Number(cryptoResult?.total_bytes_per_second ?? 0) / EVAL_MIN_CRYPTO_BYTES_PER_SECOND) * 70);
-  const memoryScore = Math.min(100, (Number(memory?.allocated_mb ?? 0) / EVAL_MIN_MEMORY_ALLOCATED_MB) * 80);
   const totalMemoryMb = Number(system?.total_memory_bytes ?? 0) / 1024 / 1024;
   const systemScore = Math.min(100, (totalMemoryMb / EVAL_MIN_SYSTEM_MEMORY_MB) * 70);
 
-  if (Number(cpu?.hashes_per_second ?? 0) < EVAL_MIN_CPU_HASHES_PER_SECOND) {
-    errors.push(`benchmark_cpu: below minimum ${EVAL_MIN_CPU_HASHES_PER_SECOND} hashes/sec`);
+  if (cpuValue < cpuMinimum) {
+    errors.push(cpuBytesPerSecond > 0
+      ? `benchmark_cpu: below minimum ${EVAL_MIN_CPU_BYTES_PER_SECOND} bytes/sec`
+      : `benchmark_cpu: below minimum ${EVAL_MIN_CPU_HASHES_PER_SECOND} hashes/sec`);
   }
   if (Number(cryptoResult?.total_bytes_per_second ?? 0) < EVAL_MIN_CRYPTO_BYTES_PER_SECOND) {
     errors.push(`benchmark_crypto: below minimum ${EVAL_MIN_CRYPTO_BYTES_PER_SECOND} bytes/sec`);
   }
-  if (Number(memory?.allocated_mb ?? 0) < EVAL_MIN_MEMORY_ALLOCATED_MB) {
-    errors.push(`benchmark_memory_pressure: below minimum ${EVAL_MIN_MEMORY_ALLOCATED_MB}MB allocated`);
+  if (memoryBytesPerSecond > 0) {
+    if (memoryBytesPerSecond < EVAL_MIN_MEMORY_BYTES_PER_SECOND) {
+      errors.push(`benchmark_memory: below minimum ${EVAL_MIN_MEMORY_BYTES_PER_SECOND} bytes/sec`);
+    }
+  } else if (legacyMemoryAllocatedMb > 0) {
+    if (legacyMemoryAllocatedMb < EVAL_MIN_MEMORY_ALLOCATED_MB) {
+      errors.push(`benchmark_memory_pressure: below minimum ${EVAL_MIN_MEMORY_ALLOCATED_MB}MB allocated`);
+    }
+  } else {
+    errors.push('benchmark_memory: missing result');
   }
   if (totalMemoryMb < EVAL_MIN_SYSTEM_MEMORY_MB) {
     errors.push(`benchmark_system: below minimum ${EVAL_MIN_SYSTEM_MEMORY_MB}MB total memory`);
   }
+  if (eventLoopP99Ns <= 0 || eventLoopP99Ns > EVAL_MAX_EVENT_LOOP_P99_NS) {
+    errors.push(`benchmark_event_loop: p99 above maximum ${EVAL_MAX_EVENT_LOOP_P99_NS}ns`);
+  }
   return {
-    score: Math.round(cpuScore * 0.2 + cryptoScore * 0.35 + memoryScore * 0.25 + systemScore * 0.2),
+    score: Math.round(cpuScore * 0.2 + cryptoScore * 0.3 + memoryScore * 0.2 + systemScore * 0.15 + eventLoopScore * 0.15),
     errors,
     details: results,
   };
@@ -1190,6 +1223,31 @@ function getStats() {
     active_control_sessions: active.filter((session) => session.mode === 'control').length,
     sessions: active,
   };
+}
+
+function clearCompletedUpdateState(nodeId: string, version: string | undefined, source: string): void {
+  if (!version) return;
+  try {
+    const node = NodeStore.getNode(nodeId);
+    const targetVersion = node?.capabilities?.update_target_version;
+    const state = node?.capabilities?.update_state;
+    if (!state || targetVersion !== version) return;
+
+    NodeStore.setNodeUpdateState(nodeId, null);
+    log.info('node-update', 'state-cleared-after-reconnect', {
+      node_id: nodeId,
+      version,
+      previous_state: state,
+      source,
+    });
+  } catch (error) {
+    log.error('node-update', 'state-clear-failed', {
+      node_id: nodeId,
+      version,
+      source,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function isSessionIdle(session: NodeTunnelSession, router?: RouterLike): boolean {

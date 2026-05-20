@@ -100,6 +100,74 @@ function sameKey(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+const PUBLIC_CAPABILITY_FLAGS = [
+  'forward_proxy',
+  'reverse_proxy',
+  'websockets',
+  'tunnels',
+  'ip_leasing',
+];
+
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function publicCapabilities(capabilities = {}) {
+  const publicCaps = {};
+  for (const key of PUBLIC_CAPABILITY_FLAGS) {
+    publicCaps[key] = capabilities[key] === true;
+  }
+  publicCaps.benchmark_score = numberOrNull(capabilities.benchmark_score);
+  return publicCaps;
+}
+
+function publicUpdate(capabilities = {}) {
+  if (!capabilities.update_state) return null;
+  return {
+    state:          String(capabilities.update_state),
+    target_version: capabilities.update_target_version ?? null,
+    at:             capabilities.update_at ?? null,
+  };
+}
+
+function publicHeartbeat(heartbeat) {
+  if (!heartbeat) return null;
+  return {
+    version: heartbeat.version ?? null,
+    at:      heartbeat.at ?? null,
+  };
+}
+
+function publicNode(node) {
+  const capabilities = node.capabilities ?? {};
+  return {
+    node_id:         node.id,
+    domain:          node.domain,
+    status:          node.status,
+    region:          node.region,
+    capabilities:    publicCapabilities(capabilities),
+    benchmark_score: numberOrNull(capabilities.benchmark_score),
+    update:          publicUpdate(capabilities),
+    created_at:      node.created_at,
+    heartbeat:       publicHeartbeat(node.heartbeat),
+  };
+}
+
+function clearCompletedUpdateState(nodeId, version, source) {
+  if (!version) return;
+  try {
+    const node = NodeStore.getNode(nodeId);
+    const capabilities = node?.capabilities ?? {};
+    if (!capabilities.update_state || capabilities.update_target_version !== version) return;
+
+    NodeStore.setNodeUpdateState(nodeId, null);
+    console.log(`[Nodes] Cleared update state for ${nodeId} after ${source} reported ${version}`);
+  } catch (error) {
+    console.error(`[Nodes] Failed to clear update state for ${nodeId}:`, error);
+  }
+}
+
 export function registerNodes(app, httpsServer, x402Server, config) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
@@ -303,9 +371,9 @@ export function registerNodes(app, httpsServer, x402Server, config) {
             ip_leasing:       declaredCapabilities?.ip_leasing      ?? false,
             benchmark_score:  benchmarkScore,
             benchmark_details: benchmarkDetails,
-            cpu_performance:  benchmarkDetails?.benchmark_cpu?.hashes_per_second ?? null,
+            cpu_performance:  benchmarkDetails?.benchmark_cpu?.bytes_per_second ?? benchmarkDetails?.benchmark_cpu?.hashes_per_second ?? null,
             crypto_performance: benchmarkDetails?.benchmark_crypto?.total_bytes_per_second ?? null,
-            memory_score:     benchmarkDetails?.benchmark_memory_pressure?.allocated_mb ?? null,
+            memory_score:     benchmarkDetails?.benchmark_memory?.bytes_per_second ?? benchmarkDetails?.benchmark_memory_pressure?.allocated_mb ?? null,
             ipv4,
             ipv6:             ipv6 || null,
             port,
@@ -363,6 +431,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
       if (!node) return res.status(404).json({ error: 'Node not found' });
 
       NodeStore.heartbeat(node_id, { rps, p95_ms, version });
+      clearCompletedUpdateState(node_id, version, 'heartbeat');
       res.json({ success: true, node_id, message: 'Heartbeat recorded', next_heartbeat_in: 300 });
     } catch (error) {
       console.error('Heartbeat error:', error);
@@ -375,17 +444,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
       const node = NodeStore.getNode(req.params.node_id);
       if (!node) return res.status(404).json({ error: 'Node not found' });
 
-      res.json({
-        node_id:      node.id,
-        domain:       node.domain,
-        status:       node.status,
-        region:       node.region,
-        contact:      node.contact,
-        capabilities: node.capabilities,
-        created_at:   node.created_at,
-        updated_at:   node.updated_at,
-        heartbeat:    node.heartbeat,
-      });
+      res.json(publicNode(node));
     } catch (error) {
       console.error('Status error:', error);
       res.status(500).json({ error: 'Failed to get status', message: error.message });
@@ -398,18 +457,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
       res.json({
         total:              nodes.length,
         current_join_price: calculateJoinPrice(),
-        nodes: nodes.map((n) => ({
-          node_id:        n.id,
-          domain:         n.domain,
-          status:         n.status,
-          region:         n.region,
-          capabilities:   n.capabilities,
-          evm_address:    n.evm_address,
-          solana_address: n.solana_address,
-          icp_address:    n.icp_address,
-          created_at:     n.created_at,
-          heartbeat:      n.heartbeat,
-        })),
+        nodes: nodes.map(publicNode),
       });
     } catch (error) {
       console.error('List nodes error:', error);
