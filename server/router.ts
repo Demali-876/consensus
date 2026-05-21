@@ -205,6 +205,10 @@ export default class Router {
       ? Math.round(wsLat.reduce((a: number, b: number) => a + b, 0) / wsLat.length)
       : null;
 
+    // Build a O(1) lookup map from the data already fetched by listNodes() so
+    // that load_distribution does not issue one extra DB query per active node.
+    const nodeById = new Map(allNodes.map((n: any) => [n.id, n]));
+
     return {
       total_nodes:            allNodes.length,
       active_nodes:           activeNodes.length,
@@ -222,7 +226,7 @@ export default class Router {
           : '0%',
       },
       load_distribution: Array.from(this.activeRequests.keys()).map((nodeId) => {
-        const node = NodeStore.getNode(nodeId);
+        const node = nodeById.get(nodeId);
         const reqs = this.activeRequests.get(nodeId) ?? 0;
         const sess = this.activeSessions.get(nodeId) ?? 0;
         return { node_id: nodeId, requests: reqs, sessions: sess, total: reqs + sess, region: node?.region, status: node?.status };

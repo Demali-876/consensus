@@ -284,12 +284,20 @@ export default class ConsensusProxy {
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
-    if (node && typeof node.id === 'string') {
-      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
+    if (!node || typeof node.id !== 'string') {
+      console.log('[Self-Fallback] No nodes available, executing directly');
     }
 
-    console.log('[Self-Fallback] No nodes available, executing directly');
-    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+    // Register the in-flight promise BEFORE returning it so that concurrent
+    // handleRequest calls with the same dedupeKey can coalesce on this promise
+    // instead of each firing an independent upstream request.
+    const rawPromise = node && typeof node.id === 'string'
+      ? this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved)
+      : this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+
+    const dedupedPromise = rawPromise.finally(() => this.pendingRequests.delete(dedupeKey));
+    this.pendingRequests.set(dedupeKey, dedupedPromise);
+    return dedupedPromise;
   }
 
   private async executeViaNode(
@@ -463,7 +471,7 @@ export default class ConsensusProxy {
         data:             withBody ? body : undefined,
         timeout:          30_000,
         validateStatus:   () => true,
-        maxRedirects:     5,
+        maxRedirects:     0,
         decompress:       false,
         responseType:     'arraybuffer',
         maxContentLength: MAX_RESPONSE_BYTES,
