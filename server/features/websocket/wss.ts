@@ -66,18 +66,23 @@ function parsePreferenceHeaders(req: Request): Record<string, string> {
   return out;
 }
 
+function safeParsePositiveInt(raw: string | undefined | null, fallback: number): number {
+  const n = parseInt(raw ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 function sessionPrice(context: any): string {
   const model     = context.adapter.getQueryParam?.('model')     ?? 'hybrid';
-  const minutes   = parseInt(context.adapter.getQueryParam?.('minutes')   ?? '5');
-  const megabytes = parseInt(context.adapter.getQueryParam?.('megabytes') ?? '50');
+  const minutes   = safeParsePositiveInt(context.adapter.getQueryParam?.('minutes'),   5);
+  const megabytes = safeParsePositiveInt(context.adapter.getQueryParam?.('megabytes'), 50);
   const pricing   = PRICING_PRESETS[pricingKey(model)];
   return `$${calculateSessionCost(pricing, minutes, megabytes).toFixed(4)}`;
 }
 
 function sessionPriceIcp(context: any): string {
   const model     = context.adapter.getQueryParam?.('model')     ?? 'hybrid';
-  const minutes   = parseInt(context.adapter.getQueryParam?.('minutes')   ?? '5');
-  const megabytes = parseInt(context.adapter.getQueryParam?.('megabytes') ?? '50');
+  const minutes   = safeParsePositiveInt(context.adapter.getQueryParam?.('minutes'),   5);
+  const megabytes = safeParsePositiveInt(context.adapter.getQueryParam?.('megabytes'), 50);
   const pricing   = PRICING_PRESETS[pricingKey(model)];
   return String(Math.round(calculateSessionCost(pricing, minutes, megabytes) * 1e8));
 }
@@ -478,9 +483,9 @@ export function registerWebSocket(
     '/ws',
     ...wsHandlers,
     (req, res) => {
-      const model     = (req.query.model     ?? 'hybrid').toString();
-      const minutes   = parseInt((req.query.minutes   ?? '5').toString(),  10);
-      const megabytes = parseInt((req.query.megabytes ?? '50').toString(), 10);
+      const model     = (req.query.model ?? 'hybrid').toString();
+      const minutes   = safeParsePositiveInt((req.query.minutes   ?? '').toString(), 5);
+      const megabytes = safeParsePositiveInt((req.query.megabytes ?? '').toString(), 50);
 
       const token   = crypto.randomUUID();
       const expires = Date.now() + TOKEN_TTL_MS;

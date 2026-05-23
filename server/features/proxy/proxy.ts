@@ -41,6 +41,13 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /**
+   * Override the SSRF check for testing.  The function receives the target URL
+   * and must return true when the URL is FORBIDDEN (private/internal), false
+   * when it is allowed.  When omitted the production resolveAndCheckTarget()
+   * guard is used.
+   */
+  ssrfCheck?: (url: string) => Promise<boolean>;
 }
 
 export interface ProxyResponse {
@@ -208,6 +215,7 @@ export default class ConsensusProxy {
   private stats:           { total_requests: number; cache_hits: number; cache_misses: number };
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
+  private ssrfCheck?:      ProxyConfig['ssrfCheck'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
 
   constructor(config: ProxyConfig = {}) {
@@ -223,6 +231,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.ssrfCheck       = config.ssrfCheck;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -250,7 +259,13 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
+    // Use the caller-supplied SSRF guard (tests) or the production DNS-based check.
+    let resolved: SafeResolution | undefined;
+    if (this.ssrfCheck) {
+      if (await this.ssrfCheck(target_url)) throw new TypeError('Forbidden target_url — private/internal addresses are not allowed');
+    } else {
+      resolved = await resolveAndCheckTarget(target_url);
+    }
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
@@ -284,12 +299,20 @@ export default class ConsensusProxy {
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
-    if (node && typeof node.id === 'string') {
-      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
-    }
 
-    console.log('[Self-Fallback] No nodes available, executing directly');
-    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+    // Register the in-flight promise so concurrent identical requests join this
+    // one instead of each launching their own upstream round-trip.
+    const requestPromise = (node && typeof node.id === 'string')
+      ? this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved)
+      : (console.log('[Self-Fallback] No nodes available, executing directly'),
+         this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved));
+
+    this.pendingRequests.set(dedupeKey, requestPromise);
+    try {
+      return await requestPromise;
+    } finally {
+      this.pendingRequests.delete(dedupeKey);
+    }
   }
 
   private async executeViaNode(
@@ -479,6 +502,15 @@ export default class ConsensusProxy {
       if      (enc === 'gzip')    raw = await gunzipAsync(raw);
       else if (enc === 'deflate') raw = await inflateAsync(raw);
       else if (enc === 'br')      raw = await brotliDecompressAsync(raw);
+
+      // Guard against decompression bombs: the axios maxContentLength cap applies
+      // to the compressed wire bytes, not the decompressed result.  A server can
+      // return a 60 KB gzip that expands to hundreds of MB.
+      if (raw.length > MAX_RESPONSE_BYTES) {
+        throw new Error(
+          `Decompressed response body (${raw.length} bytes) exceeds limit (${MAX_RESPONSE_BYTES} bytes)`,
+        );
+      }
 
       const text = raw.toString('utf8');
       let data: unknown;

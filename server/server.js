@@ -144,7 +144,9 @@ app.get('/stats', publicLimiter, (_req, res) => {
 
 app.post('/proxy', async (req, res, next) => {
   const { target_url, method = 'GET', headers = {}, body } = req.body;
-  if (!target_url) return next();
+  // Return 400 immediately — calling next() would route into the payment middleware
+  // which returns 402 Payment Required, masking the real cause from the caller.
+  if (!target_url) return res.status(400).json({ error: 'Missing target_url' });
 
   const dedupeKey = proxy.computeDedupeKey({ target_url, method, headers, body });
   const cached = proxy.getCached(dedupeKey);
