@@ -186,6 +186,8 @@ export default class Router {
   // Separated so the return type can be inferred for statsCache typing.
   private _buildStats() {
     const allNodes    = NodeStore.listNodes();
+    // Build an O(1) lookup map so load_distribution never needs to re-query the DB.
+    const nodeById    = new Map<string, (typeof allNodes)[0]>(allNodes.map((n: any) => [n.id, n]));
     const activeNodes = allNodes.filter((n: any) => n.status === 'active');
 
     let totalReqs = 0; for (const v of this.activeRequests.values()) totalReqs += v;
@@ -222,7 +224,7 @@ export default class Router {
           : '0%',
       },
       load_distribution: Array.from(this.activeRequests.keys()).map((nodeId) => {
-        const node = NodeStore.getNode(nodeId);
+        const node = nodeById.get(nodeId);
         const reqs = this.activeRequests.get(nodeId) ?? 0;
         const sess = this.activeSessions.get(nodeId) ?? 0;
         return { node_id: nodeId, requests: reqs, sessions: sess, total: reqs + sess, region: node?.region, status: node?.status };

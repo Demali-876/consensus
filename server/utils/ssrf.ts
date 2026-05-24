@@ -121,6 +121,14 @@ export async function resolveAndCheckTarget(urlString: string): Promise<SafeReso
   // IPv6 literal — check private ranges before touching DNS
   if (isPrivateIPv6Bare(bare)) throw new TypeError(FORBIDDEN);
 
+  // Public IPv6 literal — bare contains ':' but is not private; no DNS needed.
+  // Without this branch the address would fall through to dns.lookup(), which
+  // rejects bracket-enclosed hostnames, causing all public IPv6 literals to be
+  // mis-classified as FORBIDDEN.
+  if (bare.includes(':')) {
+    return { ip: bare, family: 6, hostname: bare, isLiteral: true };
+  }
+
   // IPv4 literal (or IPv6-mapped variant) — no DNS needed
   const normalized = normalizeToIPv4(bare);
   if (normalized !== null) {

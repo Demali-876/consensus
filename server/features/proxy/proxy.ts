@@ -250,8 +250,6 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
-
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
 
@@ -261,10 +259,14 @@ export default class ConsensusProxy {
     const resolvedTTL = cacheTTL !== undefined ? cacheTTL
                       : Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0 ? ttlFromHdr
                       : 300;
-    // Clamp to [1, MAX_CACHE_TTL_SEC] — prevents cache-poisoning via huge TTL hints
-    const ttl = Math.min(MAX_CACHE_TTL_SEC, resolvedTTL === 0 ? 1 : Math.max(1, resolvedTTL));
+    // TTL=0 means "skip cache entirely" (caller wants a guaranteed-fresh response).
+    // Any other value is clamped to [1, MAX_CACHE_TTL_SEC].
+    const ttl = resolvedTTL === 0 ? 0
+      : Math.min(MAX_CACHE_TTL_SEC, Math.max(1, resolvedTTL));
 
     this.stats.total_requests++;
+
+    // Cache check BEFORE SSRF — hits don't need DNS resolution.
     const cached = this.cache.get<ProxyResponse>(dedupeKey);
     if (cached) {
       this.stats.cache_hits++;
@@ -272,6 +274,7 @@ export default class ConsensusProxy {
       return { ...cached, cached: true, payment_required: false, dedupe_key: dedupeKey };
     }
 
+    // Pending-request coalescing — join any identical request already in flight.
     const pending = this.pendingRequests.get(dedupeKey);
     if (pending) {
       this.stats.cache_hits++;
@@ -283,13 +286,42 @@ export default class ConsensusProxy {
     this.stats.cache_misses++;
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
-    const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
-    if (node && typeof node.id === 'string') {
-      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
-    }
+    // Register a placeholder synchronously — before the first await — so any
+    // concurrent identical request that arrives during the SSRF check or the
+    // upstream call will see this entry and coalesce onto our promise instead
+    // of firing a duplicate upstream request.
+    let resolveRequest!: (r: ProxyResponse) => void;
+    let rejectRequest!:  (e: unknown)       => void;
+    const requestPromise = new Promise<ProxyResponse>((res, rej) => {
+      resolveRequest = res;
+      rejectRequest  = rej;
+    });
+    // Prevent an "unhandledRejection" when no concurrent waiter joined this
+    // promise before it was rejected.  A waiter that did join via the pending
+    // branch will still receive the rejection through its own `await`.
+    requestPromise.catch(() => {});
+    this.pendingRequests.set(dedupeKey, requestPromise);
 
-    console.log('[Self-Fallback] No nodes available, executing directly');
-    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+    try {
+      // SSRF check only on a true cache miss — outbound connection will be made.
+      const resolved = await resolveAndCheckTarget(target_url);
+
+      const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
+      let result: ProxyResponse;
+      if (node && typeof node.id === 'string') {
+        result = await this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
+      } else {
+        console.log('[Self-Fallback] No nodes available, executing directly');
+        result = await this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+      }
+      resolveRequest(result);
+      return result;
+    } catch (error) {
+      rejectRequest(error);
+      throw error;
+    } finally {
+      this.pendingRequests.delete(dedupeKey);
+    }
   }
 
   private async executeViaNode(
@@ -316,7 +348,7 @@ export default class ConsensusProxy {
         try {
           const result = await this.executeViaTunnel(node, target_url, method, forwardHeaders, body);
           const finalResult = { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id };
-          if (result.status >= 200 && result.status < 300) {
+          if (result.status >= 200 && result.status < 300 && ttl > 0) {
             this.cache.set(dedupeKey, finalResult, ttl);
           }
           return finalResult;
@@ -343,7 +375,7 @@ export default class ConsensusProxy {
 
       if (
         result && typeof result.status === 'number' &&
-        result.status >= 200 && result.status < 300
+        result.status >= 200 && result.status < 300 && ttl > 0
       ) {
         this.cache.set(dedupeKey, { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id }, ttl);
       }
@@ -398,12 +430,10 @@ export default class ConsensusProxy {
     ttl:        number,
     resolved:   SafeResolution,
   ): Promise<ProxyResponse> {
-    // Pending-request registration and leak-guard are owned by handleRequest so
-    // they cover both this path and executeViaNode uniformly.
     try {
       const response = await this.makeRequest(target_url, method, headers, body, resolved);
       const finalResponse = { ...response, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: 'proxy-direct' };
-      if (response.status >= 200 && response.status < 300) {
+      if (response.status >= 200 && response.status < 300 && ttl > 0) {
         this.cache.set(dedupeKey, finalResponse, ttl);
         console.log(`[Cache STORED] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
       }
