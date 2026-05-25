@@ -480,7 +480,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
 
   return {
     getStats: () => ({
-      total_nodes:        NodeStore.listNodes().length,
+      total_nodes:        NodeStore.countNodes(),
       current_join_price: calculateJoinPrice(),
     }),
   };

@@ -41,6 +41,8 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /** Test-only: replaces the SSRF guard. Returns true = blocked. Never use in production. */
+  _ssrfCheck?: (url: string) => Promise<boolean>;
 }
 
 export interface ProxyResponse {
@@ -209,6 +211,7 @@ export default class ConsensusProxy {
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
+  private _ssrfCheckFn?:   ProxyConfig['_ssrfCheck'];
 
   constructor(config: ProxyConfig = {}) {
     this.cache = new NodeCache({
@@ -223,6 +226,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this._ssrfCheckFn    = config._ssrfCheck;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -250,7 +254,15 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
+    let resolved: SafeResolution;
+    if (this._ssrfCheckFn) {
+      const blocked = await this._ssrfCheckFn(target_url);
+      if (blocked) throw new TypeError('Forbidden target_url — private/internal addresses are not allowed');
+      const u = new URL(target_url);
+      resolved = { ip: u.hostname, family: 4, hostname: u.hostname, isLiteral: true };
+    } else {
+      resolved = await resolveAndCheckTarget(target_url);
+    }
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
@@ -284,12 +296,20 @@ export default class ConsensusProxy {
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
+    let inflight: Promise<ProxyResponse>;
     if (node && typeof node.id === 'string') {
-      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
+      inflight = this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
+    } else {
+      console.log('[Self-Fallback] No nodes available, executing directly');
+      inflight = this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
     }
 
-    console.log('[Self-Fallback] No nodes available, executing directly');
-    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+    this.pendingRequests.set(dedupeKey, inflight);
+    try {
+      return await inflight;
+    } finally {
+      this.pendingRequests.delete(dedupeKey);
+    }
   }
 
   private async executeViaNode(
