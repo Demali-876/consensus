@@ -41,6 +41,8 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /** Override the SSRF check — use only in tests to allow localhost targets. */
+  ssrfCheck?: (url: string) => Promise<boolean>;
 }
 
 export interface ProxyResponse {
@@ -208,6 +210,7 @@ export default class ConsensusProxy {
   private stats:           { total_requests: number; cache_hits: number; cache_misses: number };
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
+  private ssrfCheck?:      ProxyConfig['ssrfCheck'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
 
   constructor(config: ProxyConfig = {}) {
@@ -223,6 +226,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.ssrfCheck       = config.ssrfCheck;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -250,7 +254,15 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
+    let resolved: SafeResolution;
+    if (this.ssrfCheck) {
+      const isPrivate = await this.ssrfCheck(target_url);
+      if (isPrivate) throw new TypeError(`Forbidden target_url: ${target_url}`);
+      // isLiteral=true keeps the original URL unchanged so HTTP connects to the real host
+      resolved = { ip: '', family: 4, hostname: new URL(target_url).hostname, isLiteral: true };
+    } else {
+      resolved = await resolveAndCheckTarget(target_url);
+    }
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
