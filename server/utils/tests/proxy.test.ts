@@ -21,6 +21,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http   from 'node:http';
+import type { SafeResolution } from '../../utils/ssrf.ts';
 import ConsensusProxy from '../../features/proxy/proxy.ts';
 
 const UPSTREAM_PORT = 19_991;
@@ -59,11 +60,26 @@ function resetUpstream(): void {
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+/**
+ * SSRF bypass for tests only: the upstream server is intentionally on localhost
+ * so the production SSRF guard must be replaced with a no-op resolver that
+ * returns a safe-looking result for the test hostname.
+ */
+function testSsrfCheck(url: string): Promise<SafeResolution> {
+  const parsed = new URL(url);
+  return Promise.resolve({
+    ip:        '127.0.0.1',
+    family:    4 as const,
+    hostname:  parsed.hostname,
+    isLiteral: true,
+  });
+}
+
 let proxy: ConsensusProxy;
 
 function freshProxy(): ConsensusProxy {
   proxy?.destroy();
-  proxy = new ConsensusProxy();
+  proxy = new ConsensusProxy({ ssrfCheck: testSsrfCheck });
   return proxy;
 }
 

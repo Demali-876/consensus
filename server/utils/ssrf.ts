@@ -28,6 +28,15 @@ const DNS_CACHE   = new Map<string, DnsCacheEntry>();
 const DNS_TTL_MS  = 30_000;
 const DNS_NEG_TTL = 5_000;
 
+// Periodic eviction: expired entries are removed every 60 s so DNS_CACHE cannot
+// grow without bound under a flood of unique hostnames (DoS hardening).
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of DNS_CACHE) {
+    if (entry.expiresAt <= now) DNS_CACHE.delete(key);
+  }
+}, 60_000).unref();
+
 function normalizeToIPv4(raw: string): string | null {
   const s = raw.replace(/^\[|\]$/g, '').toLowerCase();
 

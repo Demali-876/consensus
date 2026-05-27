@@ -255,6 +255,12 @@ export function handleLocalSession(
     void executeProxyRequest(ws, session, data);
   });
 
+  ws.on('error', () => {
+    clearTimeout(session.timer);
+    session.active = false;
+    sessions.delete(sessionId);
+  });
+
   ws.on('close', () => {
     clearTimeout(session.timer);
     session.active = false;
@@ -342,6 +348,12 @@ export function handleNodeProxiedSession(
     session.usage.bytesSent  += size;
     session.usage.totalBytes  = session.usage.bytesReceived + session.usage.bytesSent;
     if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
+  });
+
+  clientWs.on('error', () => {
+    session.active = false;
+    release();
+    nodeWs.close();
   });
 
   clientWs.on('close', () => {

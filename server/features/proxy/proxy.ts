@@ -6,7 +6,7 @@ import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
 import crypto                            from 'node:crypto';
 import Router                            from '../../router.ts';
-import { resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts';
+import { resolveAndCheckTarget as _resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts';
 
 const httpAgent  = new http.Agent ({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
@@ -41,6 +41,8 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /** Override the SSRF resolver — for testing only. Never set this in production. */
+  ssrfCheck?: (url: string) => Promise<SafeResolution>;
 }
 
 export interface ProxyResponse {
@@ -209,6 +211,7 @@ export default class ConsensusProxy {
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
+  private resolveAndCheckTarget: (url: string) => Promise<SafeResolution>;
 
   constructor(config: ProxyConfig = {}) {
     this.cache = new NodeCache({
@@ -223,6 +226,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.resolveAndCheckTarget = config.ssrfCheck ?? _resolveAndCheckTarget;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -250,7 +254,7 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
+    const resolved = await this.resolveAndCheckTarget(target_url);
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
@@ -284,12 +288,19 @@ export default class ConsensusProxy {
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
-    if (node && typeof node.id === 'string') {
-      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
-    }
+    const requestPromise: Promise<ProxyResponse> = (node && typeof node.id === 'string')
+      ? this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved)
+      : (() => {
+          console.log('[Self-Fallback] No nodes available, executing directly');
+          return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+        })();
 
-    console.log('[Self-Fallback] No nodes available, executing directly');
-    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+    this.pendingRequests.set(dedupeKey, requestPromise);
+    try {
+      return await requestPromise;
+    } finally {
+      this.pendingRequests.delete(dedupeKey);
+    }
   }
 
   private async executeViaNode(
@@ -463,7 +474,7 @@ export default class ConsensusProxy {
         data:             withBody ? body : undefined,
         timeout:          30_000,
         validateStatus:   () => true,
-        maxRedirects:     5,
+        maxRedirects:     0,   // redirects are not followed: each hop must pass SSRF check
         decompress:       false,
         responseType:     'arraybuffer',
         maxContentLength: MAX_RESPONSE_BYTES,
