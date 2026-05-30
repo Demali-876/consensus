@@ -96,10 +96,21 @@ export interface Preferences {
   defaultWsModel:      'time' | 'data' | 'hybrid';
   defaultWsMinutes:    number;
   defaultWsMegabytes:  number;
+  /**
+   * Friendly handle shown in the top-bar `acct` chip and the landing-page
+   * `WELCOME BACK, ...` eyebrow. Wallet addresses and on-chain identity
+   * stay in `ConsensusConfig` — this is purely a UI label. Falls back to
+   * the PREFS_DEFAULTS value ('guest') when unset or blank.
+   */
+  displayName:         string;
 
   // ui
   theme:               'auto' | 'dark' | 'light';
   fontCheckDismissed:  boolean;
+  /** Set true after the first-run walkthrough finishes. Reset → replay. */
+  tourCompleted:       boolean;
+  /** Most-recently-executed command palette IDs, newest first. Capped to 5. */
+  paletteRecents:      string[];
 }
 
 const PREFS_DEFAULTS: Preferences = {
@@ -110,8 +121,11 @@ const PREFS_DEFAULTS: Preferences = {
   defaultWsModel:     'hybrid',
   defaultWsMinutes:   5,
   defaultWsMegabytes: 50,
+  displayName:        'guest',
   theme:              'auto',
   fontCheckDismissed: false,
+  tourCompleted:      false,
+  paletteRecents:     [],
 };
 
 export function loadPrefs(): Preferences {
