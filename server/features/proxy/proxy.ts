@@ -41,6 +41,8 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /** Override the SSRF resolver — for dependency-injection in tests only. */
+  ssrfCheck?: (url: string) => Promise<SafeResolution>;
 }
 
 export interface ProxyResponse {
@@ -202,13 +204,14 @@ function generateDedupeKey({ target_url, method, headers = {}, body }: DedupePar
 }
 
 export default class ConsensusProxy {
-  private cache:           NodeCache;
-  private pendingRequests: Map<string, Promise<ProxyResponse>>;
-  private paidKeys:        Map<string, number>;
-  private stats:           { total_requests: number; cache_hits: number; cache_misses: number };
-  private router:          Router;
-  private nodeTunnel?:     ProxyConfig['nodeTunnel'];
-  private cleanupTimer:    ReturnType<typeof setInterval>;
+  private cache:              NodeCache;
+  private pendingRequests:    Map<string, Promise<ProxyResponse>>;
+  private paidKeys:           Map<string, number>;
+  private stats:              { total_requests: number; cache_hits: number; cache_misses: number };
+  private router:             Router;
+  private nodeTunnel?:        ProxyConfig['nodeTunnel'];
+  private cleanupTimer:       ReturnType<typeof setInterval>;
+  private ssrfCheckOverride?: (url: string) => Promise<SafeResolution>;
 
   constructor(config: ProxyConfig = {}) {
     this.cache = new NodeCache({
@@ -218,12 +221,13 @@ export default class ConsensusProxy {
       maxKeys:     10_000,
     });
 
-    this.pendingRequests = new Map();
-    this.paidKeys        = new Map();
-    this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
-    this.router          = config.router ?? new Router();
-    this.nodeTunnel      = config.nodeTunnel;
-    this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
+    this.pendingRequests    = new Map();
+    this.paidKeys           = new Map();
+    this.stats              = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
+    this.router             = config.router ?? new Router();
+    this.nodeTunnel         = config.nodeTunnel;
+    this.ssrfCheckOverride  = config.ssrfCheck;
+    this.cleanupTimer       = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
 
@@ -250,7 +254,7 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
+    const resolved = await (this.ssrfCheckOverride ?? resolveAndCheckTarget)(target_url);
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
