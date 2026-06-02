@@ -41,6 +41,12 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /**
+   * Override the SSRF guard for testing.  Returns true when the URL should be
+   * blocked (same semantics as isPrivateTarget).  Omit in production — the
+   * real resolveAndCheckTarget is always used when this is absent.
+   */
+  ssrfCheck?: (url: string) => Promise<boolean>;
 }
 
 export interface ProxyResponse {
@@ -208,6 +214,7 @@ export default class ConsensusProxy {
   private stats:           { total_requests: number; cache_hits: number; cache_misses: number };
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
+  private ssrfCheck?:      ProxyConfig['ssrfCheck'];
   private cleanupTimer:    ReturnType<typeof setInterval>;
 
   constructor(config: ProxyConfig = {}) {
@@ -223,6 +230,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.ssrfCheck       = config.ssrfCheck;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -250,8 +258,9 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
-
+    // Compute dedupeKey synchronously — must happen before any async operation so
+    // that pendingRequests.set() below is always visible to concurrent callers with
+    // the same request identity before this call yields for the first time.
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
 
@@ -283,6 +292,38 @@ export default class ConsensusProxy {
     this.stats.cache_misses++;
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
+    // Register the execution promise synchronously before the first await.
+    // This ensures any concurrent call with the same dedupeKey will find it in
+    // the map and await the shared result rather than launching a duplicate request.
+    const executionPromise = this._resolveAndExecute(target_url, method, headers, body, dedupeKey, ttl);
+    this.pendingRequests.set(dedupeKey, executionPromise);
+
+    try {
+      return await executionPromise;
+    } finally {
+      this.pendingRequests.delete(dedupeKey);
+    }
+  }
+
+  // Performs the SSRF check then routes to a node or executes directly.
+  // Separated from handleRequest so that pendingRequests.set() can happen
+  // synchronously in handleRequest before this async work begins.
+  private async _resolveAndExecute(
+    target_url: string,
+    method:     string,
+    headers:    Headers,
+    body:       RequestBody | undefined,
+    dedupeKey:  string,
+    ttl:        number,
+  ): Promise<ProxyResponse> {
+    let resolved: SafeResolution | undefined;
+    if (this.ssrfCheck) {
+      const isPrivate = await this.ssrfCheck(target_url);
+      if (isPrivate) throw new TypeError(`Forbidden target_url — private/internal addresses are not allowed`);
+    } else {
+      resolved = await resolveAndCheckTarget(target_url);
+    }
+
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
     if (node && typeof node.id === 'string') {
       return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
@@ -300,7 +341,7 @@ export default class ConsensusProxy {
     body:       RequestBody,
     dedupeKey:  string,
     ttl:        number,
-    resolved:   SafeResolution,
+    resolved:   SafeResolution | undefined,
   ): Promise<ProxyResponse> {
     this.router.incrementRequest(node.id);
 
@@ -396,10 +437,8 @@ export default class ConsensusProxy {
     body:       RequestBody,
     dedupeKey:  string,
     ttl:        number,
-    resolved:   SafeResolution,
+    resolved:   SafeResolution | undefined,
   ): Promise<ProxyResponse> {
-    // Pending-request registration and leak-guard are owned by handleRequest so
-    // they cover both this path and executeViaNode uniformly.
     try {
       const response = await this.makeRequest(target_url, method, headers, body, resolved);
       const finalResponse = { ...response, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: 'proxy-direct' };
