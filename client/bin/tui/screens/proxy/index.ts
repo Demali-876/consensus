@@ -6,16 +6,17 @@ import { dispatchProxy }      from '../../../../src/proxy-worker.js';
 import type { ProxyWorkerHandle, WorkerStats } from '../../../../src/proxy-worker.js';
 import { createAppState } from '../../../lib/app-manager.js';
 import { writeCrashLog, writeTraceLog } from '../../../lib/crash-log';
+import { loadPrefs } from '../../../lib/store.ts';
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { C }                  from '../../../theme';
 
-function createPreloadHandle(): ProxyWorkerHandle {
+function createPreloadHandle(port: number): ProxyWorkerHandle {
   const startedAt = Date.now();
   const stats = (): WorkerStats => ({
     requests: 0, bytesSent: 0, bytesRecv: 0,
     uptime: Date.now() - startedAt, spend: 0,
   });
-  return { type: 'forward', port: 0, stats, stop: async () => {} };
+  return { type: 'forward', port, stats, stop: async () => {} };
 }
 
 async function runForward(): Promise<void> {
@@ -23,8 +24,10 @@ async function runForward(): Promise<void> {
   const setup = await showForwardSetup();
   writeTraceLog('proxy.runForward.afterSetup', { setup });
   if (!setup) return;
+  // TYPE toggle: user asked to swap to reverse mid-flow.
+  if ('swap' in setup) return runReverse();
 
-  const handle = createPreloadHandle();
+  const handle = createPreloadHandle(loadPrefs().defaultProxyPort);
 
   const routeLabel = setup.nodeDomain ?? setup.nodeRegion ?? 'auto';
   const label = setup.appPort ? `app:${setup.appPort} → ${routeLabel}` : routeLabel;
@@ -59,6 +62,7 @@ async function runReverse(): Promise<void> {
   const setup = await showReverseSetup();
   writeTraceLog('proxy.runReverse.afterSetup', { setup });
   if (!setup) return;
+  if ('swap' in setup) return runForward();
 
   let handle;
   try {
@@ -77,7 +81,12 @@ async function runReverse(): Promise<void> {
   }
 
   const label = `${setup.upstream.host}:${setup.upstream.port}`;
-  const entry: WorkerEntry = { handle, startedAt: Date.now(), label };
+  const entry: WorkerEntry = {
+    handle,
+    startedAt: Date.now(),
+    label,
+    cacheTtl: setup.cacheTtl,
+  };
   registerWorker(entry);
   writeTraceLog('proxy.runReverse.dashboard.enter', { port: handle.port, label });
   await showProxyDashboard(entry, () => removeWorker(entry));

@@ -1,17 +1,36 @@
-import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
-import { dirname }        from 'node:path';
-import { C }              from '../../../theme';
-import { loadConfig }     from '../../../lib/config.ts';
-import { loadPrefs, loadBookmarks, saveBookmark, type Bookmark } from '../../../lib/store.ts';
-import { writeTraceLog }  from '../../../lib/crash-log';
-import { type FieldDef, type FormState, renderField, handleKey } from '../../../lib/form.ts';
-import { scanPorts, HTTP_PORTS }  from '../../../lib/ports.ts';
-import { makeSpin }               from '../../../lib/spinners.ts';
+/**
+ * Forward proxy setup — v2 design.
+ *
+ * Returns either a ForwardSetupResult (Start was pressed), `null` (Back), or
+ * the swap sentinel (`{ swap: 'reverse' }`) when the user toggled TYPE.
+ *
+ * Result-shape parity with the previous version is preserved so index.ts and
+ * the dispatchProxy plumbing don't change — only the UI is new.
+ */
+
+import {
+  createCliRenderer,
+  BoxRenderable,
+  TextRenderable,
+  TextAttributes,
+} from '@opentui/core';
+import { C } from '../../../theme';
+import { writeTraceLog } from '../../../lib/crash-log';
 import { discoverAll, type DiscoveredProcess } from '../../../lib/discover.ts';
-import { FilePicker }             from '../../../lib/file-picker.ts';
-import type { PreferNetwork }     from '../../../../src/payment-fetch.js';
-import { NETWORK_CAIP2S, NETWORK_LABELS } from '../../../lib/networks.ts';
-import { isFreeMode }             from '../../../lib/server-config';
+import { HTTP_PORTS } from '../../../lib/ports.ts';
+import { makeSpin } from '../../../lib/spinners.ts';
+import { loadPrefs, loadBookmarks, saveBookmark, type Bookmark } from '../../../lib/store.ts';
+import { isFreeMode } from '../../../lib/server-config';
+import type { PreferNetwork } from '../../../../src/payment-fetch.js';
+import {
+  buildTopBar, buildBreadcrumb, buildSubtitle,
+  buildDetectedPanel, buildBookmarksPanel, buildWalletPanel,
+  buildNetworkChips, buildChainChips, buildFooter,
+  makeFieldRow, makeSectionHeader, makeToggle, makeBadge,
+  familyFromCaip2, FAMILY_DEFAULT_CAIP2, CHAINS_BY_FAMILY,
+  type FooterHint, type NetworkFamily,
+} from './setup-common.ts';
+import crypto from 'node:crypto';
 
 export type ForwardSetupResult = {
   appPort?:        number;
@@ -30,102 +49,65 @@ export type ForwardSetupResult = {
   preferNetwork?:  PreferNetwork;
 };
 
-const MAX_SHOWN = 5;
+/** Discriminated outcome — lets index.ts route on `swap` without affecting the result type. */
+export type ForwardSetupOutcome =
+  | { kind: 'result'; data: ForwardSetupResult }
+  | { kind: 'cancel' }
+  | { kind: 'swap-to-reverse' };
 
-const FIELD_DESC: Record<string, string> = {
-  appPort:        'The port your local server listens on. Used to health-check your app and route traffic through it.',
-  appEntry:       'Absolute path to the file Bun runs to start your app. Required for auto-restart. Press [space] to browse files.',
-  appCheckPath:   'An HTTP path that returns 2xx when your app is healthy. Leave as / if unsure.',
-  autoLaunch:     'After injecting the preload shim, kills the running process by PID and relaunches it with the preload applied.',
-  nodeRegion:     'Prefer nodes in a specific region (us-east, eu-west). Leave blank for automatic selection.',
-  nodeDomain:     'Pin all traffic to a specific node domain. Useful for testing a particular node.',
-  nodeExclude:    'Skip a specific node domain. Useful if a node is misbehaving.',
-  routes:         'Comma-separated path prefixes. Only these paths are routed through Consensus.',
-  mode:           'Inclusive routes only the listed paths. Exclusive routes everything except them.',
-  matchSubroutes: 'When on, /api also matches /api/users, /api/orders and any other sub-paths.',
-  cacheTtl:       'How long to cache responses in seconds. 0 disables caching. Cached responses skip payment.',
-  verbose:        'Adds Consensus metadata headers to every response. Useful for debugging proxied requests.',
-  budget:         'Maximum USD to spend per session. Leave blank for unlimited.',
-  network:        'Which blockchain network to use for payments. Defaults to the first available.',
+// Back-compat alias: existing callers using `await showForwardSetup()` get the
+// unwrapped result for kind:'result', null for cancel, and `{ swap: 'reverse' }`
+// for the type-toggle.
+export type ForwardSetupReturn = ForwardSetupResult | null | { swap: 'reverse' };
+
+export async function showForwardSetup(): Promise<ForwardSetupReturn> {
+  const outcome = await showForwardSetupInternal();
+  if (outcome.kind === 'result')          return outcome.data;
+  if (outcome.kind === 'swap-to-reverse') return { swap: 'reverse' };
+  return null;
+}
+
+// ─── Editable field schema ───────────────────────────────────────────────────
+
+type FieldId =
+  | 'appPort' | 'appEntry' | 'appCheckPath' | 'autoLaunch'
+  | 'nodeRegion' | 'nodeDomain' | 'nodeExclude'
+  | 'routes' | 'mode' | 'matchSubroutes'
+  | 'cacheTtl' | 'verbose'
+  | 'budget' | 'family' | 'chain';
+
+/** Which top-level section the field belongs to — drives the section indicator. */
+type FieldSection = 'APP' | 'NODE' | 'ROUTING' | 'PERFORMANCE' | 'BUDGET' | 'NETWORK';
+const FIELD_SECTION: Record<FieldId, FieldSection> = {
+  appPort:        'APP',
+  appEntry:       'APP',
+  appCheckPath:   'APP',
+  autoLaunch:     'APP',
+  nodeRegion:     'NODE',
+  nodeDomain:     'NODE',
+  nodeExclude:    'NODE',
+  routes:         'ROUTING',
+  mode:           'ROUTING',
+  matchSubroutes: 'ROUTING',
+  cacheTtl:       'PERFORMANCE',
+  verbose:        'PERFORMANCE',
+  budget:         'BUDGET',
+  family:         'NETWORK',
+  chain:          'NETWORK',
 };
 
-export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
-  // ── Scan + discover phase ─────────────────────────────────────────────────────
-  const scanRenderer = await createCliRenderer({
-    exitOnCtrlC: false, targetFps: 15, useMouse: false, useAlternateScreen: true,
-  });
-  scanRenderer.start();
+interface FieldState {
+  id:      FieldId;
+  value:   string;
+  options?: string[];          // for toggle fields
+}
 
-  const scanRoot = scanRenderer.root;
-  scanRoot.flexDirection = 'column';
-  scanRoot.padding = 0;
-
-  const scanTop = new BoxRenderable(scanRenderer, {
-    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
-    paddingX: 2, paddingY: 0, backgroundColor: C.panel,
-  });
-  scanTop.add(new TextRenderable(scanRenderer, { content: 'CONSENSUS',     fg: C.white, bg: C.panel }));
-  scanTop.add(new TextRenderable(scanRenderer, { content: 'FORWARD PROXY', fg: C.slate, bg: C.panel }));
-  scanRoot.add(scanTop);
-
-  const scanContent = new BoxRenderable(scanRenderer, {
-    width: '100%', flexGrow: 1, flexDirection: 'column',
-    paddingX: 3, paddingTop: 2, backgroundColor: C.dark,
-  });
-  scanRoot.add(scanContent);
-
-  const spin    = makeSpin('scan');
-  const spinRef = new TextRenderable(scanRenderer, {
-    content: `${spin()}  Scanning local ports…`, fg: C.slate, bg: C.dark,
-  });
-  scanContent.add(spinRef);
-
-  const spinTimer = setInterval(() => {
-    spinRef.content = `${spin()}  Scanning local ports…`;
-  }, 120);
-
-  const openPorts  = await scanPorts(HTTP_PORTS);
-  spinRef.content  = `${spin()}  Resolving processes…`;
-  const discovered = await discoverAll(openPorts);
-  clearInterval(spinTimer);
-  scanRenderer.destroy();
-
-  // ── Form phase ────────────────────────────────────────────────────────────────
-  const cfg      = loadConfig();
+async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   const prefs    = loadPrefs();
-  const evmKey   = process.env.CONSENSUS_EVM_KEY;
-  const svmKey   = process.env.CONSENSUS_SVM_KEY;
-  const pemPath  = process.env.CONSENSUS_PEM_PATH;
+  const version  = '0.1.0-beta.7';
   const freeMode = await isFreeMode();
 
-  // Pre-fill from first discovered process if available
-  const firstDisc = discovered[0];
-
-  const fields: FieldDef[] = [
-    { id: 'appPort',        label: 'App port',        hint: 'port your server listens on',                     type: 'text',   value: firstDisc ? String(firstDisc.port) : (openPorts[0] ? String(openPorts[0]) : '') },
-    { id: 'appEntry',       label: 'Entry file',      hint: 'absolute path — press [space] to browse',         type: 'text',   value: firstDisc?.entryFile ?? '' },
-    { id: 'appCheckPath',   label: 'Check path',      hint: 'HTTP path that returns 2xx when healthy',         type: 'text',   value: '/' },
-    { id: 'autoLaunch',     label: 'Auto relaunch',   hint: 'restart your app with the Consensus preload applied', type: 'toggle', value: 'off', options: ['off', 'on'] },
-    { id: 'nodeRegion',     label: 'Region',          hint: 'us-east / eu-west / blank = auto',               type: 'text',   value: cfg.leased_node?.region ?? prefs.defaultRegion ?? '' },
-    { id: 'nodeDomain',     label: 'Domain',          hint: 'pin to a specific node domain',                  type: 'text',   value: cfg.leased_node?.domain ?? '' },
-    { id: 'nodeExclude',    label: 'Exclude',         hint: 'skip this node domain',                          type: 'text',   value: prefs.defaultExcludeNode ?? '' },
-    { id: 'routes',         label: 'Routes',          hint: '/api, /v2  (comma-sep)',                         type: 'text',   value: '' },
-    { id: 'mode',           label: 'Mode',            hint: 'inclusive = only listed  exclusive = all except', type: 'toggle', value: 'inclusive', options: ['inclusive', 'exclusive'] },
-    { id: 'matchSubroutes', label: 'Match subroutes', hint: '/route also matches /route/*',                   type: 'toggle', value: 'off', options: ['off', 'on'] },
-    { id: 'cacheTtl',       label: 'Cache TTL',       hint: 'seconds, 0 = off',                               type: 'text',   value: String(prefs.defaultCacheTtl) },
-    { id: 'verbose',        label: 'Verbose',         hint: 'add Consensus metadata headers to responses',    type: 'toggle', value: prefs.defaultVerbose ? 'on' : 'off', options: ['off', 'on'] },
-    ...(!freeMode ? [
-      { id: 'budget',  label: 'Spend limit', hint: 'USD per session, blank = unlimited', type: 'text'   as const, value: prefs.defaultBudget != null ? String(prefs.defaultBudget) : '' },
-      { id: 'network', label: 'Pay network', hint: '←/→ or ↵ to select',                type: 'toggle' as const,
-        value: prefs.defaultNetwork ?? '', options: NETWORK_CAIP2S, optionLabels: NETWORK_LABELS },
-    ] : []),
-  ];
-
-  const state: FormState = { cursor: 0, editing: false, editBuf: '' };
-  let bmList = loadBookmarks().filter(b => b.type === 'proxy-forward');
-  let bmMode = false;
-  const MAX_BM = 5;
-
+  // ─── Renderer + root ───────────────────────────────────────────────────────
   const renderer = await createCliRenderer({
     exitOnCtrlC: false, targetFps: 15, useMouse: false, useAlternateScreen: true,
   });
@@ -135,421 +117,487 @@ export async function showForwardSetup(): Promise<ForwardSetupResult | null> {
   root.flexDirection = 'column';
   root.padding = 0;
 
-  const topBar = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
-    paddingX: 2, paddingY: 0, backgroundColor: C.panel,
-  });
-  topBar.add(new TextRenderable(renderer, { content: 'CONSENSUS',           fg: C.white, bg: C.panel }));
-  topBar.add(new TextRenderable(renderer, { content: 'FORWARD PROXY SETUP', fg: C.slate, bg: C.panel }));
-  root.add(topBar);
+  // ─── Top bar + breadcrumb + subtitle ──────────────────────────────────────
+  root.add(buildTopBar(renderer, { version, freeMode }));
+  const crumb = buildBreadcrumb(renderer, 'forward');
+  root.add(crumb.row);
+  root.add(buildSubtitle(renderer, "route your app's outbound traffic through a paid Consensus node"));
 
-  const content = new BoxRenderable(renderer, {
-    width: '100%', flexGrow: 1, flexDirection: 'column',
-    paddingX: 3, paddingTop: 2, backgroundColor: C.dark,
+  // ─── Body: two-column ──────────────────────────────────────────────────────
+  const body = new BoxRenderable(renderer, {
+    width: '100%', flexGrow: 1, flexDirection: 'row', gap: 2,
+    paddingX: 2, backgroundColor: C.dark,
   });
-  root.add(content);
+  root.add(body);
 
-  // ── Bottom bar ────────────────────────────────────────────────────────────────
-  const bottomBar = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'column',
-    paddingX: 2, paddingY: 0, backgroundColor: C.panel,
+  // ── Left column ──────────────────────────────────────────────────────────
+  const leftCol = new BoxRenderable(renderer, {
+    flexGrow: 1, flexShrink: 1, flexDirection: 'column', gap: 1, backgroundColor: C.dark,
   });
-  const descRef  = new TextRenderable(renderer, { content: '', fg: C.dim,   bg: C.panel });
-  const hintsRef = new TextRenderable(renderer, { content: '', fg: C.slate, bg: C.panel });
-  bottomBar.add(descRef);
-  bottomBar.add(hintsRef);
-  root.add(bottomBar);
+  const detected = buildDetectedPanel(renderer);
+  leftCol.add(detected.box);
+  const bookmarksPanel = buildBookmarksPanel(renderer);
+  leftCol.add(bookmarksPanel.box);
+  const hasEvm = Boolean(process.env.CONSENSUS_EVM_KEY);
+  const hasSvm = Boolean(process.env.CONSENSUS_SVM_KEY);
+  const hasIcp = Boolean(process.env.CONSENSUS_PEM_PATH);
+  leftCol.add(buildWalletPanel(renderer, { freeMode, hasEvm, hasSvm, hasIcp }));
+  body.add(leftCol);
 
-  const ln = (text: string, fg = C.slate): TextRenderable => {
-    const t = new TextRenderable(renderer, { content: text || ' ', fg, bg: C.dark });
-    content.add(t);
-    return t;
+  // ── Right column ─────────────────────────────────────────────────────────
+  const rightCol = new BoxRenderable(renderer, {
+    flexGrow: 2, flexShrink: 1, flexDirection: 'column', gap: 1, backgroundColor: C.dark,
+  });
+  body.add(rightCol);
+
+  // APP section
+  rightCol.add(makeSectionHeader(renderer, 'APP'));
+  const appPortRow      = makeFieldRow(renderer, 'App port',     'port your server listens on', { inputWidth: 12 });
+  const appEntryRow     = makeFieldRow(renderer, 'Entry file',   '[space] browse');
+  const appCheckRow     = makeFieldRow(renderer, 'Check path',   'returns 2xx when healthy');
+  const autoLaunchRow   = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.dark });
+  autoLaunchRow.add(new TextRenderable(renderer, { content: 'Auto relaunch '.padEnd(14), fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD }));
+  const autoLaunchToggle = makeToggle(renderer, 'off', 'on', 'a');
+  autoLaunchRow.add(autoLaunchToggle.row);
+  autoLaunchRow.add(new TextRenderable(renderer, { content: 'restart app with Consensus preload', fg: C.dim, bg: C.dark }));
+  rightCol.add(appPortRow.row);
+  rightCol.add(appEntryRow.row);
+  rightCol.add(appCheckRow.row);
+  rightCol.add(autoLaunchRow);
+
+  // NODE section
+  rightCol.add(makeSectionHeader(renderer, 'NODE'));
+  const regionRow  = makeFieldRow(renderer, 'Region',  'blank = auto');
+  const domainRow  = makeFieldRow(renderer, 'Domain',  '', { placeholder: 'pin a specific node domain' });
+  const excludeRow = makeFieldRow(renderer, 'Exclude', '', { placeholder: 'skip this node domain' });
+  rightCol.add(regionRow.row);
+  rightCol.add(domainRow.row);
+  rightCol.add(excludeRow.row);
+
+  // ROUTING + PERFORMANCE side-by-side (when there's room) — for now stack
+  // vertically since each row is full-width. Keeps the layout consistent
+  // across narrow terminals.
+  rightCol.add(makeSectionHeader(renderer, 'ROUTING'));
+  const routesRow = makeFieldRow(renderer, 'Routes', '', { placeholder: '/api, /v2' });
+  rightCol.add(routesRow.row);
+
+  const modeRow = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.dark });
+  modeRow.add(new TextRenderable(renderer, { content: 'Mode'.padEnd(14), fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD }));
+  const modeToggle = makeToggle(renderer, 'inclusive', 'exclusive', 'a');
+  modeRow.add(modeToggle.row);
+  rightCol.add(modeRow);
+
+  const matchRow = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.dark });
+  matchRow.add(new TextRenderable(renderer, { content: 'Match subroutes'.padEnd(14), fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD }));
+  const matchToggle = makeToggle(renderer, 'off', 'on', 'b');
+  matchRow.add(matchToggle.row);
+  rightCol.add(matchRow);
+
+  rightCol.add(makeSectionHeader(renderer, 'PERFORMANCE'));
+  const ttlRow = makeFieldRow(renderer, 'Cache TTL', 'sec · 0 = off', { inputWidth: 12 });
+  rightCol.add(ttlRow.row);
+  const verboseRow = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.dark });
+  verboseRow.add(new TextRenderable(renderer, { content: 'Verbose'.padEnd(14), fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD }));
+  const verboseToggle = makeToggle(renderer, 'off', 'on', 'a');
+  verboseRow.add(verboseToggle.row);
+  verboseRow.add(new TextRenderable(renderer, { content: 'add metadata header', fg: C.dim, bg: C.dark }));
+  rightCol.add(verboseRow);
+
+  // BUDGET + NETWORK + CHAIN — only when NOT free mode. Free mode hides
+  // them since the proxy never charges and the network is irrelevant.
+  let budgetRow:    ReturnType<typeof makeFieldRow> | null = null;
+  let networkChips: ReturnType<typeof buildNetworkChips> | null = null;
+  let chainChips:   ReturnType<typeof buildChainChips>   | null = null;
+  const initialFamily = familyFromCaip2(prefs.defaultNetwork);
+  const initialChain  = prefs.defaultNetwork
+    && CHAINS_BY_FAMILY[initialFamily].some(c => c.caip2 === prefs.defaultNetwork)
+    ? prefs.defaultNetwork
+    : FAMILY_DEFAULT_CAIP2[initialFamily];
+  if (!freeMode) {
+    rightCol.add(makeSectionHeader(renderer, 'BUDGET'));
+    budgetRow = makeFieldRow(renderer, 'Spend limit', 'USD / session', { inputWidth: 12 });
+    rightCol.add(budgetRow.row);
+
+    rightCol.add(makeSectionHeader(renderer, 'NETWORK'));
+    const netRow = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.dark });
+    netRow.add(new TextRenderable(renderer, { content: 'Network'.padEnd(14), fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD }));
+    networkChips = buildNetworkChips(renderer, initialFamily);
+    netRow.add(networkChips.row);
+    rightCol.add(netRow);
+
+    const chainRow = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.dark });
+    chainRow.add(new TextRenderable(renderer, { content: 'Chain'.padEnd(14), fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD }));
+    chainChips = buildChainChips(renderer, initialFamily, initialChain);
+    chainRow.add(chainChips.row);
+    rightCol.add(chainRow);
+  }
+
+  // ─── Footer chips ──────────────────────────────────────────────────────────
+  const footer = buildFooter(renderer, makeFooterHints('lists'), 'FORWARD PROXY SETUP');
+  root.add(footer.box);
+
+  // ─── State ─────────────────────────────────────────────────────────────────
+  const fields: FieldState[] = [
+    { id: 'appPort',        value: '' },
+    { id: 'appEntry',       value: '' },
+    { id: 'appCheckPath',   value: prefs.defaultTarget ?? '/' },
+    { id: 'autoLaunch',     value: 'off', options: ['off', 'on'] },
+    { id: 'nodeRegion',     value: prefs.defaultRegion ?? '' },
+    { id: 'nodeDomain',     value: '' },
+    { id: 'nodeExclude',    value: prefs.defaultExcludeNode ?? '' },
+    { id: 'routes',         value: '' },
+    { id: 'mode',           value: 'inclusive', options: ['inclusive', 'exclusive'] },
+    { id: 'matchSubroutes', value: 'on', options: ['off', 'on'] },
+    { id: 'cacheTtl',       value: String(prefs.defaultCacheTtl || 300) },
+    { id: 'verbose',        value: prefs.defaultVerbose ? 'on' : 'off', options: ['off', 'on'] },
+    { id: 'budget',         value: prefs.defaultBudget != null ? String(prefs.defaultBudget) : '5.00' },
+    // `family` is a toggle across EVM/SVM/ICP; `chain` is the specific CAIP-2
+    // inside that family. Wire-format payment uses only `chain`.
+    { id: 'family',         value: initialFamily, options: ['evm', 'svm', 'icp'] },
+    { id: 'chain',          value: initialChain,
+                            options: CHAINS_BY_FAMILY[initialFamily].map(c => c.caip2) },
+  ];
+
+  type Section = 'lists' | 'form';
+  let section: Section = 'lists';
+  let listIdx = 0;
+  let formIdx = 0;
+  let editing = false;
+  let processes: DiscoveredProcess[] = [];
+  let bookmarks = loadBookmarks().filter(b => b.type === 'proxy-forward');
+  let cursorOn = true;
+
+  const get = (id: FieldId): string => fields.find(f => f.id === id)?.value ?? '';
+  const set = (id: FieldId, v: string): void => {
+    const f = fields.find(x => x.id === id);
+    if (f) f.value = v;
   };
 
-  // ── DETECTED table ────────────────────────────────────────────────────────────
-  ln('DETECTED  ' + '─'.repeat(42), C.dim);
-  ln(' ');
-  const COL = { pid: 8, port: 6, svc: 10 };
-  const detectedHeader = ln(
-    '  ' +
-    'PID'.padEnd(COL.pid) +
-    'PORT'.padEnd(COL.port) +
-    'SERVICE'.padEnd(COL.svc) +
-    'ENTRY FILE',
-    C.dim,
-  );
-  const detectedSep    = ln('  ' + '─'.repeat(52), C.dim);
-  const detectedRefs: TextRenderable[] = [];
-  for (let i = 0; i < MAX_SHOWN; i++) detectedRefs.push(ln(' '));
-  ln(' ');
+  // ─── Render functions ──────────────────────────────────────────────────────
+  function renderForm(): void {
+    // Update each row's input contents from the backing field value.
+    const showCaret = (raw: string, isFocused: boolean): string => {
+      if (!isFocused) return raw || ' ';
+      return cursorOn ? raw + '█' : raw + ' ';
+    };
+    const focusedField = section === 'form' ? FORM_FIELD_ORDER[formIdx] : null;
 
-  // ── BOOKMARKS section ─────────────────────────────────────────────────────────
-  const bmHeaderRef = ln('', C.dim);
-  const bmRefs: TextRenderable[] = [];
-  for (let i = 0; i < MAX_BM; i++) bmRefs.push(ln(' ', C.dim));
-  ln(' ');
+    const refs: Array<[FieldId, ReturnType<typeof makeFieldRow>]> = [
+      ['appPort',      appPortRow],
+      ['appEntry',     appEntryRow],
+      ['appCheckPath', appCheckRow],
+      ['nodeRegion',   regionRow],
+      ['nodeDomain',   domainRow],
+      ['nodeExclude',  excludeRow],
+      ['routes',       routesRow],
+      ['cacheTtl',     ttlRow],
+    ];
+    if (budgetRow) refs.push(['budget', budgetRow]);
+    for (const [id, ref] of refs) {
+      const isFocused = focusedField === id;
+      ref.inputBox.borderColor = isFocused ? C.accent : C.line2;
+      const raw = get(id);
+      ref.inputText.content = raw === '' && !isFocused
+        ? ' '                                                     // empty placeholder
+        : showCaret(raw, isFocused && editing);
+      ref.inputText.fg = raw === '' && !isFocused ? C.dim : C.white;
+    }
 
-  // ── APP section ───────────────────────────────────────────────────────────────
-  ln('APP  ' + '─'.repeat(47), C.dim);
-  ln(' ');
-  ln(`  cwd  ${process.cwd()}`, C.dim);
-  ln(' ');
-  fields[0]!.ref = ln('');
-  fields[1]!.ref = ln('');
-  // File picker is inserted dynamically between fields[1] and fields[2]
-  fields[2]!.ref = ln('');
-  fields[3]!.ref = ln('');
-  const validationRef = ln('');
-  ln(' ');
+    // Toggles
+    autoLaunchToggle.setActive(get('autoLaunch') === 'on' ? 'b' : 'a');
+    modeToggle.setActive      (get('mode')       === 'exclusive' ? 'b' : 'a');
+    matchToggle.setActive     (get('matchSubroutes') === 'on' ? 'b' : 'a');
+    verboseToggle.setActive   (get('verbose')    === 'on' ? 'b' : 'a');
+    if (networkChips) networkChips.setSelected(get('family') as NetworkFamily);
+    if (chainChips)   chainChips.setActive(get('chain'));
 
-  ln('NODE  ' + '─'.repeat(46), C.dim);
-  ln(' ');
-  fields[4]!.ref = ln('');
-  fields[5]!.ref = ln('');
-  fields[6]!.ref = ln('');
-  ln(' ');
-
-  ln('ROUTING  ' + '─'.repeat(43), C.dim);
-  ln(' ');
-  fields[7]!.ref  = ln('');
-  fields[8]!.ref  = ln('');
-  fields[9]!.ref  = ln('');
-  ln(' ');
-
-  ln('PERFORMANCE  ' + '─'.repeat(39), C.dim);
-  ln(' ');
-  fields[10]!.ref = ln('');
-  fields[11]!.ref = ln('');
-  ln(' ');
-
-  if (!freeMode) {
-    ln('BUDGET  ' + '─'.repeat(44), C.dim);
-    ln(' ');
-    fields[12]!.ref = ln('');
-    ln(' ');
-    ln('NETWORK  ' + '─'.repeat(43), C.dim);
-    ln(' ');
-    fields[13]!.ref = ln('');
-    ln(' ');
+    // Section indicator updates with focus.
+    crumb.setSection(currentSectionLabel());
   }
 
-  ln('WALLET  ' + '─'.repeat(44), C.dim);
-  ln(' ');
-  const walletRef = ln('');
-
-  // ── File picker ───────────────────────────────────────────────────────────────
-  const picker        = new FilePicker(renderer);
-  let   pickerAdded   = false;
-
-  function openPicker(): void {
-    const entryVal  = fields[1]!.value.trim();
-    const startDir  = entryVal ? dirname(entryVal) : process.cwd();
-    picker.open(startDir);
-    if (!pickerAdded) {
-      // Insert picker container after Entry file row, before Check path row
-      content.insertBefore(picker.container, fields[2]!.ref!);
-      pickerAdded = true;
-    }
+  function rerender(): void {
+    detected.setProcesses(processes);
+    detected.setFocused(section === 'lists' ? listIdx : null);
+    bookmarksPanel.setBookmarks(bookmarks);
+    renderForm();
   }
 
-  function closePicker(): void {
-    picker.close();
-    if (pickerAdded) {
-      content.remove('file-picker');
-      pickerAdded = false;
-    }
-  }
-
-  // ── Detected state ────────────────────────────────────────────────────────────
-  let detectedPorts = openPorts;
-  let detectedProcs = discovered;
-  let scanning      = false;
-  let live          = true;
-  let validationMessage = '';
-
-  function renderDetected(): void {
-    if (!live) return;
-    if (detectedPorts.length === 0) {
-      detectedHeader.content = '  (none detected)';
-      detectedHeader.fg      = C.dim;
-      detectedSep.content    = ' ';
-      for (let i = 0; i < MAX_SHOWN; i++) detectedRefs[i]!.content = ' ';
-      return;
-    }
-    detectedHeader.content =
-      '  ' +
-      'PID'.padEnd(COL.pid) +
-      'PORT'.padEnd(COL.port) +
-      'SERVICE'.padEnd(COL.svc) +
-      'ENTRY FILE';
-    detectedHeader.fg   = C.dim;
-    detectedSep.content = '  ' + '─'.repeat(52);
-    detectedSep.fg      = C.dim;
-
-    for (let i = 0; i < MAX_SHOWN; i++) {
-      const port = detectedPorts[i];
-      if (port == null) { detectedRefs[i]!.content = ' '; continue; }
-      const proc    = detectedProcs.find(p => p.port === port);
-      const pid     = proc ? String(proc.pid)     : '—';
-      const svc     = proc ? proc.service         : 'unknown';
-      const entry   = proc?.entryFile ?? '—';
-      const maxEntry = 36;
-      const entryDisplay = entry.length > maxEntry ? '…' + entry.slice(-(maxEntry - 1)) : entry;
-      detectedRefs[i]!.content =
-        `  ${String(i + 1)} ` +
-        pid.padEnd(COL.pid - 2) +
-        String(port).padEnd(COL.port) +
-        svc.padEnd(COL.svc) +
-        entryDisplay;
-      detectedRefs[i]!.fg = C.slate;
-    }
-  }
-
-  async function rescan(): Promise<void> {
+  // ─── Initial scan ──────────────────────────────────────────────────────────
+  const spin      = makeSpin('scan');
+  let scanning    = false;
+  let scanTicker: ReturnType<typeof setInterval> | null = null;
+  const rescan = async (): Promise<void> => {
     if (scanning) return;
     scanning = true;
-    detectedHeader.content = `  scanning…`;
-    detectedHeader.fg      = C.slate;
-    detectedSep.content    = ' ';
-    for (let i = 0; i < MAX_SHOWN; i++) detectedRefs[i]!.content = ' ';
-    detectedPorts = await scanPorts(HTTP_PORTS);
-    detectedProcs = await discoverAll(detectedPorts);
+    detected.rescanLbl.content = `${spin()} scanning…`;
+    detected.rescanLbl.fg      = C.amber;
+    scanTicker = setInterval(() => {
+      detected.rescanLbl.content = `${spin()} scanning…`;
+    }, 120);
+    try {
+      processes = await discoverAll(HTTP_PORTS);
+    } catch (e) {
+      writeTraceLog('forwardSetup.scan.failed', { err: String(e) });
+      processes = [];
+    }
+    if (scanTicker) { clearInterval(scanTicker); scanTicker = null; }
+    detected.rescanLbl.content = 'rescan';
+    detected.rescanLbl.fg      = C.slate;
     scanning = false;
-    renderDetected();
-    renderAll();
-  }
-
-  renderDetected();
-
-  function fmtAge(ts: number): string {
-    const d = Date.now() - ts;
-    if (d < 3_600_000)  return `${Math.floor(d / 60_000)}m`;
-    if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h`;
-    return `${Math.floor(d / 86_400_000)}d`;
-  }
-
-  function renderBookmarks(): void {
-    if (bmList.length === 0) {
-      bmHeaderRef.content = 'BOOKMARKS  ' + '─'.repeat(38) + '  [M] save first';
-      bmHeaderRef.fg      = C.dim;
-      bmRefs[0]!.content  = '  (none saved)';
-      bmRefs[0]!.fg       = C.dim;
-      for (let i = 1; i < MAX_BM; i++) bmRefs[i]!.content = ' ';
-      return;
-    }
-    bmHeaderRef.content = bmMode
-      ? 'BOOKMARKS  ' + '─'.repeat(22) + '  ← press number to load   [esc] cancel   [M] save'
-      : 'BOOKMARKS  ' + '─'.repeat(35) + '  [M] save   [O] load';
-    bmHeaderRef.fg = bmMode ? C.white : C.dim;
-    for (let i = 0; i < MAX_BM; i++) {
-      const b = bmList[i];
-      if (!b) { bmRefs[i]!.content = ' '; continue; }
-      const label = b.label.length > 22 ? b.label.slice(0, 21) + '…' : b.label.padEnd(22);
-      bmRefs[i]!.content = `  ${i + 1}  ${label}  :${b.target.padEnd(6)}  ${fmtAge(b.createdAt)} ago`;
-      bmRefs[i]!.fg      = bmMode ? C.white : C.dim;
-    }
-  }
-
-  function applyBookmark(b: Bookmark): void {
-    const set = (id: string, val: string) => { const f = fields.find(f => f.id === id); if (f) f.value = val; };
-    set('appPort',    b.target);
-    set('nodeRegion', b.region  ?? '');
-    if (b.network)  set('network',  b.network);
-    if (b.cacheTtl) set('cacheTtl', String(b.cacheTtl));
-    if (b.budget)   set('budget',   String(b.budget));
-  }
-
-  // ── Wallet ────────────────────────────────────────────────────────────────────
-  function renderWallet(): void {
-    const found = [
-      evmKey  && 'CONSENSUS_EVM_KEY ✓',
-      svmKey  && 'CONSENSUS_SVM_KEY ✓',
-      pemPath && 'CONSENSUS_PEM_PATH ✓',
-    ].filter(Boolean) as string[];
-    if (found.length === 0) {
-      walletRef.content = '  ○   Free mode — no wallet required';
-      walletRef.fg      = C.dim;
-    } else {
-      walletRef.content = `  ●   self-managed   ${found.join('   ')}`;
-      walletRef.fg      = C.emerald;
-    }
-  }
-
-  // ── renderAll ─────────────────────────────────────────────────────────────────
-  function renderAll(): void {
-    fields.forEach((f, i) => renderField(f, i, state));
-    renderBookmarks();
-
-    validationRef.content = validationMessage ? `  ✕   ${validationMessage}` : ' ';
-    validationRef.fg      = validationMessage ? C.red : C.dark;
-
-    renderWallet();
-
-    // Bottom description — current field's plain-English explanation
-    const curField = fields[state.cursor];
-    descRef.content = curField ? (FIELD_DESC[curField.id] ?? '') : '';
-
-    if (picker.isOpen) {
-      hintsRef.content = '[↑↓  navigate]  [→/↵  open/select]  [←  up]  [esc  cancel]';
-    } else if (bmMode) {
-      hintsRef.content = '[1-5  load bookmark]  [M  save current]  [esc  cancel]';
-    } else if (state.editing) {
-      hintsRef.content = '[↵  confirm]  [esc  cancel]';
-    } else {
-      hintsRef.content = '[R  rescan]  [↑↓  navigate]  [↵/←/→  edit·toggle]  [space  browse]  [1-5  select]  [M  bookmark]  [S  start]  [B  back]';
-    }
-  }
-
-  renderAll();
-
-  // ── Collect result ────────────────────────────────────────────────────────────
-  function collect(): ForwardSetupResult {
-    const get    = (id: string) => fields.find(f => f.id === id)?.value.trim() ?? '';
-    const result: ForwardSetupResult = {};
-    const appPort = parseInt(get('appPort'), 10);
-    if (!isNaN(appPort) && appPort > 0) result.appPort = appPort;
-    if (get('appEntry'))     result.appEntry     = get('appEntry');
-    if (get('appCheckPath')) result.appCheckPath = get('appCheckPath');
-    if (get('autoLaunch') === 'on') result.autoLaunch = true;
-    if (get('nodeRegion'))   result.nodeRegion   = get('nodeRegion');
-    if (get('nodeDomain'))   result.nodeDomain   = get('nodeDomain');
-    if (get('nodeExclude'))  result.nodeExclude  = get('nodeExclude');
-    if (get('routes')) {
-      result.routes         = get('routes').split(',').map(r => r.trim()).filter(Boolean);
-      result.mode           = get('mode') as 'inclusive' | 'exclusive';
-      result.matchSubroutes = get('matchSubroutes') === 'on';
-    }
-    const ttl = parseInt(get('cacheTtl') || '0', 10);
-    if (!isNaN(ttl) && ttl > 0) result.cacheTtl = ttl;
-    if (get('verbose') === 'on') result.verbose = true;
-    const b = parseFloat(get('budget'));
-    if (!isNaN(b) && b > 0) result.budget = b;
-    const net = get('network');
-    if (net !== '') result.preferNetwork = net as PreferNetwork;
-    return result;
-  }
-
-  const done = (result: ForwardSetupResult | null) => {
-    writeTraceLog('forwardSetup.done', { result });
-    live = false;
-    closePicker();
-    renderer.destroy();
-    return result;
+    rerender();
   };
 
-  function validateBeforeStart(): string | null {
-    const get = (id: string) => fields.find(f => f.id === id)?.value.trim() ?? '';
-    if (get('autoLaunch') === 'on' && get('appEntry') === '') {
-      return 'Auto restart requires an entry file';
+  rerender();
+  void rescan();
+
+  // Blink tick for caret
+  const blinkTimer = setInterval(() => { cursorOn = !cursorOn; renderForm(); }, 500);
+
+  // ─── Field order for arrow nav (skips budget/network if free mode) ────────
+  const FORM_FIELD_ORDER: FieldId[] = [
+    'appPort', 'appEntry', 'appCheckPath', 'autoLaunch',
+    'nodeRegion', 'nodeDomain', 'nodeExclude',
+    'routes', 'mode', 'matchSubroutes',
+    'cacheTtl', 'verbose',
+    ...(freeMode ? [] as FieldId[] : ['budget' as FieldId, 'family' as FieldId, 'chain' as FieldId]),
+  ];
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+  function collect(): ForwardSetupResult {
+    const out: ForwardSetupResult = {};
+    const ap = parseInt(get('appPort'), 10);   if (!isNaN(ap) && ap > 0) out.appPort = ap;
+    const ae = get('appEntry').trim();         if (ae) out.appEntry = ae;
+    const cp = get('appCheckPath').trim();     if (cp) out.appCheckPath = cp;
+    if (get('autoLaunch') === 'on') out.autoLaunch = true;
+    const nr = get('nodeRegion').trim();       if (nr) out.nodeRegion = nr;
+    const nd = get('nodeDomain').trim();       if (nd) out.nodeDomain = nd;
+    const ne = get('nodeExclude').trim();      if (ne) out.nodeExclude = ne;
+    const rs = get('routes').split(',').map(s => s.trim()).filter(Boolean);
+    if (rs.length) out.routes = rs;
+    if (get('mode') === 'exclusive') out.mode = 'exclusive';
+    else                              out.mode = 'inclusive';
+    if (get('matchSubroutes') === 'on') out.matchSubroutes = true;
+    const ttl = parseInt(get('cacheTtl'), 10); if (!isNaN(ttl) && ttl >= 0) out.cacheTtl = ttl;
+    if (get('verbose') === 'on') out.verbose = true;
+    if (!freeMode) {
+      const b = parseFloat(get('budget'));      if (!isNaN(b) && b > 0) out.budget = b;
+      const chain = get('chain');               // already a CAIP-2
+      if (chain) out.preferNetwork = chain as PreferNetwork;
     }
-    return null;
+    return out;
   }
 
-  // ── Key input ─────────────────────────────────────────────────────────────────
-  return new Promise<ForwardSetupResult | null>((resolve) => {
-    renderer.keyInput.on('keypress', (key: any) => {
-      if (!live) return;
+  function selectProcess(idx: number): void {
+    const p = processes[idx];
+    if (!p) return;
+    listIdx = idx;
+    set('appPort',  String(p.port));
+    if (p.entryFile) set('appEntry', p.entryFile);
+    rerender();
+  }
 
-      // ── File picker mode ──────────────────────────────────────────────────────
-      if (picker.isOpen) {
-        const result = picker.handleKey(key);
-        if (result === 'escape') {
-          closePicker();
-          renderAll();
-        } else if (typeof result === 'string') {
-          fields[1]!.value = result;
-          closePicker();
-          renderAll();
+  function saveCurrent(): void {
+    const port = parseInt(get('appPort'), 10);
+    if (!port) return;
+    const bm: Bookmark = {
+      id:        crypto.randomUUID(),
+      label:     `port ${port}${get('nodeRegion') ? ' · ' + get('nodeRegion') : ''}`,
+      type:      'proxy-forward',
+      target:    `localhost:${port}`,
+      port,
+      region:    get('nodeRegion') || undefined,
+      cacheTtl:  parseInt(get('cacheTtl'), 10) || undefined,
+      budget:    !freeMode ? parseFloat(get('budget')) || undefined : undefined,
+      createdAt: Date.now(),
+    };
+    try { saveBookmark(bm); } catch { /* non-fatal */ }
+    bookmarks = loadBookmarks().filter(b => b.type === 'proxy-forward');
+    rerender();
+  }
+
+  function loadBookmark(idx: number): void {
+    const bm = bookmarks[idx];
+    if (!bm) return;
+    if (bm.port) set('appPort', String(bm.port));
+    if (bm.region) set('nodeRegion', bm.region);
+    if (bm.cacheTtl) set('cacheTtl', String(bm.cacheTtl));
+    if (bm.budget && !freeMode) set('budget', String(bm.budget));
+    rerender();
+  }
+
+  /**
+   * Called when the `family` chip changes. Rebuilds the underlying chain
+   * options so ←/→/Enter on the chain field cycles within the new family,
+   * and snaps `chain` to that family's default.
+   */
+  function onFamilyChanged(): void {
+    if (!chainChips) return;
+    const fam = get('family') as NetworkFamily;
+    const newChain = FAMILY_DEFAULT_CAIP2[fam];
+    set('chain', newChain);
+    const chainField = fields.find(f => f.id === 'chain');
+    if (chainField) chainField.options = CHAINS_BY_FAMILY[fam].map(c => c.caip2);
+    chainChips.setFamily(fam, newChain);
+  }
+
+  /** Section indicator — shown in the breadcrumb when section === 'form'. */
+  function currentSectionLabel(): string {
+    if (section !== 'form') return '';
+    const id  = FORM_FIELD_ORDER[formIdx]!;
+    return FIELD_SECTION[id];
+  }
+
+  function teardown(): void {
+    clearInterval(blinkTimer);
+    if (scanTicker) clearInterval(scanTicker);
+    renderer.destroy();
+  }
+
+  // ─── Key input ─────────────────────────────────────────────────────────────
+  return new Promise<ForwardSetupOutcome>((resolve) => {
+    const done = (outcome: ForwardSetupOutcome): void => {
+      teardown();
+      resolve(outcome);
+    };
+
+    renderer.keyInput.on('keypress', (key) => {
+      // ── Text edit mode ──────────────────────────────────────────────────
+      if (editing) {
+        if (key.name === 'escape' || key.name === 'return' || key.name === 'enter') {
+          editing = false;
+          renderForm();
+          return;
+        }
+        if (key.name === 'backspace') {
+          const id = FORM_FIELD_ORDER[formIdx]!;
+          set(id, get(id).slice(0, -1));
+          renderForm();
+          return;
+        }
+        const ch = key.sequence;
+        if (typeof ch === 'string' && ch.length === 1 && ch >= ' ' && ch <= '~') {
+          const id = FORM_FIELD_ORDER[formIdx]!;
+          set(id, get(id) + ch);
+          renderForm();
         }
         return;
       }
 
-      // ── Bookmark-mode escape ───────────────────────────────────────────────────
-      if (key.name === 'escape' && bmMode) {
-        bmMode = false;
-        renderAll();
+      // ── Global ──────────────────────────────────────────────────────────
+      if (key.ctrl && key.name === 'c') { done({ kind: 'cancel' }); return; }
+      if (key.name === 'b' || key.name === 'B' || key.name === 'escape') {
+        done({ kind: 'cancel' });
+        return;
+      }
+      if (key.name === 's' || key.name === 'S') {
+        done({ kind: 'result', data: collect() });
+        return;
+      }
+      // TYPE swap
+      if (key.name === 't' || key.name === 'T') {
+        done({ kind: 'swap-to-reverse' });
         return;
       }
 
-      // ── Normal form mode ──────────────────────────────────────────────────────
-      if (!state.editing) {
-        // R — rescan
-        if (key.name === 'r' || key.name === 'R') { rescan(); return; }
-
-        // M — save bookmark
-        if (key.name === 'm' || key.name === 'M') {
-          const get = (id: string) => fields.find(f => f.id === id)?.value.trim() ?? '';
-          const port = get('appPort');
-          saveBookmark({
-            id:        crypto.randomUUID(),
-            label:     `port ${port || '?'}`,
-            type:      'proxy-forward',
-            target:    port,
-            region:    get('nodeRegion') || undefined,
-            network:   get('network')   || undefined,
-            cacheTtl:  parseInt(get('cacheTtl') || '0', 10) || undefined,
-            budget:    parseFloat(get('budget'))            || undefined,
-            createdAt: Date.now(),
-          });
-          bmList = loadBookmarks().filter(b => b.type === 'proxy-forward');
-          renderAll();
-          return;
-        }
-
-        // O — toggle bookmark load mode
-        if (key.name === 'o' || key.name === 'O') {
-          if (bmList.length > 0) { bmMode = !bmMode; renderAll(); }
-          return;
-        }
-
-        // 1-5 — select detected process OR load bookmark
-        const numKey = parseInt(key.name ?? '', 10);
-        if (numKey >= 1 && numKey <= MAX_SHOWN) {
-          if (bmMode) {
-            const b = bmList[numKey - 1];
-            if (b) { applyBookmark(b); bmMode = false; renderAll(); }
-          } else {
-            const port = detectedPorts[numKey - 1];
-            if (port != null) {
-              const proc = detectedProcs.find(p => p.port === port);
-              fields[0]!.value = String(port);
-              if (proc?.entryFile) fields[1]!.value = proc.entryFile;
-              renderAll();
-            }
-          }
-          return;
-        }
-
-        // Space on Entry file field — open picker
-        if ((key.name === 'space' || key.sequence === ' ') && state.cursor === 1) {
-          openPicker();
-          renderAll();
-          return;
-        }
+      // Bookmark save: M
+      if (key.name === 'm' || key.name === 'M') {
+        saveCurrent();
+        return;
+      }
+      // Bookmark load: Shift+1..5
+      const SHIFTED_DIGIT: Record<string, number> = { '!': 0, '@': 1, '#': 2, '$': 3, '%': 4 };
+      if (key.shift && key.name && /^[1-5]$/.test(key.name)) {
+        loadBookmark(parseInt(key.name, 10) - 1);
+        return;
+      }
+      if (key.sequence && key.sequence in SHIFTED_DIGIT) {
+        loadBookmark(SHIFTED_DIGIT[key.sequence]!);
+        return;
       }
 
-      const action = handleKey(key, fields, state, renderAll);
-      if (action === 'start') {
-        const error = validateBeforeStart();
-        if (error) {
-          validationMessage = error;
-          writeTraceLog('forwardSetup.validationError', { error });
-          renderAll();
-          return;
+      // Number keys: select process from DETECTED list
+      if (key.name && /^[1-5]$/.test(key.name) && !key.shift) {
+        selectProcess(parseInt(key.name, 10) - 1);
+        return;
+      }
+
+      // Rescan
+      if (key.name === 'r' || key.name === 'R') { void rescan(); return; }
+
+      // Section nav (Tab)
+      if (key.name === 'tab') {
+        section = section === 'lists' ? 'form' : 'lists';
+        rerender();
+        return;
+      }
+
+      // List/form navigation
+      if (key.name === 'up' || key.name === 'k') {
+        if (section === 'lists') listIdx = Math.max(0, listIdx - 1);
+        else                     formIdx = Math.max(0, formIdx - 1);
+        rerender();
+        return;
+      }
+      if (key.name === 'down' || key.name === 'j') {
+        if (section === 'lists') {
+          listIdx = Math.min(processes.length - 1, listIdx + 1);
+        } else {
+          formIdx = Math.min(FORM_FIELD_ORDER.length - 1, formIdx + 1);
         }
-        validationMessage = '';
-        writeTraceLog('forwardSetup.action', { action, key: key.name });
-        resolve(done(collect()));
+        rerender();
+        return;
       }
-      if (action === 'back') {
-        validationMessage = '';
-        writeTraceLog('forwardSetup.action', { action, key: key.name });
-        resolve(done(null));
+
+      // Edit / toggle on the current form field
+      if (section === 'form' && (key.name === 'return' || key.name === 'enter')) {
+        const id = FORM_FIELD_ORDER[formIdx]!;
+        const f  = fields.find(x => x.id === id)!;
+        if (f.options) {
+          const i = f.options.indexOf(f.value);
+          f.value = f.options[(i + 1) % f.options.length]!;
+          if (id === 'family') onFamilyChanged();
+          renderForm();
+        } else {
+          editing = true;
+          renderForm();
+        }
+        return;
       }
-      if (action === null && validationMessage) {
-        validationMessage = '';
-        renderAll();
+      if (section === 'form' && (key.name === 'left' || key.name === 'right')) {
+        const id = FORM_FIELD_ORDER[formIdx]!;
+        const f  = fields.find(x => x.id === id)!;
+        if (!f.options) return;
+        const i  = f.options.indexOf(f.value);
+        const di = key.name === 'left' ? -1 : 1;
+        f.value  = f.options[(i + di + f.options.length) % f.options.length]!;
+        if (id === 'family') onFamilyChanged();
+        renderForm();
+        return;
+      }
+
+      // List-mode Enter → use selected process as app
+      if (section === 'lists' && (key.name === 'return' || key.name === 'enter')) {
+        selectProcess(listIdx);
+        return;
       }
     });
   });
 }
+
+// ─── Footer hints ────────────────────────────────────────────────────────────
+
+function makeFooterHints(_section: 'lists' | 'form'): FooterHint[] {
+  return [
+    { key: 'R',    label: 'rescan'       },
+    { key: '↑↓',   label: 'navigate'     },
+    { key: '↵',    label: 'edit · toggle'},
+    { key: '1-5',  label: 'select'       },
+    { key: 'M',    label: 'bookmark'     },
+    { key: 'T',    label: 'type'         },
+    { key: 'S',    label: 'start proxy'  },
+    { key: 'B',    label: 'back'         },
+  ];
+}
+
+// Suppress unused-var warning on imports the type-only code-paths need
+void makeBadge;

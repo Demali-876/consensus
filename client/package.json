@@ -27,6 +27,11 @@
     "consensus": "bun bin/consensus.ts",
     "dev": "printf \"\\033[8;${CONSENSUS_DEV_ROWS:-45};${CONSENSUS_DEV_COLS:-155}t\" && bun --watch bin/consensus.ts",
     "dev:cmd": "bun --watch bin/consensus.ts",
+    "preview:proxy": "bun bin/dev/preview-proxy-dashboard.ts",
+    "preview:proxy:forward:free": "bun bin/dev/preview-proxy-dashboard.ts forward --free",
+    "preview:proxy:forward:paid": "bun bin/dev/preview-proxy-dashboard.ts forward --paid",
+    "preview:proxy:reverse:free": "bun bin/dev/preview-proxy-dashboard.ts reverse --free",
+    "preview:proxy:reverse:paid": "bun bin/dev/preview-proxy-dashboard.ts reverse --paid",
     "setup": "bun bin/consensus.ts setup",
     "reset": "bun bin/consensus.ts setup --force",
     "start-server": "bun test/proxy/server.ts"

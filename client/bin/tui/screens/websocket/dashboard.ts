@@ -1,20 +1,51 @@
-import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
+/**
+ * websocket/dashboard.ts — Live metered WebSocket session.
+ *
+ * Mirrors design-assets/WebSocket Live (opentui).html.
+ *
+ *   ┌ Top bar     — brand + `● live` (or connecting) + acct + bal + version
+ *   ├ Status bar  — rounded line2 box:
+ *   │              ● CONNECTED   HYBRID · 60 min · 500 MB · node sfo-3   expires 59:38 remaining
+ *   ├ Messages    — rounded box, title " MESSAGES ", header TIME/DIR/MESSAGE/BYTES
+ *   ├ Stats bar   — DATA bar · RTT · AVG · P95 · MSGS · UPTIME
+ *   ├ Composer    — optional inline "▶  <buffer>█" row when sending
+ *   └ Footer      — [S] send · [C] clear · [Q] close session · "WEBSOCKET · LIVE"
+ *
+ * Wire-level behaviour (payment fetch, x402 token, SocketClient connection, RTT
+ * tracking, session/spend persistence) is unchanged from the previous version
+ * — only the presentation tree and stats layout were redesigned.
+ */
+
+import {
+  createCliRenderer,
+  BoxRenderable,
+  TextRenderable,
+  TextAttributes,
+  type CliRenderer,
+  type RootRenderable,
+} from '@opentui/core';
 import { C } from '../../../theme';
 import { makeSpin } from '../../../lib/spinners.ts';
 import { loadConfig, getNodeOptions } from '../../../lib/config.ts';
+import { loadPrefs, saveSession, recordSpend } from '../../../lib/store.ts';
+import { isFreeMode } from '../../../lib/server-config';
 import { createPaymentFetch } from '../../../../src/payment-fetch.js';
 import { SocketClient } from '../../../../src/socket-client.ts';
-import { saveSession, recordSpend } from '../../../lib/store.ts';
 import { quoteWs } from '../../../lib/websockets.ts';
 import { decodePaymentResponseHeader } from '@x402/fetch';
 import type { WsSetupResult } from './setup.ts';
 
-// ─── Formatting ───────────────────────────────────────────────────────────────
+const VERSION = '2.4.1';
+const MAX_LOG = 20;
+const MAX_LATENCY_SAMPLES = 40;
+const DATA_BAR_WIDTH = 10;
+
+// ─── Formatting ─────────────────────────────────────────────────────────────
 
 function fmtHms(ms: number): string {
   const s = Math.floor(ms / 1000);
   return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60]
-    .map(n => String(n).padStart(2, '0')).join(':');
+    .map((n) => String(n).padStart(2, '0')).join(':');
 }
 
 function fmtCountdown(ms: number): string {
@@ -31,28 +62,414 @@ function fmtBytes(b: number): string {
 
 function nowHms(): string {
   const d = new Date();
-  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((n) => String(n).padStart(2, '0')).join(':');
 }
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+function byteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+// ─── Types ──────────────────────────────────────────────────────────────────
 
 type MsgEntry = {
-  time: string;
-  dir:  '▶' | '◀';
-  text: string;
+  time:  string;
+  dir:   '▶' | '◄';
+  text:  string;
+  bytes: number;
 };
 
 type RowRef = {
-  time: TextRenderable;
-  dir:  TextRenderable;
-  text: TextRenderable;
+  time:  TextRenderable;
+  dir:   TextRenderable;
+  text:  TextRenderable;
+  bytes: TextRenderable;
 };
 
-const MAX_LOG = 20;
+// ─── Helpers (shared with other redesigned screens) ─────────────────────────
 
-// ─── Dashboard ────────────────────────────────────────────────────────────────
+function acctLabel(): string {
+  const prefs = loadPrefs();
+  const cfg = loadConfig();
+  return prefs.displayName
+    || cfg.wallet_name
+    || (cfg.addresses?.evm ? `${cfg.addresses.evm.slice(0, 6)}…${cfg.addresses.evm.slice(-4)}` : 'guest');
+}
+
+function shortNode(domain?: string): string {
+  if (!domain) return 'auto';
+  // "node-a3f1.us-west.consensus" → "node-a3f1"
+  // "sfo-3.consensus.network" → "sfo-3"
+  const head = domain.split('.')[0] ?? domain;
+  return head;
+}
+
+function makeBadge(renderer: CliRenderer, text: string, opts: { bg?: string; fg?: string } = {}): BoxRenderable {
+  const bg = opts.bg ?? C.line2;
+  const box = new BoxRenderable(renderer, { flexDirection: 'row', paddingX: 1, backgroundColor: bg });
+  box.add(new TextRenderable(renderer, {
+    content: text, fg: opts.fg ?? C.dark, bg, attributes: TextAttributes.BOLD,
+  }));
+  return box;
+}
+
+function makeTopBar(
+  renderer: CliRenderer,
+  root: RootRenderable,
+  freeMode: boolean,
+  balanceUsd: number,
+): { setLive(live: boolean): void } {
+  const topBar = new BoxRenderable(renderer, {
+    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
+    alignItems: 'center', paddingX: 2, paddingY: 0,
+    border: ['bottom'], borderColor: C.line2, backgroundColor: C.dark,
+  });
+  const brand = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, backgroundColor: C.dark });
+  brand.add(new TextRenderable(renderer, {
+    content: '▲ CONSENSUS', fg: C.white, bg: C.dark, attributes: TextAttributes.BOLD,
+  }));
+  brand.add(new TextRenderable(renderer, {
+    content: 'your private network, on demand', fg: C.dim, bg: C.dark,
+  }));
+  const status = new BoxRenderable(renderer, { flexDirection: 'row', gap: 3, backgroundColor: C.dark });
+  const liveTag = new TextRenderable(renderer, {
+    content: '○ connecting', fg: C.amber, bg: C.dark, attributes: TextAttributes.BOLD,
+  });
+  status.add(liveTag);
+  status.add(new TextRenderable(renderer, {
+    content: `acct ${acctLabel()}`, fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
+  }));
+  status.add(new TextRenderable(renderer, {
+    content: freeMode ? 'tier free' : `bal $${balanceUsd.toFixed(2)}`,
+    fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
+  }));
+  status.add(new TextRenderable(renderer, {
+    content: `v ${VERSION}`, fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
+  }));
+  topBar.add(brand);
+  topBar.add(status);
+  root.add(topBar);
+  return {
+    setLive(isLive: boolean) {
+      liveTag.content = isLive ? '● live' : '○ connecting';
+      liveTag.fg      = isLive ? C.emerald : C.amber;
+    },
+  };
+}
+
+// ─── Status bar (Connected · session params · expires) ──────────────────────
+
+interface StatusBarRefs {
+  box:         BoxRenderable;
+  state:       TextRenderable;
+  session:     BoxRenderable;   // mid-cluster wrapper (we replace its text refs)
+  modelText:   TextRenderable;
+  durationVal: TextRenderable;
+  dataVal:     TextRenderable;
+  nodeVal:     TextRenderable;
+  expires:     TextRenderable;
+  setState(text: string, color: string): void;
+}
+
+function makeStatusBar(renderer: CliRenderer, setup: WsSetupResult, nodeName: string): StatusBarRefs {
+  const box = new BoxRenderable(renderer, {
+    width: '100%', flexDirection: 'row', alignItems: 'center', gap: 2,
+    paddingX: 2, paddingY: 0,
+    border: true, borderStyle: 'rounded', borderColor: C.line2,
+    backgroundColor: C.dark,
+  });
+
+  // Left: connection state
+  const state = new TextRenderable(renderer, {
+    content: '○ CONNECTING', fg: C.amber, bg: C.dark, attributes: TextAttributes.BOLD,
+  });
+
+  // Middle: session params, evenly spaced
+  const session = new BoxRenderable(renderer, {
+    flexGrow: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 1,
+    backgroundColor: C.dark,
+  });
+  const dot = () => new TextRenderable(renderer, { content: '·', fg: C.dim, bg: C.dark });
+  const modelText = new TextRenderable(renderer, {
+    content: setup.model.toUpperCase(), fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
+  });
+  const durationVal = new TextRenderable(renderer, {
+    content: `${setup.minutes} min`, fg: C.slate, bg: C.dark,
+  });
+  const dataVal = new TextRenderable(renderer, {
+    content: `${setup.megabytes} MB`, fg: C.slate, bg: C.dark,
+  });
+  const nodeLabel = new TextRenderable(renderer, {
+    content: 'node', fg: C.dim, bg: C.dark,
+  });
+  const nodeVal = new TextRenderable(renderer, {
+    content: nodeName, fg: C.emerald, bg: C.dark, attributes: TextAttributes.BOLD,
+  });
+  session.add(modelText);
+  session.add(dot());
+  session.add(durationVal);
+  session.add(dot());
+  session.add(dataVal);
+  session.add(dot());
+  session.add(nodeLabel);
+  session.add(nodeVal);
+
+  // Right: expires
+  const expires = new TextRenderable(renderer, {
+    content: 'expires —', fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD,
+  });
+
+  box.add(state);
+  box.add(session);
+  box.add(expires);
+
+  return {
+    box, state, session, modelText, durationVal, dataVal, nodeVal, expires,
+    setState(text: string, color: string) {
+      state.content = text;
+      state.fg = color;
+    },
+  };
+}
+
+// ─── Messages panel ─────────────────────────────────────────────────────────
+
+const COL = { time: 10, dir: 4, bytes: 8 };
+
+function makeMessagesPanel(renderer: CliRenderer): {
+  box: BoxRenderable;
+  rows: RowRef[];
+  emptyMessage: TextRenderable;
+} {
+  const box = new BoxRenderable(renderer, {
+    width: '100%', flexGrow: 1, flexDirection: 'column',
+    border: true, borderStyle: 'rounded', borderColor: C.line2,
+    title: ' MESSAGES ', titleAlignment: 'left',
+    paddingX: 2, paddingY: 1, backgroundColor: C.dark,
+  });
+
+  // Header row
+  const header = new BoxRenderable(renderer, {
+    width: '100%', flexDirection: 'row', gap: 2, paddingBottom: 1,
+    backgroundColor: C.dark,
+  });
+  const mkHead = (text: string, width?: number, grow?: boolean, align: 'left' | 'right' = 'left') => {
+    const content = width ? (align === 'right' ? text.padStart(width) : text.padEnd(width)) : text;
+    const t = new TextRenderable(renderer, {
+      content, fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD,
+    });
+    if (grow) {
+      const cell = new BoxRenderable(renderer, {
+        flexGrow: 1, flexDirection: 'row', backgroundColor: C.dark,
+      });
+      cell.add(t);
+      header.add(cell);
+    } else if (width != null) {
+      const cell = new BoxRenderable(renderer, {
+        width, flexDirection: 'row', backgroundColor: C.dark,
+        justifyContent: align === 'right' ? 'flex-end' : 'flex-start',
+      });
+      cell.add(t);
+      header.add(cell);
+    } else {
+      header.add(t);
+    }
+  };
+  mkHead('TIME',    COL.time);
+  mkHead('DIR',     COL.dir);
+  mkHead('MESSAGE', undefined, true);
+  mkHead('BYTES',   COL.bytes, false, 'right');
+  box.add(header);
+
+  // Pre-allocated message rows
+  const rows: RowRef[] = [];
+  for (let i = 0; i < MAX_LOG; i++) {
+    const row = new BoxRenderable(renderer, {
+      width: '100%', flexDirection: 'row', gap: 2, backgroundColor: C.dark,
+    });
+    const time = new TextRenderable(renderer, {
+      content: ''.padEnd(COL.time), fg: C.dim, bg: C.dark,
+    });
+    const dirCell = new BoxRenderable(renderer, {
+      width: COL.dir, flexDirection: 'row', justifyContent: 'center', backgroundColor: C.dark,
+    });
+    const dir = new TextRenderable(renderer, {
+      content: ' ', fg: C.emerald, bg: C.dark, attributes: TextAttributes.BOLD,
+    });
+    dirCell.add(dir);
+    const textCell = new BoxRenderable(renderer, {
+      flexGrow: 1, flexDirection: 'row', backgroundColor: C.dark,
+    });
+    const text = new TextRenderable(renderer, {
+      content: '', fg: C.slate, bg: C.dark,
+    });
+    textCell.add(text);
+    const bytesCell = new BoxRenderable(renderer, {
+      width: COL.bytes, flexDirection: 'row', justifyContent: 'flex-end', backgroundColor: C.dark,
+    });
+    const bytes = new TextRenderable(renderer, {
+      content: '', fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD,
+    });
+    bytesCell.add(bytes);
+    row.add(time);
+    row.add(dirCell);
+    row.add(textCell);
+    row.add(bytesCell);
+    box.add(row);
+    rows.push({ time, dir, text, bytes });
+  }
+
+  // Empty state hint shown above the rows once filled
+  const emptyMessage = new TextRenderable(renderer, {
+    content: 'waiting for messages…', fg: C.dim, bg: C.dark,
+  });
+  box.add(emptyMessage);
+
+  return { box, rows, emptyMessage };
+}
+
+// ─── Stats bar ──────────────────────────────────────────────────────────────
+
+interface StatsRefs {
+  box:        BoxRenderable;
+  dataBar:    TextRenderable;
+  dataValue:  TextRenderable;
+  rtt:        TextRenderable;
+  avg:        TextRenderable;
+  p95:        TextRenderable;
+  msgs:       TextRenderable;
+  uptime:     TextRenderable;
+}
+
+function makeStatsBar(renderer: CliRenderer, megabytes: number): StatsRefs {
+  const box = new BoxRenderable(renderer, {
+    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
+    alignItems: 'center', paddingX: 2, paddingY: 0,
+    border: ['top'], borderColor: C.line2, backgroundColor: C.dark,
+  });
+
+  // Left cluster: DATA bar + values
+  const leftCluster = new BoxRenderable(renderer, {
+    flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.dark,
+  });
+  leftCluster.add(new TextRenderable(renderer, {
+    content: 'DATA', fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD,
+  }));
+  const dataBar = new TextRenderable(renderer, {
+    content: '░'.repeat(DATA_BAR_WIDTH), fg: C.line2, bg: C.dark,
+  });
+  leftCluster.add(dataBar);
+  const dataValue = new TextRenderable(renderer, {
+    content: `— / ${megabytes} MB`, fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
+  });
+  leftCluster.add(dataValue);
+
+  // Middle cluster: RTT/AVG/P95/MSGS
+  const midCluster = new BoxRenderable(renderer, {
+    flexDirection: 'row', gap: 3, alignItems: 'center', backgroundColor: C.dark,
+  });
+  const mkPair = (label: string, valueFg: string) => {
+    const pair = new BoxRenderable(renderer, {
+      flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.dark,
+    });
+    pair.add(new TextRenderable(renderer, {
+      content: label, fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD,
+    }));
+    const value = new TextRenderable(renderer, {
+      content: '—', fg: valueFg, bg: C.dark, attributes: TextAttributes.BOLD,
+    });
+    pair.add(value);
+    midCluster.add(pair);
+    return value;
+  };
+  const rtt  = mkPair('RTT',  C.emerald);
+  const avg  = mkPair('AVG',  C.slate);
+  const p95  = mkPair('P95',  C.slate);
+  const msgs = mkPair('MSGS', C.slate);
+
+  // Right cluster: UPTIME
+  const uptimeCluster = new BoxRenderable(renderer, {
+    flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.dark,
+  });
+  uptimeCluster.add(new TextRenderable(renderer, {
+    content: 'UPTIME', fg: C.dim, bg: C.dark, attributes: TextAttributes.BOLD,
+  }));
+  const uptime = new TextRenderable(renderer, {
+    content: '00:00:00', fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
+  });
+  uptimeCluster.add(uptime);
+
+  box.add(leftCluster);
+  box.add(midCluster);
+  box.add(uptimeCluster);
+  return { box, dataBar, dataValue, rtt, avg, p95, msgs, uptime };
+}
+
+function renderDataBar(refs: { dataBar: TextRenderable; dataValue: TextRenderable }, used: number, megabytes: number): void {
+  const totalBytes = megabytes * 1_048_576;
+  const frac = totalBytes > 0 ? Math.min(1, used / totalBytes) : 0;
+  const filled = Math.round(frac * DATA_BAR_WIDTH);
+  refs.dataBar.content = '█'.repeat(filled) + '░'.repeat(DATA_BAR_WIDTH - filled);
+  refs.dataBar.fg = frac > 0.9 ? C.amber : C.emerald;
+  refs.dataValue.content = `${fmtBytes(used)} / ${megabytes} MB`;
+}
+
+// ─── Footer ─────────────────────────────────────────────────────────────────
+
+function makeFooter(renderer: CliRenderer): { box: BoxRenderable } {
+  const box = new BoxRenderable(renderer, {
+    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
+    paddingX: 2, paddingY: 0,
+    border: ['top'], borderColor: C.line2, backgroundColor: C.panel,
+  });
+  const chips = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, backgroundColor: C.panel });
+  const hints: Array<{ key: string; label: string }> = [
+    { key: 'S', label: 'send' },
+    { key: 'C', label: 'clear' },
+    { key: 'Q', label: 'close session' },
+  ];
+  for (const h of hints) {
+    const pair = new BoxRenderable(renderer, {
+      flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.panel,
+    });
+    pair.add(makeBadge(renderer, h.key, { bg: C.line2 }));
+    pair.add(new TextRenderable(renderer, { content: h.label, fg: C.slate, bg: C.panel }));
+    chips.add(pair);
+  }
+  box.add(chips);
+  box.add(new TextRenderable(renderer, {
+    content: 'WEBSOCKET · LIVE', fg: C.dim, bg: C.panel, attributes: TextAttributes.BOLD,
+  }));
+  return { box };
+}
+
+// ─── Composer ───────────────────────────────────────────────────────────────
+
+function makeComposer(renderer: CliRenderer): { box: BoxRenderable; input: TextRenderable } {
+  const box = new BoxRenderable(renderer, {
+    width: '100%', flexDirection: 'row', gap: 1, alignItems: 'center',
+    paddingX: 2, paddingY: 0,
+    border: ['top'], borderColor: C.line2, backgroundColor: C.panel,
+  });
+  box.add(new TextRenderable(renderer, {
+    content: '▶', fg: C.emerald, bg: C.panel, attributes: TextAttributes.BOLD,
+  }));
+  const input = new TextRenderable(renderer, {
+    content: '█', fg: C.white, bg: C.panel,
+  });
+  box.add(input);
+  box.add(new TextRenderable(renderer, {
+    content: '↵ send · esc cancel', fg: C.dim, bg: C.panel,
+  }));
+  return { box, input };
+}
+
+// ─── Screen ─────────────────────────────────────────────────────────────────
 
 export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
+  const freeMode = await isFreeMode();
+  const balance  = Number(process.env.CONSENSUS_BALANCE_USD ?? 24.18);
+
   const renderer = await createCliRenderer({
     exitOnCtrlC: false, targetFps: 15, useMouse: false, useAlternateScreen: true,
   });
@@ -62,103 +479,34 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
   root.flexDirection = 'column';
   root.padding = 0;
 
-  // ── Top bar ───────────────────────────────────────────────────────────────
-  const topBar = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
-    paddingX: 2, paddingY: 0, backgroundColor: C.panel,
+  // Resolve which node to display in the status bar.
+  const cfg0 = loadConfig();
+  const initialNode = shortNode(cfg0.leased_node?.domain);
+
+  const topBar = makeTopBar(renderer, root, freeMode, balance);
+
+  // Body wrapper with consistent padding.
+  const shell = new BoxRenderable(renderer, {
+    width: '100%', flexGrow: 1, flexDirection: 'column', gap: 1,
+    paddingX: 2, paddingTop: 1, backgroundColor: C.dark,
   });
-  topBar.add(new TextRenderable(renderer, { content: 'CONSENSUS',  fg: C.white, bg: C.panel }));
-  topBar.add(new TextRenderable(renderer, { content: 'WEBSOCKET',  fg: C.slate, bg: C.panel }));
-  root.add(topBar);
+  root.add(shell);
 
-  // ── Status bar ────────────────────────────────────────────────────────────
-  const statusBar = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
-    paddingX: 2, paddingY: 0, backgroundColor: C.dark,
-  });
-  const statusRef    = new TextRenderable(renderer, { content: '○ CONNECTING', fg: C.dim,   bg: C.dark });
-  const sessionRef   = new TextRenderable(renderer, { content: '—',            fg: C.slate, bg: C.dark });
-  const countdownRef = new TextRenderable(renderer, { content: '—',            fg: C.dim,   bg: C.dark });
-  statusBar.add(statusRef);
-  statusBar.add(sessionRef);
-  statusBar.add(countdownRef);
-  root.add(statusBar);
+  const status   = makeStatusBar(renderer, setup, initialNode);
+  shell.add(status.box);
 
-  // ── Content ───────────────────────────────────────────────────────────────
-  const content = new BoxRenderable(renderer, {
-    width: '100%', flexGrow: 1, flexDirection: 'column',
-    paddingX: 2, paddingTop: 1, paddingBottom: 1,
-    backgroundColor: C.dark,
-  });
-  root.add(content);
+  const messages = makeMessagesPanel(renderer);
+  shell.add(messages.box);
 
-  content.add(new TextRenderable(renderer, {
-    content: `  ${setup.model.toUpperCase()}  ${setup.minutes}min  ${setup.megabytes}MB`,
-    fg: C.dim, bg: C.dark,
-  }));
-  content.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.dark }));
-  content.add(new TextRenderable(renderer, { content: 'MESSAGES  ' + '─'.repeat(60), fg: C.dim, bg: C.dark }));
-  content.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.dark }));
+  const stats    = makeStatsBar(renderer, setup.megabytes);
+  root.add(stats.box);
 
-  // Table header
-  const hdr = new BoxRenderable(renderer, { flexDirection: 'row', backgroundColor: 'transparent' });
-  const addH = (t: string, w: number) =>
-    hdr.add(new TextRenderable(renderer, { content: t.padEnd(w), fg: C.dim, bg: 'transparent' }));
-  addH('TIME', 10); addH('', 3); addH('MESSAGE', 60);
-  content.add(hdr);
-  content.add(new TextRenderable(renderer, { content: '─'.repeat(73), fg: C.dim, bg: C.dark }));
+  const composer = makeComposer(renderer);
+  // Not added until the user presses S.
 
-  // Pre-allocated log rows
-  const rows: RowRef[] = [];
-  for (let i = 0; i < MAX_LOG; i++) {
-    const row = new BoxRenderable(renderer, { flexDirection: 'row', backgroundColor: 'transparent' });
-    const mk  = (w: number) => {
-      const t = new TextRenderable(renderer, { content: ''.padEnd(w), fg: C.dim, bg: 'transparent' });
-      row.add(t); return t;
-    };
-    rows.push({ time: mk(10), dir: mk(3), text: mk(60) });
-    content.add(row);
-  }
+  root.add(makeFooter(renderer).box);
 
-  const emptyRef = new TextRenderable(renderer, { content: '  waiting for messages…', fg: C.dim, bg: C.dark });
-  content.add(emptyRef);
-
-  // ── Stats bar ─────────────────────────────────────────────────────────────
-  const statsBar = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
-    paddingX: 2, paddingY: 0, backgroundColor: C.dark,
-  });
-  const dataRef    = new TextRenderable(renderer, { content: 'Data: — / —',        fg: C.dim, bg: C.dark });
-  const latencyRef = new TextRenderable(renderer, { content: 'Latency: —',          fg: C.dim, bg: C.dark });
-  const uptimeRef  = new TextRenderable(renderer, { content: '00:00:00',            fg: C.dim, bg: C.dark });
-  statsBar.add(dataRef);
-  statsBar.add(latencyRef);
-  statsBar.add(uptimeRef);
-  root.add(statsBar);
-
-  // ── Bottom bar ────────────────────────────────────────────────────────────
-  const bottomBar = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
-    paddingX: 2, paddingY: 0, backgroundColor: C.panel,
-  });
-  const hintsRef = new TextRenderable(renderer, {
-    content: '[S  send]  [C  clear]  [Q  close]', fg: C.slate, bg: C.panel,
-  });
-  bottomBar.add(hintsRef);
-  bottomBar.add(new TextRenderable(renderer, { content: 'WEBSOCKET', fg: C.dim, bg: C.panel }));
-  root.add(bottomBar);
-
-  // ── Send input (shown when composing) ────────────────────────────────────
-  const sendBar = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'row',
-    paddingX: 2, paddingY: 0, backgroundColor: C.panel,
-  });
-  const sendPromptRef = new TextRenderable(renderer, { content: '▶  ', fg: C.emerald, bg: C.panel });
-  const sendInputRef  = new TextRenderable(renderer, { content: '',    fg: C.white,   bg: C.panel });
-  sendBar.add(sendPromptRef);
-  sendBar.add(sendInputRef);
-
-  // ── State ─────────────────────────────────────────────────────────────────
+  // ── State ────────────────────────────────────────────────────────────────
   let live      = true;
   let connected = false;
   let sending   = false;
@@ -172,8 +520,7 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
   const sessionId = crypto.randomUUID();
   let lastTxHash: string | undefined;
 
-  // ── Latency (send → first received message RTT) ───────────────────────────
-  const MAX_LATENCY_SAMPLES = 40;
+  // ── RTT tracking ─────────────────────────────────────────────────────────
   const recentLatencies: number[] = [];
   let lastSentAt: number | null = null;
 
@@ -187,116 +534,121 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
 
   function renderLatency(): void {
     if (recentLatencies.length === 0) {
-      latencyRef.content = 'Latency: —';
+      stats.rtt.content = '—'; stats.avg.content = '—'; stats.p95.content = '—';
       return;
     }
-    const cur = recentLatencies.at(-1)!;
-    const avg = recentLatencies.reduce((s, v) => s + v, 0) / recentLatencies.length;
+    const cur = recentLatencies[recentLatencies.length - 1]!;
+    const avgMs = recentLatencies.reduce((s, v) => s + v, 0) / recentLatencies.length;
     const sorted = [...recentLatencies].sort((a, b) => a - b);
-    const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!;
-    latencyRef.content = `RTT: ${Math.round(cur)}ms  avg ${Math.round(avg)}ms  p95 ${Math.round(p95)}ms`;
-    latencyRef.fg = avg > 1000 ? C.amber : C.dim;
+    const p95Ms = sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!;
+    stats.rtt.content = `${Math.round(cur)}ms`;
+    stats.avg.content = `${Math.round(avgMs)}ms`;
+    stats.p95.content = `${Math.round(p95Ms)}ms`;
+    stats.rtt.fg = cur > 1000 ? C.amber : C.emerald;
   }
 
-  // ── Log rendering ─────────────────────────────────────────────────────────
+  // ── Log rendering ────────────────────────────────────────────────────────
   function renderLog(): void {
-    emptyRef.content = log.length === 0 ? '  waiting for messages…' : '';
+    messages.emptyMessage.content = log.length === 0 ? 'waiting for messages…' : '';
+    messages.emptyMessage.fg      = C.dim;
     for (let i = 0; i < MAX_LOG; i++) {
       const e = log[i];
+      const row = messages.rows[i]!;
       if (!e) {
-        rows[i]!.time.content = ''.padEnd(10);
-        rows[i]!.dir.content  = ''.padEnd(3);
-        rows[i]!.text.content = ''.padEnd(60);
+        row.time.content  = '';
+        row.dir.content   = '';
+        row.text.content  = '';
+        row.bytes.content = '';
         continue;
       }
-      const truncated = e.text.length > 59 ? e.text.slice(0, 58) + '…' : e.text;
-      rows[i]!.time.content = e.time.padEnd(10);
-      rows[i]!.time.fg      = C.dim;
-      rows[i]!.dir.content  = e.dir.padEnd(3);
-      rows[i]!.dir.fg       = e.dir === '▶' ? C.emerald : C.cyan;
-      rows[i]!.text.content = truncated.padEnd(60);
-      rows[i]!.text.fg      = e.dir === '▶' ? C.slate : C.white;
+      row.time.content  = e.time;
+      row.dir.content   = e.dir;
+      row.dir.fg        = e.dir === '◄' ? C.emerald : C.accent;
+      row.text.content  = e.text;
+      row.text.fg       = e.dir === '◄' ? C.slate   : C.white;
+      row.bytes.content = `${e.bytes} B`;
     }
+    stats.msgs.content = String(log.length);
   }
 
-  function pushMsg(dir: '▶' | '◀', text: string): void {
+  function pushMsg(dir: '▶' | '◄', text: string, bytes: number): void {
     if (!live) return;
-    log.unshift({ time: nowHms(), dir, text });
+    log.unshift({ time: nowHms(), dir, text, bytes });
     if (log.length > MAX_LOG) log.pop();
     renderLog();
   }
 
-  // ── Send mode ─────────────────────────────────────────────────────────────
+  // ── Composer ─────────────────────────────────────────────────────────────
   function enterSend(): void {
-    sending  = true;
-    sendBuf  = '';
-    sendInputRef.content = '█';
-    hintsRef.content     = '[↵ send]  [esc cancel]';
-    root.add(sendBar);
+    sending = true; sendBuf = '';
+    composer.input.content = '█';
+    root.add(composer.box);
   }
-
   function exitSend(): void {
-    sending = false;
-    sendBuf = '';
-    root.remove(sendBar.id);
-    hintsRef.content = '[S  send]  [C  clear]  [Q  close]';
+    sending = false; sendBuf = '';
+    try { root.remove(composer.box.id); } catch { /* may not be attached */ }
   }
-
   function handleSendKey(key: { name?: string; sequence?: string; ctrl?: boolean }): void {
     if (key.name === 'escape') { exitSend(); return; }
-
     if (key.name === 'return' || key.name === 'enter') {
       if (sendBuf && session) {
         try {
           session.send(sendBuf);
-          bytesSent += new TextEncoder().encode(sendBuf).length;
+          const b = byteLength(sendBuf);
+          bytesSent += b;
           lastSentAt = Date.now();
-          pushMsg('▶', sendBuf);
-        } catch { /* session may have closed */ }
+          pushMsg('▶', sendBuf, b);
+        } catch { /* socket closed mid-send */ }
       }
       exitSend();
       return;
     }
-
     if (key.name === 'backspace' || key.name === 'delete') {
       sendBuf = sendBuf.slice(0, -1);
     } else if (key.sequence && !key.ctrl && key.sequence.length === 1) {
       sendBuf += key.sequence;
     }
-    sendInputRef.content = sendBuf + '█';
+    composer.input.content = `${sendBuf}█`;
   }
 
-  // ── Timers ────────────────────────────────────────────────────────────────
-  const spin      = makeSpin('checking');
+  // ── Timers ───────────────────────────────────────────────────────────────
+  const spin = makeSpin('checking');
   const spinTimer = setInterval(() => {
     if (!live || connected) return;
-    statusRef.content = `${spin()} CONNECTING`;
+    status.setState(`${spin()} CONNECTING`, C.amber);
   }, 100);
 
   const clockTimer = setInterval(() => {
     if (!live) return;
-    uptimeRef.content = fmtHms(Date.now() - startedAt);
-    dataRef.content   = `Data: ${fmtBytes(bytesRecv + bytesSent)} / ${setup.megabytes} MB`;
+    stats.uptime.content = fmtHms(Date.now() - startedAt);
+    renderDataBar(stats, bytesRecv + bytesSent, setup.megabytes);
 
     if (connected) {
       const remaining = expiresMs - (Date.now() - startedAt);
-      countdownRef.content = remaining > 0 ? `${fmtCountdown(remaining)} remaining` : 'expired';
-      countdownRef.fg      = remaining < 60_000 ? C.amber : C.dim;
+      if (remaining > 0) {
+        status.expires.content = `expires ${fmtCountdown(remaining)} remaining`;
+        status.expires.fg      = remaining < 60_000 ? C.amber : C.dim;
+      } else {
+        status.expires.content = 'expired';
+        status.expires.fg      = C.red;
+      }
     }
   }, 1000);
 
   renderLog();
+  renderLatency();
+  renderDataBar(stats, 0, setup.megabytes);
 
-  // ── Shutdown ──────────────────────────────────────────────────────────────
-  const shutdown = () => {
+  // ── Shutdown ─────────────────────────────────────────────────────────────
+  const shutdown = (): void => {
     if (!live) return;
     live = false;
     clearInterval(spinTimer);
     clearInterval(clockTimer);
     try { session?.close(); } catch { /* ignore */ }
-    const endedAt   = Date.now();
+    const endedAt = Date.now();
     const durationMs = endedAt - startedAt;
-    const spendUsd  = quoteWs(setup.model, setup.minutes, setup.megabytes);
+    const spendUsd = quoteWs(setup.model, setup.minutes, setup.megabytes);
     saveSession({
       id:         sessionId,
       type:       'websocket',
@@ -324,31 +676,24 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
     renderer.destroy();
   };
 
-  // ── Key input ─────────────────────────────────────────────────────────────
-  const inputDone = new Promise<void>(resolve => {
+  // ── Key input ────────────────────────────────────────────────────────────
+  const inputDone = new Promise<void>((resolve) => {
     renderer.keyInput.on('keypress', (key) => {
       if (!live) return;
-
       if (sending) { handleSendKey(key); return; }
-
       if (key.ctrl && key.name === 'c') { shutdown(); resolve(); return; }
       if (key.name === 'q' || key.name === 'Q' || key.name === 'b' || key.name === 'B') {
         shutdown(); resolve(); return;
       }
       if (key.name === 'c' || key.name === 'C') { log.splice(0); renderLog(); return; }
-      if (key.name === 's' || key.name === 'S') {
-        if (connected) enterSend();
-        return;
-      }
+      if (key.name === 's' || key.name === 'S') { if (connected) enterSend(); return; }
     });
   });
 
-  // ── Connect ───────────────────────────────────────────────────────────────
+  // ── Connect ──────────────────────────────────────────────────────────────
   const connectDone = (async () => {
     try {
-      const cfg      = loadConfig();
-
-      // Wrap the base fetch to capture the settlement txHash from X-PAYMENT-RESPONSE
+      const cfg = loadConfig();
       const trackingFetch = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
         const response = await globalThis.fetch(input, init as RequestInit);
         const header = response.headers.get('X-PAYMENT-RESPONSE') ?? response.headers.get('PAYMENT-RESPONSE');
@@ -360,58 +705,57 @@ export async function showWsDashboard(setup: WsSetupResult): Promise<void> {
         }
         return response;
       };
-
-      const fetchFn  = await createPaymentFetch({ preferNetwork: setup.preferNetwork, fetch: trackingFetch as typeof fetch });
+      const fetchFn = await createPaymentFetch({ preferNetwork: setup.preferNetwork, fetch: trackingFetch as typeof fetch });
       const nodeOpts = getNodeOptions(cfg);
-
       const client = SocketClient(fetchFn as Parameters<typeof SocketClient>[0], {
         defaults: {
           nodeRegion: nodeOpts.node_region,
           nodeDomain: nodeOpts.node_domain,
         },
       });
-
       const auth = await client.requestToken({
         model:     setup.model,
         minutes:   setup.minutes,
         megabytes: setup.megabytes,
       });
-
       session = await client.connect(auth, {
         onOpen: () => {
           if (!live) return;
-          connected            = true;
-          statusRef.content    = '● CONNECTED';
-          statusRef.fg         = C.emerald;
-          sessionRef.content   = `${setup.model}  ${setup.minutes}min  ${setup.megabytes}MB`;
-          sessionRef.fg        = C.slate;
-          countdownRef.content = `${fmtCountdown(expiresMs)} remaining`;
+          connected = true;
+          status.setState('● CONNECTED', C.emerald);
+          status.box.borderColor = C.emerald;
+          topBar.setLive(true);
+          status.expires.content = `expires ${fmtCountdown(expiresMs)} remaining`;
+          status.expires.fg      = C.dim;
+          pushMsg('◄', `welcome — socket open, model=${setup.model}`, byteLength(`welcome — socket open, model=${setup.model}`));
         },
         onMessage: (data: unknown) => {
           if (!live) return;
           const text = typeof data === 'string' ? data : JSON.stringify(data);
-          bytesRecv += new TextEncoder().encode(text).length;
+          const b = byteLength(text);
+          bytesRecv += b;
           recordRtt();
           renderLatency();
-          pushMsg('◀', text);
+          pushMsg('◄', text, b);
         },
         onClose: () => {
           if (!live) return;
-          connected            = false;
-          statusRef.content    = '○ CLOSED';
-          statusRef.fg         = C.amber;
-          countdownRef.content = '—';
+          connected = false;
+          status.setState('○ CLOSED', C.amber);
+          status.box.borderColor = C.line2;
+          topBar.setLive(false);
+          status.expires.content = '—';
         },
         onError: (err: unknown) => {
           if (!live) return;
-          statusRef.content = `✗ ${err instanceof Error ? err.message : String(err)}`;
-          statusRef.fg      = C.red;
+          status.setState(`✗ ${err instanceof Error ? err.message : String(err)}`, C.red);
+          status.box.borderColor = C.red;
         },
       });
     } catch (err) {
       if (!live) return;
-      statusRef.content = `✗ ${err instanceof Error ? err.message : String(err)}`;
-      statusRef.fg      = C.red;
+      status.setState(`✗ ${err instanceof Error ? err.message : String(err)}`, C.red);
+      status.box.borderColor = C.red;
     }
   })();
 

@@ -8,7 +8,7 @@
 /example
 /dist*
 node_modules
-setting*
+/setting*
 ip-pool-history*
 ssrf-poc.ts
 test-server.ts

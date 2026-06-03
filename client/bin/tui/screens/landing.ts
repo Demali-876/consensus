@@ -230,7 +230,7 @@ type Tab = {
 const TABS: Tab[] = [
   { key: '1', label: 'Home',      action: 'home'       },
   { key: '2', label: 'Tunnels',   action: 'tunnels'    },
-  { key: '3', label: 'Proxy',     action: 'proxy'      },
+  { key: '3', label: 'Proxy',     action: 'proxy-forward' },
   { key: '4', label: 'Nodes',     action: 'ips'        },
   { key: '5', label: 'WebSocket', action: 'websockets' },
   { key: '6', label: 'Settings',  action: 'settings'   },
@@ -247,7 +247,7 @@ type ServiceCard = {
 
 const CARDS: ServiceCard[] = [
   { key: '2', icon: '⇄',  title: 'New tunnel',     blurb: 'expose a local port to a public URL',         tagId: 'tunnel', action: 'tunnels'    },
-  { key: '3', icon: '⟳',  title: 'Start proxy',    blurb: 'route outbound traffic through the network',  tagId: 'proxy',  action: 'proxy'      },
+  { key: '3', icon: '⟳',  title: 'Start proxy',    blurb: 'route outbound traffic through the network',  tagId: 'proxy',  action: 'proxy-forward' },
   { key: '4', icon: '⬡',  title: 'Lease a node',   blurb: 'grab a dedicated IP from any region',         tagId: 'nodes',  action: 'ips'        },
   { key: '5', icon: '≈',  title: 'Open WebSocket', blurb: 'streaming session with metered spend',        tagId: 'ws',     action: 'websockets' },
 ];
@@ -800,7 +800,7 @@ export async function showLanding(): Promise<LandingAction> {
       { id: 'open-tunnels',   label: 'Open Tunnels',     hint: 'tab 2', keywords: ['nav'],
         run: () => done('tunnels') },
       { id: 'open-proxy',     label: 'Open Proxy',       hint: 'tab 3', keywords: ['nav'],
-        run: () => done('proxy') },
+        run: () => done('proxy-forward') },
       { id: 'open-nodes',     label: 'Open Nodes',       hint: 'tab 4', keywords: ['nav', 'ip', 'lease'],
         run: () => done('ips') },
       { id: 'open-websocket', label: 'Open WebSocket',   hint: 'tab 5', keywords: ['nav', 'ws'],
@@ -944,7 +944,7 @@ export async function showLanding(): Promise<LandingAction> {
           } else if (svc.type === 'tnl') {
             done('tunnels');
           } else if (svc.type === 'prx' || svc.type === 'fwd') {
-            done('proxy');
+            done('proxy-forward');
           } else if (svc.type === 'ws') {
             done('websockets');
           }
