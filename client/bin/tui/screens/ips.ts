@@ -1,32 +1,3 @@
-/**
- * ips.ts — Node browser & lease screen.
- *
- * Mirrors the design mock at design-assets/Nodes.html. Routed as `ips` for
- * historical reasons, but presented as the "Nodes" screen.
- *
- *   ┌ Top bar — brand + connected/acct/bal (or `tier free` in free mode)
- *   ├ Header — "▶ Nodes" + subtitle | nodes·regions·refreshed stats
- *   ├ Lease banner — "○ No lease active …" / "● <node> · <region> · leased …"
- *   │                 (right side shows "○ free mode" when free)
- *   ├ Region tabs (all/us/eu/ap)            sort: score ↓
- *   └ AVAILABLE NODES panel (rounded emerald border)
- *       NODE  DOMAIN  REGION  IP  SCORE  LATENCY  LOAD  CAPS
- *       row…    row…
- *       (footer: navigate · lease selected · showing X of N …)
- *
- * Pressing ↵ opens a centered LEASE NODE modal with the node's stats and a
- * confirm/cancel. ↵ again confirms; Esc cancels.
- *
- * Keys:
- *   ↑ / ↓ (k/j) Navigate
- *   ↵            Open lease modal → confirm lease
- *   Esc          Close modal
- *   D            Release current lease
- *   /            Region/text filter (cycles all → us → eu → ap)
- *   R            Refresh from API
- *   B            Back to landing
- */
-
 import {
   createCliRenderer,
   BoxRenderable,
@@ -36,20 +7,16 @@ import {
   type RootRenderable,
 } from '@opentui/core';
 import { C } from '../../theme';
+import { makeBadge, makeKeyBar, makeTopBar } from '../chrome.ts';
 import { makeSpin } from '../../lib/spinners';
 import { isFreeMode } from '../../lib/server-config';
 import { loadConfig } from '../../lib/config.ts';
-import { loadPrefs } from '../../lib/store.ts';
 import { listNodes, leaseNode, releaseNode } from '../../lib/ip.ts';
 import type { NodeInfo } from '../../lib/ip.ts';
-
-const VERSION = '2.4.1';
 const VISIBLE_ROWS = 8;
 
 type Region = 'all' | 'us' | 'eu' | 'ap';
 const REGIONS: Region[] = ['all', 'us', 'eu', 'ap'];
-
-// ─── Formatting ─────────────────────────────────────────────────────────────
 
 function fmtIp(node: NodeInfo): string {
   if (node.ipv4) return node.ipv4;
@@ -117,64 +84,9 @@ function uniqueRegions(nodes: NodeInfo[]): number {
   return set.size;
 }
 
-// ─── Layout helpers ─────────────────────────────────────────────────────────
-
 function terminalCols(): number {
   return Math.max(120, process.stdout.columns || 168);
 }
-
-function acctLabel(): string {
-  const prefs = loadPrefs();
-  const cfg = loadConfig();
-  return prefs.displayName
-    || cfg.wallet_name
-    || (cfg.addresses?.evm ? `${cfg.addresses.evm.slice(0, 6)}…${cfg.addresses.evm.slice(-4)}` : 'guest');
-}
-
-function makeBadge(renderer: CliRenderer, text: string, opts: { bg?: string; fg?: string } = {}): BoxRenderable {
-  const bg = opts.bg ?? C.line2;
-  const box = new BoxRenderable(renderer, { flexDirection: 'row', paddingX: 1, backgroundColor: bg });
-  box.add(new TextRenderable(renderer, {
-    content: text, fg: opts.fg ?? C.dark, bg, attributes: TextAttributes.BOLD,
-  }));
-  return box;
-}
-
-function makeTopBar(renderer: CliRenderer, root: RootRenderable, freeMode: boolean, balanceUsd: number): void {
-  const topBar = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', paddingX: 2, paddingY: 0,
-    border: ['bottom'], borderColor: C.line2, backgroundColor: C.dark,
-  });
-  const brand = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, backgroundColor: C.dark });
-  brand.add(new TextRenderable(renderer, {
-    content: '▲ CONSENSUS', fg: C.white, bg: C.dark, attributes: TextAttributes.BOLD,
-  }));
-  brand.add(new TextRenderable(renderer, {
-    content: 'your private network, on demand', fg: C.dim, bg: C.dark,
-  }));
-
-  const status = new BoxRenderable(renderer, { flexDirection: 'row', gap: 3, backgroundColor: C.dark });
-  status.add(new TextRenderable(renderer, {
-    content: '● connected', fg: C.emerald, bg: C.dark, attributes: TextAttributes.BOLD,
-  }));
-  status.add(new TextRenderable(renderer, {
-    content: `acct ${acctLabel()}`, fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
-  }));
-  status.add(new TextRenderable(renderer, {
-    content: freeMode ? 'tier free' : `bal $${balanceUsd.toFixed(2)}`,
-    fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
-  }));
-  status.add(new TextRenderable(renderer, {
-    content: `v ${VERSION}`, fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
-  }));
-
-  topBar.add(brand);
-  topBar.add(status);
-  root.add(topBar);
-}
-
-// ─── Load bar ───────────────────────────────────────────────────────────────
 
 const LOAD_BAR_WIDTH = 10;
 
@@ -182,8 +94,6 @@ function makeLoadBar(renderer: CliRenderer): { box: BoxRenderable; fill: TextRen
   const box = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.dark,
   });
-  // Track + fill rendered as a single coloured block string so it stays
-  // monospace-aligned with the rest of the table.
   const fill = new TextRenderable(renderer, { content: '', fg: C.emerald, bg: C.dark });
   const pct  = new TextRenderable(renderer, { content: '', fg: C.dim,     bg: C.dark });
   box.add(fill);
@@ -206,8 +116,6 @@ function renderLoadBar(refs: { fill: TextRenderable; pct: TextRenderable }, load
   refs.pct.content = `${String(Math.round(clamped)).padStart(3)}%`;
   refs.pct.fg = focused ? C.white : C.dim;
 }
-
-// ─── Region pills ───────────────────────────────────────────────────────────
 
 interface RegionPillRefs {
   row: BoxRenderable;
@@ -251,8 +159,6 @@ function makeRegionPills(renderer: CliRenderer, initial: Region): RegionPillRefs
   };
 }
 
-// ─── Table row ──────────────────────────────────────────────────────────────
-
 interface RowRefs {
   row:      BoxRenderable;
   marker:   TextRenderable;
@@ -264,13 +170,12 @@ interface RowRefs {
   scoreMax: TextRenderable;
   latency:  TextRenderable;
   loadBar:  { fill: TextRenderable; pct: TextRenderable };
-  capsBox:  BoxRenderable;     // wraps either caps text or LEASED chip
+  capsBox:  BoxRenderable;
   capsText: TextRenderable;
   leasedChip: BoxRenderable;
   leasedLbl:  TextRenderable;
 }
 
-// Column widths picked to add up to the inner panel width at 168 cols.
 const COL = {
   marker:  2,
   node:    11,
@@ -326,7 +231,6 @@ function makeTableRow(renderer: CliRenderer): RowRefs {
   const ip = new TextRenderable(renderer, {
     content: ''.padEnd(COL.ip), fg: C.slate, bg: C.dark,
   });
-  // Score is "NN/100"; split so we can colour the number and dim the /100.
   const scoreGroup = new BoxRenderable(renderer, {
     flexDirection: 'row', backgroundColor: C.dark, width: COL.score, justifyContent: 'flex-end',
   });
@@ -435,10 +339,8 @@ function fillRow(refs: RowRefs, node: NodeInfo | undefined, focused: boolean, le
   refs.latency.content = ms != null ? `${Math.round(ms)} ms` : '—';
   refs.latency.fg      = latencyColor(ms);
 
-  // Load isn't on the API yet; show "—" + an empty track.
   renderLoadBar(refs.loadBar, undefined, focused);
 
-  // Swap the caps cell content: chip when leased, otherwise plain text.
   while (refs.capsBox.getChildrenCount() > 0) {
     const child = refs.capsBox.getChildren()[0];
     if (!child) break;
@@ -453,45 +355,6 @@ function fillRow(refs: RowRefs, node: NodeInfo | undefined, focused: boolean, le
   }
 }
 
-// ─── Footer hint chips ──────────────────────────────────────────────────────
-
-function makeFooter(renderer: CliRenderer): { box: BoxRenderable; releaseChip: BoxRenderable; releaseLbl: TextRenderable } {
-  const box = new BoxRenderable(renderer, {
-    width: '100%', flexDirection: 'row', justifyContent: 'space-between',
-    paddingX: 2, paddingY: 0,
-    border: ['top'], borderColor: C.line2, backgroundColor: C.panel,
-  });
-  const chips = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, backgroundColor: C.panel });
-  const hints: Array<{ key: string; label: string; fg?: string }> = [
-    { key: '↑↓',   label: 'navigate' },
-    { key: '↵',    label: 'lease selected' },
-    { key: 'D',    label: 'release' },
-    { key: '/',    label: 'filter' },
-    { key: 'R',    label: 'refresh' },
-    { key: 'B',    label: 'back' },
-  ];
-  let releaseChip!: BoxRenderable;
-  let releaseLbl!: TextRenderable;
-  for (const h of hints) {
-    const pair = new BoxRenderable(renderer, {
-      flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.panel,
-    });
-    const chip = makeBadge(renderer, h.key, { bg: C.line2 });
-    const lbl  = new TextRenderable(renderer, { content: h.label, fg: C.slate, bg: C.panel });
-    pair.add(chip);
-    pair.add(lbl);
-    chips.add(pair);
-    if (h.key === 'D') { releaseChip = chip; releaseLbl = lbl; }
-  }
-  box.add(chips);
-  box.add(new TextRenderable(renderer, {
-    content: 'NODE BROWSER', fg: C.dim, bg: C.panel, attributes: TextAttributes.BOLD,
-  }));
-  return { box, releaseChip, releaseLbl };
-}
-
-// ─── Lease confirmation modal ───────────────────────────────────────────────
-
 interface ModalRefs {
   box:        BoxRenderable;
   domain:     TextRenderable;
@@ -502,15 +365,11 @@ interface ModalRefs {
   sla:        TextRenderable;
   caps:       TextRenderable;
   ip:         TextRenderable;
-  // Modal lifecycle helpers.
   show(node: NodeInfo, opts: { freeMode: boolean }): void;
   hide(): void;
 }
 
 function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
-  // The modal sits as an absolutely-positioned overlay on the root, mirroring
-  // the pattern in screens/palette.ts. The table behind remains in the layout
-  // tree but is non-interactive while the modal is open.
   const box = new BoxRenderable(renderer, {
     id: 'lease-modal',
     position: 'absolute',
@@ -531,12 +390,10 @@ function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
   box.add(domain);
   box.add(meta);
 
-  // Separator
   box.add(new TextRenderable(renderer, {
     content: '─'.repeat(64), fg: C.line2, bg: C.dark,
   }));
 
-  // 2-column stats grid
   const mkStatRow = () => new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     paddingTop: 1, backgroundColor: C.dark,
@@ -577,7 +434,6 @@ function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
   row3.add(ipCell.cell);
   box.add(row3);
 
-  // Info banner
   const banner = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', gap: 1,
     paddingX: 2, paddingY: 1, marginTop: 1,
@@ -594,7 +450,6 @@ function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
   banner.add(bannerText);
   box.add(banner);
 
-  // Buttons row
   const buttons = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'flex-end', gap: 2,
     marginTop: 1, backgroundColor: C.dark,
@@ -603,7 +458,7 @@ function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
     flexDirection: 'row', gap: 1, alignItems: 'center',
     paddingX: 2, backgroundColor: C.dark,
   });
-  cancelBtn.add(makeBadge(renderer, 'Esc', { bg: C.line2 }));
+  cancelBtn.add(makeBadge(renderer, 'Esc', { bg: C.line2 }).box);
   cancelBtn.add(new TextRenderable(renderer, {
     content: 'Cancel', fg: C.slate, bg: C.dark, attributes: TextAttributes.BOLD,
   }));
@@ -611,7 +466,7 @@ function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
     flexDirection: 'row', gap: 1, alignItems: 'center',
     paddingX: 2, backgroundColor: C.emerald,
   });
-  confirmBtn.add(makeBadge(renderer, '↵', { bg: C.emerald, fg: C.dark }));
+  confirmBtn.add(makeBadge(renderer, '↵', { bg: C.emerald, fg: C.dark }).box);
   confirmBtn.add(new TextRenderable(renderer, {
     content: 'Lease this node', fg: C.dark, bg: C.emerald, attributes: TextAttributes.BOLD,
   }));
@@ -657,11 +512,8 @@ function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
   };
 }
 
-// ─── Main screen ────────────────────────────────────────────────────────────
-
 export async function showIps(): Promise<'back'> {
   const freeMode = await isFreeMode();
-  const balance  = Number(process.env.CONSENSUS_BALANCE_USD ?? 24.18);
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false, targetFps: 15, useMouse: false, useAlternateScreen: true,
@@ -672,16 +524,14 @@ export async function showIps(): Promise<'back'> {
   root.flexDirection = 'column';
   root.padding = 0;
 
-  makeTopBar(renderer, root, freeMode, balance);
+  makeTopBar(renderer, root, { freeMode });
 
-  // Shell — everything between top and bottom bars.
   const shell = new BoxRenderable(renderer, {
     width: '100%', flexGrow: 1, flexDirection: 'column',
     paddingX: 2, paddingTop: 1, backgroundColor: C.dark,
   });
   root.add(shell);
 
-  // Header
   const headerRow = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'flex-start', backgroundColor: C.dark,
@@ -708,7 +558,6 @@ export async function showIps(): Promise<'back'> {
   headerRow.add(statsText);
   shell.add(headerRow);
 
-  // Lease/status banner
   const banner = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'center', paddingX: 2, paddingY: 0, marginTop: 1,
@@ -735,7 +584,6 @@ export async function showIps(): Promise<'back'> {
   banner.add(bannerRight);
   shell.add(banner);
 
-  // Filter row
   const filterRow = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'center', marginTop: 1, backgroundColor: C.dark,
@@ -748,7 +596,6 @@ export async function showIps(): Promise<'back'> {
   filterRow.add(sortText);
   shell.add(filterRow);
 
-  // Available nodes panel
   const panel = new BoxRenderable(renderer, {
     width: '100%', flexGrow: 1, flexDirection: 'column',
     border: true, borderStyle: 'rounded', borderColor: C.emerald,
@@ -765,7 +612,6 @@ export async function showIps(): Promise<'back'> {
     rowRefs.push(r);
   }
 
-  // Inner footer: navigate · lease selected · showing X of N · pin all proxy/tunnel/ws…
   const innerFooter = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', gap: 2, alignItems: 'center',
     paddingTop: 1, border: ['top'], borderColor: C.line2, backgroundColor: C.dark,
@@ -773,12 +619,12 @@ export async function showIps(): Promise<'back'> {
   const navPair = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.dark,
   });
-  navPair.add(makeBadge(renderer, '↑↓', { bg: C.line2 }));
+  navPair.add(makeBadge(renderer, '↑↓', { bg: C.line2 }).box);
   navPair.add(new TextRenderable(renderer, { content: 'navigate', fg: C.slate, bg: C.dark }));
   const leasePair = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.dark,
   });
-  leasePair.add(makeBadge(renderer, '↵', { bg: C.line2 }));
+  leasePair.add(makeBadge(renderer, '↵', { bg: C.line2 }).box);
   leasePair.add(new TextRenderable(renderer, { content: 'lease selected', fg: C.slate, bg: C.dark }));
   const innerFooterText = new TextRenderable(renderer, {
     content: '', fg: C.dim, bg: C.dark,
@@ -791,14 +637,18 @@ export async function showIps(): Promise<'back'> {
 
   shell.add(panel);
 
-  // Bottom footer
-  const footer = makeFooter(renderer);
+  const footer = makeKeyBar(renderer, [
+    { key: '↑↓', label: 'navigate' },
+    { key: '↵',  label: 'lease selected' },
+    { key: 'D',  label: 'release' },
+    { key: '/',  label: 'filter' },
+    { key: 'R',  label: 'refresh' },
+    { key: 'B',  label: 'back' },
+  ], 'NODE BROWSER');
   root.add(footer.box);
 
-  // Modal — built but not added until needed.
   const modal = makeModal(renderer, root);
 
-  // ── State ─────────────────────────────────────────────────────────────────
   let live = true;
   let nodes: NodeInfo[] = [];
   let filtered: NodeInfo[] = [];
@@ -813,7 +663,6 @@ export async function showIps(): Promise<'back'> {
     filtered = activeRegion === 'all'
       ? nodes.slice()
       : nodes.filter((n) => regionFamily(n.region) === activeRegion);
-    // Sort by score descending; nodes without scores sink to the bottom.
     filtered.sort((a, b) => (b.benchmark_score ?? -1) - (a.benchmark_score ?? -1));
     cursor = Math.min(cursor, Math.max(0, filtered.length - 1));
     offset = Math.max(0, Math.min(offset, filtered.length - VISIBLE_ROWS));
@@ -858,15 +707,13 @@ export async function showIps(): Promise<'back'> {
   }
 
   function renderReleaseChip(): void {
-    const cfg = loadConfig();
-    const has = !!cfg.leased_node;
-    footer.releaseLbl.fg = has ? C.slate : C.dim;
-    footer.releaseChip.backgroundColor = has ? C.line2 : C.dark;
-    const child = footer.releaseChip.getChildren()[0] as TextRenderable | undefined;
-    if (child) {
-      child.fg = has ? C.dark : C.dim;
-      child.bg = has ? C.line2 : C.dark;
-    }
+    const release = footer.chips.get('D');
+    if (!release) return;
+    const has = !!loadConfig().leased_node;
+    release.label.fg = has ? C.slate : C.dim;
+    release.badge.box.backgroundColor = has ? C.line2 : C.dark;
+    release.badge.label.fg = has ? C.dark : C.dim;
+    release.badge.label.bg = has ? C.line2 : C.dark;
   }
 
   function renderAll(): void {
@@ -877,7 +724,6 @@ export async function showIps(): Promise<'back'> {
     renderReleaseChip();
   }
 
-  // ── Fetching ──────────────────────────────────────────────────────────────
   const spin = makeSpin('checking');
   let spinTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -915,7 +761,6 @@ export async function showIps(): Promise<'back'> {
   renderAll();
   void fetchNodes();
 
-  // ── Input ─────────────────────────────────────────────────────────────────
   return new Promise<'back'>((resolve) => {
     const done = () => {
       live = false;
@@ -927,7 +772,6 @@ export async function showIps(): Promise<'back'> {
     renderer.keyInput.on('keypress', (key) => {
       if (!live) return;
 
-      // ── Modal capture ─────────────────────────────────────────────────────
       if (modalOpen) {
         if (key.name === 'escape' || key.name === 'b' || key.name === 'B') {
           modal.hide();
@@ -951,7 +795,6 @@ export async function showIps(): Promise<'back'> {
         return;
       }
 
-      // ── Global shortcuts ──────────────────────────────────────────────────
       if (key.name === 'b' || key.name === 'B' || (key.ctrl && key.name === 'c')) {
         done();
         return;

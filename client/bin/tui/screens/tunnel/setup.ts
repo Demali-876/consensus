@@ -7,6 +7,7 @@ import {
   TextAttributes,
 } from '@opentui/core';
 import { C } from '../../../theme';
+import { makeBadge } from '../../chrome.ts';
 import { writeTraceLog } from '../../../lib/crash-log';
 import { scanAll, scanLan, LAN_HTTP_PORTS, type ScannedPort, type LanDevice } from '../../../lib/ports.ts';
 import { showTunnelDashboard } from './dashboard.ts';
@@ -53,23 +54,6 @@ function shortAddress(addr?: string): string | null {
   if (!addr) return null;
   if (addr.length <= 12) return addr;
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
-function makeBadge(
-  renderer: CliRenderer,
-  text: string,
-  opts: { bg: string; fg?: string } = { bg: C.accent },
-): { box: BoxRenderable; label: TextRenderable } {
-  const fg = opts.fg ?? C.dark;
-  const box = new BoxRenderable(renderer, {
-    flexDirection: 'row', paddingX: 1, backgroundColor: opts.bg,
-  });
-  const label = new TextRenderable(renderer, {
-    content: text, fg, bg: opts.bg,
-    attributes: TextAttributes.BOLD,
-  });
-  box.add(label);
-  return { box, label };
 }
 
 export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
@@ -324,7 +308,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
 
   targetPanel.add(targetForm);
 
-  // Right: WILL CREATE
   const targetRight = new BoxRenderable(renderer, {
     flexGrow: 1, flexShrink: 1, flexDirection: 'column', gap: 1,
     backgroundColor: C.dark,
@@ -338,22 +321,12 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
   const startRow = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.dark,
   });
-  // The theme's `C.white` is the primary TEXT colour — in dark mode that
-  // resolves to a bright cream, but in light mode it's the dark ink
-  // (#5d5876). For "actual cream / white" we hard-pin a paper colour that
-  // looks the same in both themes, and pair it with C.sky (a medium teal
-  // that contrasts in both modes) so the design reads identically light/dark.
   const CREAM = '#faf4ee';
   const BTN_TEAL = C.sky;
   const startButton = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 2, alignItems: 'center',
     paddingX: 2, paddingY: 1, backgroundColor: BTN_TEAL,
   });
-  // Matches the design exactly:
-  //   button fill   = teal
-  //   label text    = cream/white
-  //   inner chip bg = cream/white (cuts out of the teal)
-  //   chip 'S' text = teal (mirrors the button)
   const startChipBadge = makeBadge(renderer, 'S', { bg: CREAM, fg: BTN_TEAL });
   const startLabel = new TextRenderable(renderer, {
     content: 'START TUNNEL', fg: CREAM, bg: BTN_TEAL,
@@ -368,7 +341,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
   targetPanel.add(targetRight);
   body.add(targetPanel);
 
-  // ─── Bookmarks ─────────────────────────────────────────────────────────────
   const bmHeader = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.dark,
   });
@@ -395,7 +367,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     bmRefs.push({ box: row, badge, name, proto, target, age });
   }
 
-  // ─── Footer chips ──────────────────────────────────────────────────────────
   const footer = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     paddingX: 2, paddingY: 0, backgroundColor: C.panel,
@@ -425,10 +396,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
   footer.add(new TextRenderable(renderer, { content: 'TUNNEL SETUP', fg: C.dim, bg: C.panel }));
   root.add(footer);
 
-  // ─── Selectable list assembly ──────────────────────────────────────────────
-  // A "selectable" maps a number-key slot to an underlying entry. System
-  // processes and (when not showAllLan) filtered LAN devices render but
-  // don't get a number key.
   type Selectable =
     | { kind: 'local'; num: number; entry: ScannedPort }
     | { kind: 'lan';   num: number; entry: LanDevice };
@@ -454,8 +421,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     }
     return out;
   }
-
-  // ─── Render passes ─────────────────────────────────────────────────────────
 
   function renderProtocol(): void {
     const httpActive = protocol === 'http';
@@ -494,8 +459,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
       ref.port.fg         = isSys ? C.dim : C.slate;
       ref.process.content = `${p.label}${p.isSystem ? ' · system' : p.process && p.process !== p.label ? ' · ' + p.process.split('/').pop()! : ''}`;
       ref.process.fg      = isSys ? C.dim : C.white;
-      // Selection bar: blinks (via cursorOn) only if this row is the focused
-      // list selection — reads as a text cursor anchored to the row.
       const isFocused = section === 'lists' && selectables[listIdx]?.kind === 'local' && selectables[listIdx]?.entry === p;
       ref.box.borderColor = isFocused && cursorOn ? C.accent : C.dark;
     }
@@ -539,8 +502,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
   }
 
   function renderTargetForm(): void {
-    // Caret: visible in edit mode AND blink-on. Also show a static placeholder
-    // (single space) when empty + not editing so the box doesn't collapse.
     const tCaret = editingTarget && cursorOn ? '█' : (editingTarget ? ' ' : '');
     const pCaret = editingPort   && cursorOn ? '█' : (editingPort   ? ' ' : '');
     targetInputText.content = (target  || (editingTarget ? '' : ' ')) + tCaret;
@@ -570,10 +531,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     const targetForDetail = target.trim() || '—';
     willDetailRef.content = `→ ${targetForDetail}:${portShown}  ·  ${protocol}  ·  region auto  ·  free tier`;
 
-    // START button visual is always the design's look — teal fill, cream
-    // chip, teal 'S', cream label. Requirement gating happens in the start
-    // handler (no-op on empty target / TCP without port), and the
-    // "required for TCP" amber hint already communicates missing fields.
     startButton.backgroundColor        = BTN_TEAL;
     startLabel.bg                      = BTN_TEAL;
     startLabel.fg                      = CREAM;
@@ -611,8 +568,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     renderWillCreate();
     renderBookmarks();
   }
-
-  // ─── Scans (with spinner cosmetics) ────────────────────────────────────────
 
   const spin = makeSpin('scan');
 
@@ -658,8 +613,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     renderAll();
   }
 
-  // ─── Selection helpers ─────────────────────────────────────────────────────
-
   function selectFromList(idx: number): void {
     const sels = buildSelectables();
     const s = sels[idx];
@@ -681,18 +634,14 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     if (idx >= 0) selectFromList(idx);
   }
 
-  // ─── First paint + initial scans ───────────────────────────────────────────
-  // Local scan auto-runs (primary affordance). LAN scan is manual — press `L`.
   renderAll();
   void rescanLocal();
 
-  // Blink tick — 500ms feels right (matches terminal default).
   const blinkTimer = setInterval(() => {
     cursorOn = !cursorOn;
     renderAll();
   }, 500);
 
-  // ─── Key handling ──────────────────────────────────────────────────────────
   return new Promise<TunnelSetupResult | null>((resolve) => {
     let alive = true;
 
@@ -710,9 +659,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     };
 
     const startTunnel = async (): Promise<void> => {
-      // Preview mode bypasses validation so the dashboard layout can be
-      // demoed without typing a target. The dashboard itself stubs out the
-      // WebSocket and pumps fake requests when CONSENSUS_PREVIEW_TUNNEL=1.
       const isPreview = process.env.CONSENSUS_PREVIEW_TUNNEL === '1';
       if (!isPreview) {
         if (!target.trim()) return;                          // require target
@@ -733,7 +679,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
     renderer.keyInput.on('keypress', (key) => {
       if (!alive) return;
 
-      // ── Text-edit modes for TARGET / PORT — capture printable + edit keys ──
       if (editingTarget || editingPort) {
         if (key.name === 'escape') {
           editingTarget = false; editingPort = false;
@@ -757,12 +702,9 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
         return;
       }
 
-      // ── Global ──────────────────────────────────────────────────────────────
       if (key.ctrl && key.name === 'c')                       { done(null); return; }
       if (key.name === 'b' || key.name === 'B' || key.name === 'escape') { done(null); return; }
 
-      // Protocol toggle — `P` cycles HTTP ↔ TCP. Also accept explicit H/T
-      // for users who want a direct shortcut.
       if ((key.name === 'p' || key.name === 'P') && !key.shift) {
         protocol = protocol === 'http' ? 'tcp' : 'http';
         renderAll();
@@ -771,9 +713,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
       if (key.name === 'h' && !key.shift) { protocol = 'http'; renderAll(); return; }
       if (key.name === 't' && !key.shift) { protocol = 'tcp';  renderAll(); return; }
 
-      // Bookmark load — Shift+1..Shift+5 (frees plain 1..7 for list selection).
-      // Cross-keyboard: check both `key.shift && digit name` and the shifted
-      // sequence char (US: ! @ # $ %).
       const SHIFTED_DIGIT_SEQ: Record<string, number> = {
         '!': 0, '@': 1, '#': 2, '$': 3, '%': 4,
       };
@@ -793,18 +732,15 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
         return;
       }
 
-      // Number-key selection (1..7) — plain digit, no shift.
       if (!key.shift) {
         const n = key.name && /^[1-7]$/.test(key.name) ? parseInt(key.name, 10) : null;
         if (n != null) { pickByNumber(n); return; }
       }
 
-      // Rescans + filter
       if (key.name === 'r' || key.name === 'R') { void rescanLocal(); return; }
       if (key.name === 'l' || key.name === 'L') { void rescanLan();   return; }
       if (key.name === 'a' || key.name === 'A') { showAllLan = !showAllLan; renderAll(); return; }
 
-      // Bookmark save (`M`)
       if (key.name === 'm' || key.name === 'M') {
         if (!target.trim()) return;
         const bm: Bookmark = {
@@ -821,7 +757,6 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
         return;
       }
 
-      // Section/list navigation
       if (key.name === 'tab') {
         section = section === 'lists'  ? 'target'
                 : section === 'target' ? 'port'
@@ -846,16 +781,12 @@ export async function showTunnelSetup(): Promise<TunnelSetupResult | null> {
         renderAll(); return;
       }
 
-      // Enter behaviour is section-aware:
-      //   target/port section → drop into edit mode for that field
-      //   anywhere else       → start the tunnel
       if (key.name === 'return' || key.name === 'enter') {
         if (section === 'target') { editingTarget = true; renderAll(); return; }
         if (section === 'port')   { editingPort   = true; renderAll(); return; }
         void startTunnel();
         return;
       }
-      // Explicit Start shortcut works from any section.
       if (key.name === 's' || key.name === 'S') {
         void startTunnel();
         return;

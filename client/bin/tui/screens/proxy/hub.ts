@@ -1,5 +1,3 @@
-// proxy-hub.ts — Worker registry + proxy hub screen.
-
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { C }                     from '../../../theme';
 import type { AppState } from '../../../lib/app-manager.js';
@@ -15,7 +13,6 @@ export type WorkerEntry = {
   appCheckPath?: string;
   autoLaunch?: boolean;
   managedApp?: AppState;
-  // Consensus ProxyClient options threaded into the preload file on launch
   cacheTtl?:       number;
   verbose?:        boolean;
   nodeRegion?:     string;
@@ -27,7 +24,6 @@ export type WorkerEntry = {
   matchSubroutes?: boolean;
 };
 
-// Persists across screen navigations
 export const workerRegistry: WorkerEntry[] = [];
 
 export function registerWorker(entry: WorkerEntry): void {

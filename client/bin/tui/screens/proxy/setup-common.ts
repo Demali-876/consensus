@@ -1,12 +1,3 @@
-/**
- * Shared scaffolding for the proxy setup screens (forward + reverse).
- *
- * The two flows look identical from the outside — same top bar, breadcrumb +
- * TYPE toggle, DETECTED · LOCALHOST list, BOOKMARKS, WALLET, footer chips —
- * and differ only in the right-column form sections. This module owns the
- * shared bits; forward.ts and reverse.ts add their own form sections on top.
- */
-
 import {
   type CliRenderer,
   BoxRenderable,
@@ -14,16 +5,11 @@ import {
   TextAttributes,
 } from '@opentui/core';
 import { C } from '../../../theme';
+import { makeBadge } from '../../chrome.ts';
 import { loadConfig, loadPrefs, type Bookmark } from '../../../lib/store.ts';
 import type { DiscoveredProcess } from '../../../lib/discover.ts';
 
-// ─── Network families ────────────────────────────────────────────────────────
-//
-// The full NETWORK_OPTIONS list (in bin/lib/networks.ts) has 10 entries
-// across EVM testnet/mainnet, Solana devnet/mainnet, and three ICP ledgers.
-// For the UI we collapse to three FAMILIES and pick a sensible default
-// subnet per family. PreferNetwork is a free-form string downstream, so we
-// just thread the chosen CAIP-2 through.
+export { makeBadge };
 
 export type NetworkFamily = 'evm' | 'svm' | 'icp';
 
@@ -33,14 +19,12 @@ export const FAMILY_LABEL: Record<NetworkFamily, string> = {
   icp: 'ICP',
 };
 
-/** Default CAIP-2 per family. Matches the testnets we already enumerate. */
 export const FAMILY_DEFAULT_CAIP2: Record<NetworkFamily, string> = {
   evm: 'eip155:84532',                                  // Base Sepolia
   svm: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',       // Sol Devnet
   icp: 'icp:1:xafvr-biaaa-aaaai-aql5q-cai',             // TESTICP
 };
 
-/** Per-family chain options. Each entry maps a short chip label → CAIP-2. */
 export const CHAINS_BY_FAMILY: Record<NetworkFamily, Array<{ label: string; caip2: string }>> = {
   evm: [
     { label: 'BaseSep', caip2: 'eip155:84532'    },
@@ -66,27 +50,6 @@ export function familyFromCaip2(caip2: string | undefined): NetworkFamily {
   if (caip2.startsWith('icp:'))    return 'icp';
   return 'evm';
 }
-
-// ─── Shared badge helper (matches the landing/tunnel chip style) ────────────
-
-export function makeBadge(
-  renderer: CliRenderer,
-  text: string,
-  opts: { bg: string; fg?: string } = { bg: C.accent },
-): { box: BoxRenderable; label: TextRenderable } {
-  const fg = opts.fg ?? C.dark;
-  const box = new BoxRenderable(renderer, {
-    flexDirection: 'row', paddingX: 1, backgroundColor: opts.bg,
-  });
-  const label = new TextRenderable(renderer, {
-    content: text, fg, bg: opts.bg,
-    attributes: TextAttributes.BOLD,
-  });
-  box.add(label);
-  return { box, label };
-}
-
-// ─── Top bar ─────────────────────────────────────────────────────────────────
 
 export function buildTopBar(
   renderer: CliRenderer,
@@ -123,7 +86,6 @@ export function buildTopBar(
   });
   status.add(new TextRenderable(renderer, { content: '● connected', fg: C.emerald, bg: C.panel }));
   status.add(new TextRenderable(renderer, { content: `acct ${acct}`, fg: C.slate, bg: C.panel }));
-  // Free mode shows `tier free`; paid mode shows `bal $X.YZ`.
   status.add(new TextRenderable(renderer, {
     content: opts.freeMode
       ? 'tier free'
@@ -136,14 +98,11 @@ export function buildTopBar(
   return topBar;
 }
 
-// ─── Breadcrumb row with TYPE toggle ─────────────────────────────────────────
-
 export interface TypeToggleRefs {
   row:           BoxRenderable;
   fwdBox:        BoxRenderable; fwdLbl: TextRenderable;
   revBox:        BoxRenderable; revLbl: TextRenderable;
   setType:       (kind: 'forward' | 'reverse') => void;
-  /** Append/replace a section label after the title ("· APP"). Empty clears. */
   setSection:    (label: string) => void;
 }
 
@@ -157,7 +116,6 @@ export function buildBreadcrumb(
     backgroundColor: C.dark,
   });
 
-  // Breadcrumb left
   const breadcrumb = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.dark,
   });
@@ -172,9 +130,6 @@ export function buildBreadcrumb(
   });
   breadcrumb.add(titleRef);
 
-  // Section indicator — appended after the title when a section is active.
-  // E.g. `Proxies / New forward proxy   ·  APP` so users always see where
-  // their focus is.
   const sepRef = new TextRenderable(renderer, { content: '', fg: C.dim, bg: C.dark });
   const sectionRef = new TextRenderable(renderer, {
     content: '', fg: C.accent, bg: C.dark, attributes: TextAttributes.BOLD,
@@ -184,7 +139,6 @@ export function buildBreadcrumb(
 
   row.add(breadcrumb);
 
-  // TYPE toggle right
   const toggle = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.dark,
   });
@@ -239,8 +193,6 @@ export function buildBreadcrumb(
   return { row, fwdBox, fwdLbl, revBox, revLbl, setType, setSection };
 }
 
-// ─── Subtitle ────────────────────────────────────────────────────────────────
-
 export function buildSubtitle(renderer: CliRenderer, text: string): BoxRenderable {
   const box = new BoxRenderable(renderer, {
     width: '100%', paddingX: 2, paddingBottom: 1, backgroundColor: C.dark,
@@ -248,8 +200,6 @@ export function buildSubtitle(renderer: CliRenderer, text: string): BoxRenderabl
   box.add(new TextRenderable(renderer, { content: text, fg: C.dim, bg: C.dark }));
   return box;
 }
-
-// ─── DETECTED · LOCALHOST panel ──────────────────────────────────────────────
 
 export interface DetectedPanelRefs {
   box:        BoxRenderable;
@@ -272,7 +222,6 @@ export function buildDetectedPanel(
     backgroundColor: C.dark,
   });
 
-  // Header
   const header = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 1, paddingLeft: 1, backgroundColor: C.dark,
   });
@@ -317,7 +266,6 @@ export function buildDetectedPanel(
     rows.push({ row, badge, pid, port, svc, entry });
   }
 
-  // Footer: R rescan · N ports · 1-N use as app
   const footer = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 1, alignItems: 'center', paddingTop: 1, backgroundColor: C.dark,
   });
@@ -375,8 +323,6 @@ export function buildDetectedPanel(
   };
 }
 
-// ─── BOOKMARKS panel ─────────────────────────────────────────────────────────
-
 export interface BookmarksPanelRefs {
   box: BoxRenderable;
   setBookmarks(items: Bookmark[]): void;
@@ -425,7 +371,6 @@ export function buildBookmarksPanel(renderer: CliRenderer): BookmarksPanelRefs {
     rows.push({ row, badge, name, port, age });
   }
 
-  // Footer: M save current · O load
   const footer = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 1, alignItems: 'center', paddingTop: 1, backgroundColor: C.dark,
   });
@@ -458,8 +403,6 @@ export function buildBookmarksPanel(renderer: CliRenderer): BookmarksPanelRefs {
 
   return { box, setBookmarks };
 }
-
-// ─── WALLET panel ────────────────────────────────────────────────────────────
 
 export function buildWalletPanel(
   renderer: CliRenderer,
@@ -514,8 +457,6 @@ export function buildWalletPanel(
   return box;
 }
 
-// ─── Network family chips ────────────────────────────────────────────────────
-
 export interface NetworkChipRefs {
   row:   BoxRenderable;
   setSelected(family: NetworkFamily): void;
@@ -559,15 +500,10 @@ export function buildNetworkChips(
   return { row, setSelected };
 }
 
-// ─── Chain chips (depends on family) ─────────────────────────────────────────
-
 export interface ChainChipRefs {
   row: BoxRenderable;
-  /** Rebuild the chips to match the chains in `family`, marking `activeCaip2` as selected. */
   setFamily(family: NetworkFamily, activeCaip2: string): void;
-  /** Update only the selection within the current family. */
   setActive(activeCaip2: string): void;
-  /** Current chains in the order they're displayed — for keyboard nav. */
   getChains(): Array<{ label: string; caip2: string }>;
 }
 
@@ -631,8 +567,6 @@ export function buildChainChips(
   };
 }
 
-// ─── Footer chip strip ───────────────────────────────────────────────────────
-
 export interface FooterHint { key: string; label: string }
 
 export function buildFooter(
@@ -652,7 +586,6 @@ export function buildFooter(
   box.add(new TextRenderable(renderer, { content: rightLabel, fg: C.dim, bg: C.panel }));
 
   const renderHints = (items: FooterHint[]): void => {
-    // Wipe + rebuild — small list, cheap.
     while (chipGroup.getChildrenCount() > 0) {
       const id = chipGroup.getChildren()[0]?.id;
       if (id != null) chipGroup.remove(id); else break;
@@ -672,8 +605,6 @@ export function buildFooter(
   return { box, setHints: renderHints };
 }
 
-// ─── Form-field helpers ──────────────────────────────────────────────────────
-
 export interface FieldRowRefs {
   row:    BoxRenderable;
   label:  TextRenderable;
@@ -682,11 +613,6 @@ export interface FieldRowRefs {
   hint:   TextRenderable;
 }
 
-/**
- * One labelled input row: `LABEL  [input box]  hint`.
- * The caller drives `inputText.content` and the input box's `borderColor` for
- * focus state. `setEditing(on)` flips the focused styling.
- */
 export function makeFieldRow(
   renderer: CliRenderer,
   labelText: string,
@@ -724,16 +650,12 @@ export function makeFieldRow(
   return { row, label, inputBox, inputText, hint };
 }
 
-// ─── Section header ──────────────────────────────────────────────────────────
-
 export function makeSectionHeader(renderer: CliRenderer, title: string): TextRenderable {
   return new TextRenderable(renderer, {
     content: title, fg: C.dim, bg: C.dark,
     attributes: TextAttributes.BOLD,
   });
 }
-
-// ─── Toggle (two-state on/off or A/B) ────────────────────────────────────────
 
 export interface ToggleRefs {
   row:   BoxRenderable;

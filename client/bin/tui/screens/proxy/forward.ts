@@ -1,13 +1,3 @@
-/**
- * Forward proxy setup — v2 design.
- *
- * Returns either a ForwardSetupResult (Start was pressed), `null` (Back), or
- * the swap sentinel (`{ swap: 'reverse' }`) when the user toggled TYPE.
- *
- * Result-shape parity with the previous version is preserved so index.ts and
- * the dispatchProxy plumbing don't change — only the UI is new.
- */
-
 import {
   createCliRenderer,
   BoxRenderable,
@@ -49,15 +39,11 @@ export type ForwardSetupResult = {
   preferNetwork?:  PreferNetwork;
 };
 
-/** Discriminated outcome — lets index.ts route on `swap` without affecting the result type. */
 export type ForwardSetupOutcome =
   | { kind: 'result'; data: ForwardSetupResult }
   | { kind: 'cancel' }
   | { kind: 'swap-to-reverse' };
 
-// Back-compat alias: existing callers using `await showForwardSetup()` get the
-// unwrapped result for kind:'result', null for cancel, and `{ swap: 'reverse' }`
-// for the type-toggle.
 export type ForwardSetupReturn = ForwardSetupResult | null | { swap: 'reverse' };
 
 export async function showForwardSetup(): Promise<ForwardSetupReturn> {
@@ -67,8 +53,6 @@ export async function showForwardSetup(): Promise<ForwardSetupReturn> {
   return null;
 }
 
-// ─── Editable field schema ───────────────────────────────────────────────────
-
 type FieldId =
   | 'appPort' | 'appEntry' | 'appCheckPath' | 'autoLaunch'
   | 'nodeRegion' | 'nodeDomain' | 'nodeExclude'
@@ -76,7 +60,6 @@ type FieldId =
   | 'cacheTtl' | 'verbose'
   | 'budget' | 'family' | 'chain';
 
-/** Which top-level section the field belongs to — drives the section indicator. */
 type FieldSection = 'APP' | 'NODE' | 'ROUTING' | 'PERFORMANCE' | 'BUDGET' | 'NETWORK';
 const FIELD_SECTION: Record<FieldId, FieldSection> = {
   appPort:        'APP',
@@ -107,7 +90,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   const version  = '0.1.0-beta.7';
   const freeMode = await isFreeMode();
 
-  // ─── Renderer + root ───────────────────────────────────────────────────────
   const renderer = await createCliRenderer({
     exitOnCtrlC: false, targetFps: 15, useMouse: false, useAlternateScreen: true,
   });
@@ -117,20 +99,17 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   root.flexDirection = 'column';
   root.padding = 0;
 
-  // ─── Top bar + breadcrumb + subtitle ──────────────────────────────────────
   root.add(buildTopBar(renderer, { version, freeMode }));
   const crumb = buildBreadcrumb(renderer, 'forward');
   root.add(crumb.row);
   root.add(buildSubtitle(renderer, "route your app's outbound traffic through a paid Consensus node"));
 
-  // ─── Body: two-column ──────────────────────────────────────────────────────
   const body = new BoxRenderable(renderer, {
     width: '100%', flexGrow: 1, flexDirection: 'row', gap: 2,
     paddingX: 2, backgroundColor: C.dark,
   });
   root.add(body);
 
-  // ── Left column ──────────────────────────────────────────────────────────
   const leftCol = new BoxRenderable(renderer, {
     flexGrow: 1, flexShrink: 1, flexDirection: 'column', gap: 1, backgroundColor: C.dark,
   });
@@ -144,13 +123,11 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   leftCol.add(buildWalletPanel(renderer, { freeMode, hasEvm, hasSvm, hasIcp }));
   body.add(leftCol);
 
-  // ── Right column ─────────────────────────────────────────────────────────
   const rightCol = new BoxRenderable(renderer, {
     flexGrow: 2, flexShrink: 1, flexDirection: 'column', gap: 1, backgroundColor: C.dark,
   });
   body.add(rightCol);
 
-  // APP section
   rightCol.add(makeSectionHeader(renderer, 'APP'));
   const appPortRow      = makeFieldRow(renderer, 'App port',     'port your server listens on', { inputWidth: 12 });
   const appEntryRow     = makeFieldRow(renderer, 'Entry file',   '[space] browse');
@@ -165,7 +142,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   rightCol.add(appCheckRow.row);
   rightCol.add(autoLaunchRow);
 
-  // NODE section
   rightCol.add(makeSectionHeader(renderer, 'NODE'));
   const regionRow  = makeFieldRow(renderer, 'Region',  'blank = auto');
   const domainRow  = makeFieldRow(renderer, 'Domain',  '', { placeholder: 'pin a specific node domain' });
@@ -174,9 +150,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   rightCol.add(domainRow.row);
   rightCol.add(excludeRow.row);
 
-  // ROUTING + PERFORMANCE side-by-side (when there's room) — for now stack
-  // vertically since each row is full-width. Keeps the layout consistent
-  // across narrow terminals.
   rightCol.add(makeSectionHeader(renderer, 'ROUTING'));
   const routesRow = makeFieldRow(renderer, 'Routes', '', { placeholder: '/api, /v2' });
   rightCol.add(routesRow.row);
@@ -203,8 +176,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   verboseRow.add(new TextRenderable(renderer, { content: 'add metadata header', fg: C.dim, bg: C.dark }));
   rightCol.add(verboseRow);
 
-  // BUDGET + NETWORK + CHAIN — only when NOT free mode. Free mode hides
-  // them since the proxy never charges and the network is irrelevant.
   let budgetRow:    ReturnType<typeof makeFieldRow> | null = null;
   let networkChips: ReturnType<typeof buildNetworkChips> | null = null;
   let chainChips:   ReturnType<typeof buildChainChips>   | null = null;
@@ -232,11 +203,9 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     rightCol.add(chainRow);
   }
 
-  // ─── Footer chips ──────────────────────────────────────────────────────────
   const footer = buildFooter(renderer, makeFooterHints('lists'), 'FORWARD PROXY SETUP');
   root.add(footer.box);
 
-  // ─── State ─────────────────────────────────────────────────────────────────
   const fields: FieldState[] = [
     { id: 'appPort',        value: '' },
     { id: 'appEntry',       value: '' },
@@ -251,8 +220,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     { id: 'cacheTtl',       value: String(prefs.defaultCacheTtl || 300) },
     { id: 'verbose',        value: prefs.defaultVerbose ? 'on' : 'off', options: ['off', 'on'] },
     { id: 'budget',         value: prefs.defaultBudget != null ? String(prefs.defaultBudget) : '5.00' },
-    // `family` is a toggle across EVM/SVM/ICP; `chain` is the specific CAIP-2
-    // inside that family. Wire-format payment uses only `chain`.
     { id: 'family',         value: initialFamily, options: ['evm', 'svm', 'icp'] },
     { id: 'chain',          value: initialChain,
                             options: CHAINS_BY_FAMILY[initialFamily].map(c => c.caip2) },
@@ -273,9 +240,7 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     if (f) f.value = v;
   };
 
-  // ─── Render functions ──────────────────────────────────────────────────────
   function renderForm(): void {
-    // Update each row's input contents from the backing field value.
     const showCaret = (raw: string, isFocused: boolean): string => {
       if (!isFocused) return raw || ' ';
       return cursorOn ? raw + '█' : raw + ' ';
@@ -303,7 +268,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
       ref.inputText.fg = raw === '' && !isFocused ? C.dim : C.white;
     }
 
-    // Toggles
     autoLaunchToggle.setActive(get('autoLaunch') === 'on' ? 'b' : 'a');
     modeToggle.setActive      (get('mode')       === 'exclusive' ? 'b' : 'a');
     matchToggle.setActive     (get('matchSubroutes') === 'on' ? 'b' : 'a');
@@ -311,7 +275,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     if (networkChips) networkChips.setSelected(get('family') as NetworkFamily);
     if (chainChips)   chainChips.setActive(get('chain'));
 
-    // Section indicator updates with focus.
     crumb.setSection(currentSectionLabel());
   }
 
@@ -322,7 +285,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     renderForm();
   }
 
-  // ─── Initial scan ──────────────────────────────────────────────────────────
   const spin      = makeSpin('scan');
   let scanning    = false;
   let scanTicker: ReturnType<typeof setInterval> | null = null;
@@ -350,10 +312,8 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   rerender();
   void rescan();
 
-  // Blink tick for caret
   const blinkTimer = setInterval(() => { cursorOn = !cursorOn; renderForm(); }, 500);
 
-  // ─── Field order for arrow nav (skips budget/network if free mode) ────────
   const FORM_FIELD_ORDER: FieldId[] = [
     'appPort', 'appEntry', 'appCheckPath', 'autoLaunch',
     'nodeRegion', 'nodeDomain', 'nodeExclude',
@@ -362,7 +322,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     ...(freeMode ? [] as FieldId[] : ['budget' as FieldId, 'family' as FieldId, 'chain' as FieldId]),
   ];
 
-  // ─── Helpers ───────────────────────────────────────────────────────────────
   function collect(): ForwardSetupResult {
     const out: ForwardSetupResult = {};
     const ap = parseInt(get('appPort'), 10);   if (!isNaN(ap) && ap > 0) out.appPort = ap;
@@ -425,11 +384,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     rerender();
   }
 
-  /**
-   * Called when the `family` chip changes. Rebuilds the underlying chain
-   * options so ←/→/Enter on the chain field cycles within the new family,
-   * and snaps `chain` to that family's default.
-   */
   function onFamilyChanged(): void {
     if (!chainChips) return;
     const fam = get('family') as NetworkFamily;
@@ -440,7 +394,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     chainChips.setFamily(fam, newChain);
   }
 
-  /** Section indicator — shown in the breadcrumb when section === 'form'. */
   function currentSectionLabel(): string {
     if (section !== 'form') return '';
     const id  = FORM_FIELD_ORDER[formIdx]!;
@@ -453,7 +406,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     renderer.destroy();
   }
 
-  // ─── Key input ─────────────────────────────────────────────────────────────
   return new Promise<ForwardSetupOutcome>((resolve) => {
     const done = (outcome: ForwardSetupOutcome): void => {
       teardown();
@@ -461,7 +413,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     };
 
     renderer.keyInput.on('keypress', (key) => {
-      // ── Text edit mode ──────────────────────────────────────────────────
       if (editing) {
         if (key.name === 'escape' || key.name === 'return' || key.name === 'enter') {
           editing = false;
@@ -483,7 +434,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
         return;
       }
 
-      // ── Global ──────────────────────────────────────────────────────────
       if (key.ctrl && key.name === 'c') { done({ kind: 'cancel' }); return; }
       if (key.name === 'b' || key.name === 'B' || key.name === 'escape') {
         done({ kind: 'cancel' });
@@ -493,18 +443,15 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
         done({ kind: 'result', data: collect() });
         return;
       }
-      // TYPE swap
       if (key.name === 't' || key.name === 'T') {
         done({ kind: 'swap-to-reverse' });
         return;
       }
 
-      // Bookmark save: M
       if (key.name === 'm' || key.name === 'M') {
         saveCurrent();
         return;
       }
-      // Bookmark load: Shift+1..5
       const SHIFTED_DIGIT: Record<string, number> = { '!': 0, '@': 1, '#': 2, '$': 3, '%': 4 };
       if (key.shift && key.name && /^[1-5]$/.test(key.name)) {
         loadBookmark(parseInt(key.name, 10) - 1);
@@ -515,23 +462,19 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
         return;
       }
 
-      // Number keys: select process from DETECTED list
       if (key.name && /^[1-5]$/.test(key.name) && !key.shift) {
         selectProcess(parseInt(key.name, 10) - 1);
         return;
       }
 
-      // Rescan
       if (key.name === 'r' || key.name === 'R') { void rescan(); return; }
 
-      // Section nav (Tab)
       if (key.name === 'tab') {
         section = section === 'lists' ? 'form' : 'lists';
         rerender();
         return;
       }
 
-      // List/form navigation
       if (key.name === 'up' || key.name === 'k') {
         if (section === 'lists') listIdx = Math.max(0, listIdx - 1);
         else                     formIdx = Math.max(0, formIdx - 1);
@@ -548,7 +491,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
         return;
       }
 
-      // Edit / toggle on the current form field
       if (section === 'form' && (key.name === 'return' || key.name === 'enter')) {
         const id = FORM_FIELD_ORDER[formIdx]!;
         const f  = fields.find(x => x.id === id)!;
@@ -575,7 +517,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
         return;
       }
 
-      // List-mode Enter → use selected process as app
       if (section === 'lists' && (key.name === 'return' || key.name === 'enter')) {
         selectProcess(listIdx);
         return;
@@ -583,8 +524,6 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     });
   });
 }
-
-// ─── Footer hints ────────────────────────────────────────────────────────────
 
 function makeFooterHints(_section: 'lists' | 'form'): FooterHint[] {
   return [
@@ -599,5 +538,4 @@ function makeFooterHints(_section: 'lists' | 'form'): FooterHint[] {
   ];
 }
 
-// Suppress unused-var warning on imports the type-only code-paths need
 void makeBadge;
