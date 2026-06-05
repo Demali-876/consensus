@@ -41,6 +41,8 @@ export interface ProxyConfig {
       body_encoding?: 'utf8' | 'base64';
     }>;
   };
+  /** Override SSRF resolver — for testing only. */
+  ssrfCheck?: (urlString: string) => Promise<SafeResolution>;
 }
 
 export interface ProxyResponse {
@@ -208,6 +210,7 @@ export default class ConsensusProxy {
   private stats:           { total_requests: number; cache_hits: number; cache_misses: number };
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
+  private ssrfCheck:       (urlString: string) => Promise<SafeResolution>;
   private cleanupTimer:    ReturnType<typeof setInterval>;
 
   constructor(config: ProxyConfig = {}) {
@@ -223,6 +226,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.ssrfCheck       = config.ssrfCheck ?? resolveAndCheckTarget;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -250,7 +254,7 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
+    const resolved = await this.ssrfCheck(target_url);
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
