@@ -1,11 +1,3 @@
-/**
- * Consensus Tunnel Client — opentui TUI
- *
- *   consensus tunnel http 192.168.1.101
- *   consensus tunnel http 192.168.1.101:3000
- *   consensus tunnel tcp  192.168.1.101:1883
- */
-
 import net     from 'net';
 import WebSocket from 'ws';
 import {
@@ -15,8 +7,6 @@ import {
   ASCIIFontRenderable,
   ScrollBoxRenderable,
 } from '@opentui/core';
-
-// ─── Frame protocol (mirrors server/tunnel.ts exactly) ───────────────────────
 
 const FRAME = {
   STREAM_OPEN:  0x01,
@@ -42,10 +32,7 @@ function decodeFrame(data: Buffer): { type: number; streamId: number; payload: B
   };
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
 function parseTarget(raw: string, defaultPort: number): { host: string; port: number } {
-  // IPv6 literal: [::1]:8080
   if (raw.startsWith('[')) {
     const close = raw.indexOf(']');
     const host  = raw.slice(1, close);
@@ -53,12 +40,10 @@ function parseTarget(raw: string, defaultPort: number): { host: string; port: nu
     const port  = rest.startsWith(':') ? parseInt(rest.slice(1)) : defaultPort;
     return { host, port: isNaN(port) ? defaultPort : port };
   }
-  // Plain port number: "3000" → localhost:3000
   const asPort = parseInt(raw, 10);
   if (!isNaN(asPort) && String(asPort) === raw) {
     return { host: 'localhost', port: asPort };
   }
-  // host:port or bare host
   const lastColon = raw.lastIndexOf(':');
   if (lastColon === -1) return { host: raw, port: defaultPort };
   const maybePort = parseInt(raw.slice(lastColon + 1));
@@ -81,10 +66,7 @@ function formatUptime(ms: number): string {
   return `${s}s`;
 }
 
-// ─── Palette (dark / light mode aware) ───────────────────────────────────────
 import { C } from '../../../theme';
-
-// ─── Build the TUI layout ────────────────────────────────────────────────────
 
 export async function buildTUI(
   tunnelId: string,
@@ -100,14 +82,10 @@ export async function buildTUI(
 
   renderer.start(); // continuous rendering for the live clock
 
-  // ── Root layout ────────────────────────────────────────────────────────────
-  //   col: header | body(row) | logs | footer
-
   const root = renderer.root;
   root.flexDirection    = 'column';
   root.padding          = 0;
 
-  // ── Header: ASCII logo ─────────────────────────────────────────────────────
   const header = new BoxRenderable(renderer, {
     width:           '100%',
     flexDirection:   'column',
@@ -134,7 +112,6 @@ export async function buildTUI(
   header.add(subtitle);
   root.add(header);
 
-  // ── Body row: info panel + stats panel ─────────────────────────────────────
   const body = new BoxRenderable(renderer, {
     width:          '100%',
     flexDirection:  'row',
@@ -144,7 +121,6 @@ export async function buildTUI(
     backgroundColor: C.dark,
   });
 
-  // Left: Tunnel Info
   const infoBox = new BoxRenderable(renderer, {
     flexGrow:        1,
     flexShrink:      1,
@@ -171,7 +147,6 @@ export async function buildTUI(
   infoBox.add(mkRow(renderer, 'Target',  targetRaw, C.white));
   infoBox.add(mkRow(renderer, 'Type',    type.toUpperCase(), type === 'http' ? C.sky : C.amber));
 
-  // Uptime row — we keep a ref to update it
   const uptimeValueText = new TextRenderable(renderer, {
     content: '0s',
     fg:      C.white,
@@ -185,7 +160,6 @@ export async function buildTUI(
   uptimeRow.add(uptimeValueText);
   infoBox.add(uptimeRow);
 
-  // Right: Traffic Stats
   const statsBox = new BoxRenderable(renderer, {
     flexGrow:       1,
     flexShrink:     1,
@@ -223,7 +197,6 @@ export async function buildTUI(
   body.add(statsBox);
   root.add(body);
 
-  // ── Request log (sticky-scroll to bottom) ──────────────────────────────────
   const logBox = new BoxRenderable(renderer, {
     width:          '100%',
     flexGrow:       1,
@@ -247,7 +220,6 @@ export async function buildTUI(
   logBox.add(logScroll);
   root.add(logBox);
 
-  // ── Footer ────────────────────────────────────────────────────────────────
   const FOOTER_IDLE    = '  Ctrl+C  close tunnel    ↑↓  scroll log  ';
   const FOOTER_CONFIRM = '  Close tunnel?  Y  confirm    any key  cancel  ';
 
@@ -258,7 +230,6 @@ export async function buildTUI(
   });
   root.add(footer);
 
-  // ── Log helper ────────────────────────────────────────────────────────────
   let logCount = 0;
 
   function addLog(icon: string, message: string, color: string): void {
@@ -270,7 +241,6 @@ export async function buildTUI(
       bg:      'transparent',
     });
     logScroll.add(line);
-    // Keep at most 200 log lines
     const children = logScroll.getChildren();
     if (children.length > 200) {
       logScroll.remove(children[0]!.id);
@@ -303,10 +273,7 @@ export async function buildTUI(
   };
 }
 
-// ─── Main exported command ────────────────────────────────────────────────────
-
 export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promise<void> {
-  // Validate input
   if (!targetRaw.includes(':') && type === 'tcp') {
     console.error('TCP tunnels require an explicit port, e.g.  consensus tunnel tcp 192.168.1.101:1883');
     process.exit(1);
@@ -318,8 +285,6 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
   );
 
   const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
-
-  // ── 1. Register tunnel (before launching TUI so we can show errors cleanly) ──
 
   let registration: {
     tunnelId:    string;
@@ -352,14 +317,10 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
 
   const publicUrl = registration.public_url ?? registration.tcp_addr ?? '';
 
-  // ── 2. Build TUI ─────────────────────────────────────────────────────────────
-
   const tui = await buildTUI(registration.tunnelId, type, publicUrl, targetRaw);
 
   tui.addLog('◌', `Tunnel registered  →  ${publicUrl}`, C.slate);
   tui.addLog('◌', `Connecting WebSocket…`, C.slate);
-
-  // ── 3. Live state ─────────────────────────────────────────────────────────────
 
   const stats = {
     requests:    0,
@@ -369,17 +330,13 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
     connectedAt: Date.now(),
   };
 
-  // Tick clock every second
   const clockTimer = setInterval(() => tui.updateStats(stats), 1000);
-
-  // ── 4. WebSocket control channel ──────────────────────────────────────────────
 
   const ws = new WebSocket(registration.connect_url, { perMessageDeflate: false });
   ws.binaryType = 'nodebuffer';
 
   const sockets = new Map<number, net.Socket>();
 
-  // Keepalive ping every 30 s
   let pingTimer: ReturnType<typeof setInterval> | null = null;
 
   ws.on('open', () => {
@@ -404,7 +361,6 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
   let firstMessage = true;
 
   ws.on('message', (rawData: Buffer) => {
-    // First message is the JSON tunnel_open handshake
     if (firstMessage) {
       firstMessage = false;
       try {
@@ -437,13 +393,11 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
 
         const sock = net.createConnection({ host: targetHost, port: targetPort });
 
-        sock.on('connect', () => {
-          sockets.set(frame.streamId, sock);
-          if (frame.payload.length > 0) {
-            sock.write(frame.payload);
-            stats.bytesSent += frame.payload.length;
-          }
-        });
+        sockets.set(frame.streamId, sock);
+        if (frame.payload.length > 0) {
+          sock.write(frame.payload);
+          stats.bytesSent += frame.payload.length;
+        }
 
         sock.on('data', (data: Buffer) => {
           stats.bytesRecv += data.length;
@@ -512,8 +466,6 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
       }
     }
   });
-
-  // ── 5. Graceful shutdown ──────────────────────────────────────────────────────
 
   const shutdown = () => {
     clearInterval(clockTimer);

@@ -13,6 +13,7 @@ import figlet, { type FontName } from 'figlet';
 import { decode as decodeBmp } from 'bmp-ts';
 import * as fs from 'node:fs';
 import { C, isDark } from '../../theme';
+import { makeBadge } from '../chrome.ts';
 import { isFreeMode } from '../../lib/server-config';
 import {
   loadConfig, loadPrefs, savePrefs,
@@ -41,11 +42,7 @@ function makeBitmap(
   opts: {
     cols:          number;
     bg:            string;
-    /** 'braille' (default) = 2×4 sub-pixels per cell, monochrome — best for
-     *  logos / line art. 'half-block' = 2 sub-pixels per cell, full colour
-     *  — best for photos. */
     mode?:         'braille' | 'half-block';
-    /** Monochrome fg used in braille mode. Defaults to C.white. */
     fg?:           string;
     transparent?:  'auto' | string | false;   // default 'auto'
     keyTolerance?: number;                    // 0-255 per channel, default 12
@@ -96,7 +93,6 @@ function makeBitmap(
   const bgRgba = RGBA.fromValues(bgR / 255, bgG / 255, bgB / 255, 1);
 
   if (mode === 'braille') {
-    // Sub-pixel footprint: 2 horizontal × 4 vertical per cell.
     const subW = img.width  / (cols * 2);
     const subH = img.height / (rows * 4);
     const fgRgba = RGBA.fromValues(fgR / 255, fgG / 255, fgB / 255, 1);
@@ -106,7 +102,6 @@ function makeBitmap(
         let mask = 0;
         for (let dy = 0; dy < 4; dy++) {
           for (let dx = 0; dx < 2; dx++) {
-            // Sample the centre of the sub-pixel footprint.
             const sx = Math.min(img.width  - 1, Math.floor((cx * 2 + dx + 0.5) * subW));
             const sy = Math.min(img.height - 1, Math.floor((cy * 4 + dy + 0.5) * subH));
             if (pxAlpha(sx, sy) > 128) mask |= BRAILLE_BIT[dy]![dx]!;
@@ -164,11 +159,6 @@ function makeBitmap(
   return fb;
 }
 
-/**
- * Render a string as multi-row ASCII-art using figlet, returned as a Box
- * containing one TextRenderable per row. All rows share the same fg/bg, so
- * the headline reads as a single typographic block.
- */
 function makeBanner(
   renderer: CliRenderer,
   text: string,
@@ -187,27 +177,7 @@ function makeBanner(
   return box;
 }
 
-function makeBadge(
-  renderer: CliRenderer,
-  text: string,
-  opts: { bg: string; fg?: string } = { bg: C.accent },
-): { box: BoxRenderable; label: TextRenderable } {
-  const fg  = opts.fg ?? C.dark;
-  const box = new BoxRenderable(renderer, {
-    flexDirection: 'row', paddingX: 1, backgroundColor: opts.bg,
-  });
-  const label = new TextRenderable(renderer, {
-    content:    text,
-    fg, bg:     opts.bg,
-    attributes: TextAttributes.BOLD,
-  });
-  box.add(label);
-  return { box, label };
-}
-
-
 const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
-
 
 export function recordSession(session: {
   id: string; type: SessionType; url: string; target: string; startedAt: number;
@@ -269,11 +239,6 @@ export async function showLanding(): Promise<LandingAction> {
     Boolean(config.wallet_name || config.addresses?.evm || config.addresses?.solana)
     || Boolean(process.env.CONSENSUS_EVM_KEY || process.env.CONSENSUS_SVM_KEY || process.env.CONSENSUS_PEM_PATH);
 
-  // Active-state detector. Returns true when there's *anything* worth showing
-  // on a dashboard — in-process proxy workers, any persisted session in the
-  // last 5 minutes, or an active node lease. CONSENSUS_FORCE_ACTIVE=1 is a
-  // dev-only override so we can preview the active layout without spinning
-  // up real services.
   const ACTIVE_LOOKBACK_MS = 5 * 60 * 1000;
   const recentSession = loadSessions().some(s => {
     const ended   = s.endedAt   ?? Number.POSITIVE_INFINITY;
@@ -378,10 +343,6 @@ export async function showLanding(): Promise<LandingAction> {
   });
   root.add(body);
 
-  // ── Refs shared with downstream consumers ────────────────────────────────
-  // Hoisted so updateClock/doRefresh/key handlers can reference them whether
-  // or not the empty-state body actually built them. When `isActive` is true
-  // the empty-state widgets are skipped and these stay at their defaults.
   type CardRefs = {
     box:       BoxRenderable;
     badgeBox:  BoxRenderable;
@@ -411,15 +372,12 @@ export async function showLanding(): Promise<LandingAction> {
   });
   const acctUpper = prefs.displayName.toUpperCase();
 
-  // Eyebrow — small caps, dim, BOLD for slight weight.
   heroText.add(new TextRenderable(renderer, {
     content: `WELCOME BACK, ${acctUpper}`,
     fg: C.dim, bg: C.dark,
     attributes: TextAttributes.BOLD,
   }));
 
-  // Headline — figlet banner gives the hero clear visual weight above the
-  // regular-size subtitle below. See BANNER_FONT at the top of the file.
   heroText.add(makeBanner(renderer, "Nothing's running yet.", {
     fg: C.white, bg: C.dark,
   }));
@@ -492,7 +450,6 @@ export async function showLanding(): Promise<LandingAction> {
   }));
   body.add(hero);
 
-  // ── Service cards row ─────────────────────────────────────────────────────
   const cardRow = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', gap: 2,
     paddingBottom: 1, backgroundColor: C.dark,
@@ -505,7 +462,6 @@ export async function showLanding(): Promise<LandingAction> {
       padding: 1, backgroundColor: C.dark,
     });
 
-    // top row: number badge + icon (space-between)
     const topRow = new BoxRenderable(renderer, {
       width: '100%', flexDirection: 'row', justifyContent: 'space-between',
       backgroundColor: C.dark,
@@ -535,7 +491,6 @@ export async function showLanding(): Promise<LandingAction> {
     cardRefs.push({ box, badgeBox, badgeText, icon, title, blurb, tag });
   }
 
-  // initial tag placeholders
   cardRefs[0]!.tag.content = 'localhost → public';
   cardRefs[1]!.tag.content = 'cache · cap · region';
   cardRefs[2]!.tag.content = '— nodes · — regions';
@@ -543,7 +498,6 @@ export async function showLanding(): Promise<LandingAction> {
 
   body.add(cardRow);
 
-  // ── Lower row: GETTING STARTED + WAITING FOR ACTIVITY ─────────────────────
   const lower = new BoxRenderable(renderer, {
     width: '100%', flexGrow: 1, flexDirection: 'row', gap: 2,
     backgroundColor: C.dark,
@@ -686,7 +640,6 @@ export async function showLanding(): Promise<LandingAction> {
       ref.badgeText.bg             = badgeBg;
       ref.badgeText.fg             = active ? C.dark : C.slate;
 
-      // Label: bold ink on active, slate on inactive.
       ref.label.fg         = active ? C.white : C.slate;
       ref.label.attributes = active ? TextAttributes.BOLD : 0;
     }
@@ -751,18 +704,12 @@ export async function showLanding(): Promise<LandingAction> {
   const clockTimer  = setInterval(updateClock, 1000);
   const healthTimer = setInterval(doRefresh, 15_000);
 
-  // Active-mode 1Hz refresh — recomputes the full snapshot (workerRegistry
-  // deltas, session aggregation, activity feed) and pushes it into the
-  // dashboard's in-place update path. No-op when on the empty hero.
   const dashboardTimer = dashboard
     ? setInterval(() => { dashboard!.update(computeSnapshot()); }, 1000)
     : null;
 
   return new Promise<LandingAction>((resolve) => {
     let confirming = false;
-    // While a modal (palette / tour) is open we suppress the landing's own
-    // keypress handling — both handlers fire on the shared keyInput bus, so
-    // this flag is how the landing yields the keyboard.
     let modalOpen  = false;
 
     const teardown = (): void => {
@@ -794,8 +741,6 @@ export async function showLanding(): Promise<LandingAction> {
       hintsRef.fg        = fg;
     };
 
-    // ── Palette commands ───────────────────────────────────────────────────
-    // Defined inside the Promise so they can call `done(...)` to navigate.
     const buildCommands = (): PaletteCommand[] => ([
       { id: 'open-tunnels',   label: 'Open Tunnels',     hint: 'tab 2', keywords: ['nav'],
         run: () => done('tunnels') },
@@ -851,9 +796,6 @@ export async function showLanding(): Promise<LandingAction> {
       }
     };
 
-    // First-focus pulse — quick accent flash on the focused card so the
-    // arrow-key affordance is obvious on first paint. Two beats: focus
-    // colour → accent → focus colour. Skipped in active mode (no cards).
     let pulseCount = 0;
     let pulseTimer: ReturnType<typeof setInterval> | null = null;
     if (!isActive) {
@@ -870,9 +812,6 @@ export async function showLanding(): Promise<LandingAction> {
       }, 220);
     }
 
-    // Tour is opt-in: press `?` or run "Replay Tour" from the palette.
-    // No auto-launch — too intrusive for repeat / power users.
-
     renderer.keyInput.on('keypress', (key) => {
       if (!live || modalOpen) return;
 
@@ -883,8 +822,6 @@ export async function showLanding(): Promise<LandingAction> {
         return;
       }
 
-      // Modal triggers — handled before everything else so they win against
-      // any incidental key collisions.
       if (key.name === '/' || key.sequence === '/') { void launchPalette(); return; }
       if (key.name === '?' || key.sequence === '?') { void launchTour();    return; }
       if (key.name === 'd' || key.name === 'D')     { openUrl(DOCS_URL);   return; }
@@ -896,15 +833,11 @@ export async function showLanding(): Promise<LandingAction> {
         return;
       }
 
-      // `n` in active mode is shorthand for "new service" — opens the
-      // palette so the user can pick which kind. Empty mode doesn't claim it
-      // (the cards already cover "new" in a more discoverable way).
       if (isActive && (key.name === 'n' || key.name === 'N')) {
         void launchPalette();
         return;
       }
 
-      // Active mode: ↑↓ / j k navigate the ACTIVE SERVICES rows.
       if (isActive && dashboard) {
         if (key.name === 'up' || key.name === 'k') {
           serviceIdx = Math.max(0, serviceIdx - 1);
@@ -918,7 +851,6 @@ export async function showLanding(): Promise<LandingAction> {
         }
       }
 
-      // Card focus navigation — only meaningful in empty mode where cards exist.
       if (!isActive) {
         if (key.name === 'left'  || key.name === 'h') {
           cardIdx = (cardIdx - 1 + CARDS.length) % CARDS.length;
@@ -936,8 +868,6 @@ export async function showLanding(): Promise<LandingAction> {
 
       if (key.name === 'return' || key.name === 'enter') {
         if (isActive && dashboard) {
-          // Navigate to the management screen for the selected service.
-          // Idle slots open the palette (so the user can start something).
           const svc = dashboard.getServiceAt(serviceIdx);
           if (!svc || svc.type === 'idle') {
             void launchPalette();
@@ -950,7 +880,6 @@ export async function showLanding(): Promise<LandingAction> {
           }
           return;
         }
-        // Empty mode: open the focused service card.
         openCard(cardIdx);
         return;
       }

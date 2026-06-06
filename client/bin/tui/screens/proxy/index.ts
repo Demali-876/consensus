@@ -24,7 +24,6 @@ async function runForward(): Promise<void> {
   const setup = await showForwardSetup();
   writeTraceLog('proxy.runForward.afterSetup', { setup });
   if (!setup) return;
-  // TYPE toggle: user asked to swap to reverse mid-flow.
   if ('swap' in setup) return runReverse();
 
   const handle = createPreloadHandle(loadPrefs().defaultProxyPort);

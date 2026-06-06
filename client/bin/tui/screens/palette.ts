@@ -18,9 +18,7 @@ export interface PaletteCommand {
 
 export interface PaletteOptions {
   commands: PaletteCommand[];
-  /** IDs of recently-picked commands, newest first. Shown at top when search is empty. */
   recents?: string[];
-  /** Called with the picked command's ID just before resolving. */
   onPick?:  (id: string) => void;
 }
 
@@ -60,7 +58,6 @@ export async function showPalette(
     content: '─'.repeat(60), fg: C.line2, bg: C.panel,
   }));
 
-  // ── Result rows (pre-allocated; we rewrite contents per render) ──────────
   const rowRefs: Array<{ box: BoxRenderable; label: TextRenderable; hint: TextRenderable }> = [];
   for (let i = 0; i < MAX_VISIBLE; i++) {
     const row = new BoxRenderable(renderer, {
@@ -89,7 +86,6 @@ export async function showPalette(
   const filterAndRender = (): void => {
     const q = query.trim().toLowerCase();
     if (q === '') {
-      // Recents first (preserving recent order), then the rest in declared order.
       const recentSet = new Set(recents);
       const recentCmds = recents
         .map(id => opts.commands.find(c => c.id === id))
@@ -143,7 +139,6 @@ export async function showPalette(
   filterAndRender();
   root.add(overlay);
 
-  // ── Key handling ─────────────────────────────────────────────────────────
   return new Promise<PaletteCommand | null>((resolve) => {
     let resolved = false;
 
@@ -167,8 +162,6 @@ export async function showPalette(
         if (picked) {
           opts.onPick?.(picked.id);
           cleanup(picked);
-          // Caller runs picked.run() after the overlay tears down so any
-          // navigation kicks in cleanly.
           picked.run();
         }
         return;
@@ -192,8 +185,6 @@ export async function showPalette(
         }
         return;
       }
-      // Printable character: append to search.
-      // KeyEvent gives us `sequence` for printable chars (a single char).
       const ch = key.sequence;
       if (typeof ch === 'string' && ch.length === 1 && ch >= ' ' && ch <= '~') {
         query += ch;

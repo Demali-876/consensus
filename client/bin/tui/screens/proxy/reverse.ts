@@ -1,11 +1,3 @@
-/**
- * Reverse proxy setup — v2 design.
- *
- * Returns ReverseSetupResult (Start), `null` (Back), or `{ swap: 'forward' }`
- * when the user toggled TYPE. Result-shape parity with the previous version
- * is preserved.
- */
-
 import {
   createCliRenderer,
   BoxRenderable,
@@ -90,20 +82,17 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
   root.flexDirection = 'column';
   root.padding = 0;
 
-  // ─── Top bar + breadcrumb + subtitle ──────────────────────────────────────
   root.add(buildTopBar(renderer, { version, freeMode }));
   const crumb = buildBreadcrumb(renderer, 'reverse');
   root.add(crumb.row);
   root.add(buildSubtitle(renderer, 'expose a local upstream through a cached, paid reverse proxy'));
 
-  // ─── Body: two-column ──────────────────────────────────────────────────────
   const body = new BoxRenderable(renderer, {
     width: '100%', flexGrow: 1, flexDirection: 'row', gap: 2,
     paddingX: 2, backgroundColor: C.dark,
   });
   root.add(body);
 
-  // ── Left column ──────────────────────────────────────────────────────────
   const leftCol = new BoxRenderable(renderer, {
     flexGrow: 1, flexShrink: 1, flexDirection: 'column', gap: 1, backgroundColor: C.dark,
   });
@@ -117,13 +106,11 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
   leftCol.add(buildWalletPanel(renderer, { freeMode, hasEvm, hasSvm, hasIcp }));
   body.add(leftCol);
 
-  // ── Right column ─────────────────────────────────────────────────────────
   const rightCol = new BoxRenderable(renderer, {
     flexGrow: 2, flexShrink: 1, flexDirection: 'column', gap: 1, backgroundColor: C.dark,
   });
   body.add(rightCol);
 
-  // UPSTREAM section
   rightCol.add(makeSectionHeader(renderer, 'UPSTREAM'));
   const hostRow = makeFieldRow(renderer, 'Host', 'upstream host');
   const portRow = makeFieldRow(renderer, 'Port', 'upstream port', { inputWidth: 12 });
@@ -135,19 +122,16 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
   rightCol.add(portRow.row);
   rightCol.add(protoRow);
 
-  // PROXY section
   rightCol.add(makeSectionHeader(renderer, 'PROXY'));
   const listenPortRow = makeFieldRow(renderer, 'Listen port', 'local proxy bind port', { inputWidth: 12 });
   rightCol.add(listenPortRow.row);
 
-  // CACHE section
   rightCol.add(makeSectionHeader(renderer, 'CACHE'));
   const ttlRow      = makeFieldRow(renderer, 'Cache TTL',   'sec · 0 = off',     { inputWidth: 12 });
   const maxRow      = makeFieldRow(renderer, 'Max entries', 'cached responses',  { inputWidth: 12 });
   rightCol.add(ttlRow.row);
   rightCol.add(maxRow.row);
 
-  // NETWORK + CHAIN — only when NOT free mode.
   let networkChips: ReturnType<typeof buildNetworkChips> | null = null;
   let chainChips:   ReturnType<typeof buildChainChips>   | null = null;
   const initialFamily = familyFromCaip2(prefs.defaultNetwork);
@@ -170,7 +154,6 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
     rightCol.add(chainRow);
   }
 
-  // ─── Footer chips ──────────────────────────────────────────────────────────
   const footer = buildFooter(renderer, [
     { key: 'R',    label: 'rescan'       },
     { key: '↑↓',   label: 'navigate'     },
@@ -184,7 +167,6 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
   root.add(footer.box);
   void footer;
 
-  // ─── State ─────────────────────────────────────────────────────────────────
   const defaultListenPort = chooseDefaultPort([], REVERSE_PROXY_PORT_CANDIDATES, 8081);
 
   const fields: FieldState[] = [
@@ -254,7 +236,6 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
     renderForm();
   }
 
-  // ─── Initial scan ──────────────────────────────────────────────────────────
   const spin = makeSpin('scan');
   let scanning = false;
   let scanTicker: ReturnType<typeof setInterval> | null = null;
@@ -284,7 +265,6 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
 
   const blinkTimer = setInterval(() => { cursorOn = !cursorOn; renderForm(); }, 500);
 
-  // ─── Helpers ───────────────────────────────────────────────────────────────
   function collect(): ReverseSetupResult {
     const ttlSec = parseInt(get('cacheTtl') || '0', 10);
     const lp     = parseInt(get('listenPort') || String(defaultListenPort), 10);
@@ -364,7 +344,6 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
     renderer.destroy();
   }
 
-  // ─── Key input ─────────────────────────────────────────────────────────────
   return new Promise<ReverseSetupOutcome>((resolve) => {
     const done = (outcome: ReverseSetupOutcome): void => {
       teardown();
@@ -372,7 +351,6 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
     };
 
     renderer.keyInput.on('keypress', (key) => {
-      // Text edit mode
       if (editing) {
         if (key.name === 'escape' || key.name === 'return' || key.name === 'enter') {
           editing = false; renderForm(); return;
@@ -396,9 +374,7 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
       if (key.name === 's' || key.name === 'S') { done({ kind: 'result', data: collect() }); return; }
       if (key.name === 't' || key.name === 'T') { done({ kind: 'swap-to-forward' }); return; }
 
-      // Bookmark save (M)
       if (key.name === 'm' || key.name === 'M') { saveCurrent(); return; }
-      // Bookmark load (Shift+1..5)
       const SHIFTED_DIGIT: Record<string, number> = { '!': 0, '@': 1, '#': 2, '$': 3, '%': 4 };
       if (key.shift && key.name && /^[1-5]$/.test(key.name)) {
         loadBookmark(parseInt(key.name, 10) - 1);
@@ -408,14 +384,11 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
         loadBookmark(SHIFTED_DIGIT[key.sequence]!);
         return;
       }
-      // Number keys: select from DETECTED list
       if (key.name && /^[1-5]$/.test(key.name) && !key.shift) {
         selectProcess(parseInt(key.name, 10) - 1);
         return;
       }
-      // Rescan
       if (key.name === 'r' || key.name === 'R') { void rescan(); return; }
-      // Section nav
       if (key.name === 'tab') {
         section = section === 'lists' ? 'form' : 'lists';
         rerender();
@@ -464,5 +437,4 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
   });
 }
 
-// Suppress unused-imports warning (used via spread types).
 void Array<FooterHint>;

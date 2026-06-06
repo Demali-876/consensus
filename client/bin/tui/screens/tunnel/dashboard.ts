@@ -1,15 +1,3 @@
-/**
- * Tunnel dashboard — live traffic view.
- *
- * Handles both HTTP and TCP tunnels.
- * Protocol mirrors server/features/tunnel/tunnel.ts exactly.
- *
- * Preview mode (CONSENSUS_PREVIEW_TUNNEL=1):
- *   Skips the real WebSocket and runs an in-process fake-request generator
- *   that pushes synthetic LogEntry records into the same UI. Lets us
- *   demo / iterate on the dashboard layout without spinning up a server.
- */
-
 import net       from 'net';
 import crypto    from 'node:crypto';
 import WebSocket from 'ws';
@@ -21,14 +9,13 @@ import {
   TextAttributes,
 } from '@opentui/core';
 import { C } from '../../../theme';
+import { makeBadge } from '../../chrome.ts';
 import { makeSpin } from '../../../lib/spinners.ts';
 import { saveSession } from '../../../lib/store.ts';
 import type { TunnelSetupResult } from './setup.ts';
 
 const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
 const IS_PREVIEW = process.env.CONSENSUS_PREVIEW_TUNNEL === '1';
-
-// ─── Frame protocol ───────────────────────────────────────────────────────────
 
 const FRAME = {
   STREAM_OPEN:  0x01,
@@ -50,8 +37,6 @@ function decodeFrame(data: Buffer): { type: number; streamId: number; payload: B
   return { type: data.readUInt8(0), streamId: data.readUInt32BE(1), payload: data.subarray(5) };
 }
 
-// ─── HTTP parsing ────────────────────────────────────────────────────────────
-
 function parseHttpRequestLine(payload: Buffer): { method: string; path: string } | null {
   const text  = payload.toString('utf8', 0, Math.min(payload.length, 512));
   const line  = text.split('\r\n')[0] ?? '';
@@ -65,8 +50,6 @@ function parseHttpStatusCode(data: Buffer): number | null {
   const m    = text.match(/^HTTP\/\d+\.?\d*\s+(\d{3})/);
   return m ? parseInt(m[1]!) : null;
 }
-
-// ─── Formatting ──────────────────────────────────────────────────────────────
 
 function fmtStatus(code: number): string {
   if (code === 0)   return '—';
@@ -111,7 +94,6 @@ function fmtBytes(n: number): string {
 }
 
 function fmtBytesCompact(n: number): string {
-  // For the per-row SIZE column — narrower units.
   if (n <= 0)              return '—';
   if (n >= 1_048_576)      return `${(n / 1_048_576).toFixed(1)} MB`;
   if (n >= 1024)           return `${(n / 1024).toFixed(1)} KB`;
@@ -121,8 +103,6 @@ function fmtBytesCompact(n: number): string {
 function fmtCount(n: number): string {
   return n.toLocaleString();
 }
-
-// ─── Sparkline ──────────────────────────────────────────────────────────────
 
 const SPARK_BARS = ['▁','▂','▃','▄','▅','▆','▇','█'] as const;
 const SPARK_WIDTH = 40;          // matches design "LAST 40" footer
@@ -138,8 +118,6 @@ function sparkline(values: number[], width = SPARK_WIDTH): string {
     .join('');
 }
 
-// ─── Method colours ──────────────────────────────────────────────────────────
-
 const METHOD_FG: Record<string, string> = {
   GET:     C.slate,
   HEAD:    C.dim,
@@ -150,8 +128,6 @@ const METHOD_FG: Record<string, string> = {
   DELETE:  C.red,
   TCP:     C.cyan,
 };
-
-// ─── Types ───────────────────────────────────────────────────────────────────
 
 type LogEntry = {
   time:       string;
@@ -183,27 +159,8 @@ type LogRowRef = {
   size:    TextRenderable;
 };
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-
 const MAX_LOG = 20;
 const MAX_LATENCY_SAMPLES = SPARK_WIDTH;       // 40 — drives both stats and the bottom sparkline
-
-// ─── Small UI helpers ────────────────────────────────────────────────────────
-
-function makeBadge(
-  renderer: CliRenderer,
-  text: string,
-  opts: { bg: string; fg?: string } = { bg: C.accent },
-): BoxRenderable {
-  const fg = opts.fg ?? C.dark;
-  const box = new BoxRenderable(renderer, {
-    flexDirection: 'row', paddingX: 1, backgroundColor: opts.bg,
-  });
-  box.add(new TextRenderable(renderer, {
-    content: text, fg, bg: opts.bg, attributes: TextAttributes.BOLD,
-  }));
-  return box;
-}
 
 interface MetricTileRefs {
   box:      BoxRenderable;
@@ -213,10 +170,6 @@ interface MetricTileRefs {
   meta:     TextRenderable;
 }
 
-/**
- * One metric tile — title (bold dim), value (big coloured) + small unit,
- * then a dim meta line. Tiles share equal flex width across the row.
- */
 function makeMetricTile(
   renderer: CliRenderer,
   title: string,
@@ -258,8 +211,6 @@ function makeMetricTile(
   return { box, title: titleRef, value: valueRef, unit: unitRef, meta: metaRef };
 }
 
-// ─── Fake request generator (preview mode) ───────────────────────────────────
-
 const FAKE_PATHS = [
   '/api/metrics?range=1h', '/api/devices', '/api/sessions/expired',
   '/api/devices/unknown',  '/api/ingest',  '/static/dashboard.js',
@@ -274,7 +225,6 @@ function fakeEntry(): LogEntry {
   const method = FAKE_METHODS[Math.floor(Math.random() * FAKE_METHODS.length)]!;
   const path   = FAKE_PATHS  [Math.floor(Math.random() * FAKE_PATHS.length)]!;
   const code   = FAKE_STATUSES[Math.floor(Math.random() * FAKE_STATUSES.length)]!;
-  // Slower for 502s, fast for cached.
   const isSlow = code === 502;
   const isCached = code === 304;
   const lat = isSlow ? 600 + Math.random() * 800
@@ -291,8 +241,6 @@ function fakeEntry(): LogEntry {
   };
 }
 
-// ─── The screen ──────────────────────────────────────────────────────────────
-
 export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<void> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false, targetFps: 15, useMouse: false, useAlternateScreen: true,
@@ -303,7 +251,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   root.flexDirection = 'column';
   root.padding = 0;
 
-  // ─── Top status bar: ● CONNECTED   URL [copy]   uptime HH:MM:SS ─────────────
   const topBar = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'center', paddingX: 2, paddingY: 0,
@@ -323,7 +270,7 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     attributes: TextAttributes.BOLD,
   });
   urlGroup.add(urlRef);
-  urlGroup.add(makeBadge(renderer, '⧉ copy', { bg: C.line2, fg: C.slate }));
+  urlGroup.add(makeBadge(renderer, '⧉ copy', { bg: C.line2, fg: C.slate }).box);
   topBar.add(urlGroup);
 
   const uptimeGroup = new BoxRenderable(renderer, {
@@ -337,7 +284,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   topBar.add(uptimeGroup);
   root.add(topBar);
 
-  // ─── Metric tiles row ──────────────────────────────────────────────────────
   const tilesRow = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', gap: 2,
     paddingX: 2, paddingTop: 1, backgroundColor: C.dark,
@@ -356,7 +302,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   tilesRow.add(errTile.box);
   root.add(tilesRow);
 
-  // ─── Activity panel ────────────────────────────────────────────────────────
   const activityPanel = new BoxRenderable(renderer, {
     width: '100%', flexGrow: 1, flexDirection: 'column',
     border: true, borderStyle: 'single', borderColor: C.emerald,
@@ -386,7 +331,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   activityPanel.add(activityHeader);
   activityPanel.add(new TextRenderable(renderer, { content: ' ', fg: C.dim, bg: C.dark }));
 
-  // Column widths — matches the design's spacing.
   const COLS = { time: 10, method: 8, path: 60, status: 12, latency: 8, size: 10 };
 
   const tableHeader = new BoxRenderable(renderer, {
@@ -423,7 +367,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   }
   root.add(activityPanel);
 
-  // ─── Stats bar: LATENCY / AVG / P95 / sparkline   ·   REGION ───────────────
   const statsBar = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'center', paddingX: 2, paddingY: 0,
@@ -462,7 +405,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   statsBar.add(regionGroup);
   root.add(statsBar);
 
-  // ─── Footer chips ──────────────────────────────────────────────────────────
   const footer = new BoxRenderable(renderer, {
     width: '100%', flexDirection: 'row', justifyContent: 'space-between',
     paddingX: 2, paddingY: 0, backgroundColor: C.panel,
@@ -481,7 +423,7 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   ];
   for (const h of HINTS) {
     const pair = new BoxRenderable(renderer, { flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.panel });
-    pair.add(makeBadge(renderer, h.key, { bg: C.slate, fg: C.white }));
+    pair.add(makeBadge(renderer, h.key, { bg: C.slate, fg: C.white }).box);
     pair.add(new TextRenderable(renderer, {
       content: h.label, fg: h.stub ? C.dim : C.slate, bg: C.panel,
     }));
@@ -491,7 +433,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   footer.add(new TextRenderable(renderer, { content: 'ACTIVE TUNNEL', fg: C.dim, bg: C.panel }));
   root.add(footer);
 
-  // ─── State ─────────────────────────────────────────────────────────────────
   let live       = true;
   let connected  = false;
   let paused     = false;
@@ -501,13 +442,12 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   let requestCount = 0;
   let bytesSent    = 0;
   let bytesRecv    = 0;
+  let totalStreams = 0;
   let tunnelPublicUrl = '';
   let activeStreams   = 0;
   const recentLatencies: number[] = [];
   const recentStatuses:  number[] = [];   // capped at 100, used for error-rate tile
 
-  // Forwarding target text — for preview mode we mirror the design's
-  // `http · node · my-api` so the screen reads correctly without a real probe.
   const targetStr = [setup.target, setup.port].filter(Boolean).join(':');
   const fwdMeta   = IS_PREVIEW
     ? `${setup.protocol} · node · my-api`
@@ -516,7 +456,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   fwdTile.unit.content  = '';
   fwdTile.meta.content  = fwdMeta;
 
-  // ─── Render passes ────────────────────────────────────────────────────────
   function renderLog(): void {
     for (let i = 0; i < MAX_LOG; i++) {
       const e = log[i];
@@ -565,24 +504,22 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   }
 
   function renderTiles(): void {
-    // REQUESTS
     reqTile.value.content = fmtCount(requestCount);
     const uptimeMin = Math.max(1, (Date.now() - startedAt) / 60_000);
     const rpm = Math.round(requestCount / uptimeMin);
     reqTile.meta.content  = `~${rpm} / min`;
 
-    // ACTIVE
     actTile.value.content = String(activeStreams);
     actTile.unit.content  = activeStreams === 1 ? 'stream' : 'streams';
-    actTile.meta.content  = 'live connections';
+    actTile.meta.content  = totalStreams > 0
+      ? `${fmtCount(totalStreams)} total · live connections`
+      : 'live connections';
 
-    // SENT
-    const sentMb = bytesSent / 1_048_576;
-    sntTile.value.content = sentMb >= 10 ? sentMb.toFixed(1) : sentMb.toFixed(2);
-    sntTile.unit.content  = 'MB';
-    sntTile.meta.content  = `↓ ${fmtBytes(bytesRecv).replace(/^(\d+(?:\.\d+)?) /, '$1 ')} recv`;
+    const sentParts = fmtBytes(bytesSent).split(' ');
+    sntTile.value.content = sentParts[0] ?? '0';
+    sntTile.unit.content  = sentParts[1] ?? 'B';
+    sntTile.meta.content  = `↓ ${fmtBytes(bytesRecv)} recv`;
 
-    // ERROR RATE — % of last 100 that returned 4xx/5xx
     if (recentStatuses.length === 0) {
       errTile.value.content = '0.0';
       errTile.unit.content  = '%';
@@ -631,12 +568,10 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     streamLbl.content     = 'idle';
   }
 
-  // Initial render so the tiles aren't blank before any traffic.
   renderLog();
   renderLatency();
   renderTiles();
 
-  // ─── Timers ────────────────────────────────────────────────────────────────
   const spin      = makeSpin('checking');
   const spinTimer = setInterval(() => {
     if (!live || connected) return;
@@ -646,11 +581,9 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   const clockTimer = setInterval(() => {
     if (!live) return;
     uptimeRef.content = fmtHms(Date.now() - startedAt);
-    // RPM stat depends on uptime — refresh every second so it doesn't go stale.
     renderTiles();
   }, 1000);
 
-  // ─── Runtime: preview-mode fake generator OR real WebSocket ───────────────
   let ws: WebSocket | null = null;
   const sockets = new Map<number, net.Socket>();
   let previewTimer: ReturnType<typeof setInterval> | null = null;
@@ -684,7 +617,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     renderer.destroy();
   };
 
-  // ── Key input ─────────────────────────────────────────────────────────────
   const inputDone = new Promise<void>(resolve => {
     renderer.keyInput.on('keypress', (key) => {
       if (!live) return;
@@ -697,28 +629,21 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
       if (key.name === 'q' || key.name === 'Q' || key.name === 'b' || key.name === 'B') {
         shutdown(); resolve();
       }
-      // F / P / ↑↓ / ↵  are visible stubs; no-op for now.
     });
   });
 
-  // ── Preview-mode runtime ──────────────────────────────────────────────────
   if (IS_PREVIEW) {
-    // Fake URL = deterministic slug of the (target, port) tuple so re-launches
-    // show the same URL.
     const slug = crypto.createHash('sha1').update(`${setup.protocol}:${targetStr}`).digest('hex').slice(0, 4);
     const url  = setup.protocol === 'http'
       ? `https://t-${slug}.consensus.canister.software`
       : `tcp://t-${slug}.consensus.canister.software:${5000 + (parseInt(slug, 16) % 50_000)}`;
 
-    // Tiny delay so the spinner is briefly visible.
     setTimeout(() => {
       if (!live) return;
       setConnected(url, 'sfo');
-      // Seed a few entries so the table isn't empty on first paint.
       for (let i = 0; i < 8; i++) pushEntry(fakeEntry());
     }, 350);
 
-    // Drip new entries at random 400–1400ms intervals.
     const schedule = (): void => {
       const wait = 400 + Math.random() * 1000;
       previewTimer = setTimeout(() => {
@@ -730,7 +655,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     };
     schedule();
 
-    // Wobble active stream count 1..4.
     previewActiveJitter = setInterval(() => {
       if (!live) return;
       activeStreams = 1 + Math.floor(Math.random() * 4);
@@ -741,7 +665,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     return;
   }
 
-  // ── Real tunnel: server registration + WebSocket relay ───────────────────
   const tunnelDone = (async () => {
     let registration: {
       tunnelId: string; type: 'http' | 'tcp'; token: string;
@@ -803,7 +726,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
       if (!live) return;
       bytesRecv += raw.length;
 
-      // First message: JSON tunnel_open handshake
       if (firstMsg) {
         firstMsg = false;
         try {
@@ -846,17 +768,18 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
 
           const sock = net.createConnection({ host, port });
 
-          sock.on('connect', () => {
-            sockets.set(frame.streamId, sock);
-            activeStreams = sockets.size;
-            renderTiles();
-            if (frame.payload.length > 0) sock.write(frame.payload);
-          });
+
+          sockets.set(frame.streamId, sock);
+          activeStreams = sockets.size;
+          totalStreams++;
+          renderTiles();
+          if (frame.payload.length > 0) sock.write(frame.payload);
 
           sock.on('data', (data: Buffer) => {
             if (ws?.readyState === WebSocket.OPEN)
               ws.send(encodeFrame(FRAME.STREAM_DATA, frame.streamId, data));
             bytesSent += data.length;
+            renderTiles();
 
             if (setup.protocol !== 'http') return;
             const p = pending.get(frame.streamId);
@@ -892,7 +815,6 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
             }
 
             if (p.headersDone && p.contentLength >= 0 && p.bodyReceived >= p.contentLength) {
-              // Patch the most-recent log entry (this stream's) with size.
               const fresh = log[0];
               if (fresh && fresh.path === p.path) fresh.size = p.contentLength;
               renderLog();
@@ -949,6 +871,22 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
         case FRAME.STREAM_DATA: {
           const sock = sockets.get(frame.streamId);
           if (sock && !sock.destroyed) sock.write(frame.payload);
+
+          // The server sends STREAM_OPEN with an empty payload and ships the
+          // request bytes in the first STREAM_DATA frame. Parse the request
+          // line out of that frame so the activity log / latency tracking
+          // has a `pending` entry to attach the response to.
+          if (setup.protocol === 'http' && !pending.has(frame.streamId)) {
+            const parsed = parseHttpRequestLine(frame.payload);
+            if (parsed) {
+              pending.set(frame.streamId, {
+                method: parsed.method, path: parsed.path,
+                startedAt: Date.now(), gotStatus: false,
+                respBuf: Buffer.alloc(0), headersDone: false,
+                contentLength: -1, bodyReceived: 0,
+              });
+            }
+          }
           break;
         }
 

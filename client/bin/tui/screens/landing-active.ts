@@ -12,8 +12,6 @@ import type {
   MetricTunnels, MetricProxy, MetricBandwidth, MetricFreeTier,
 } from '../../lib/dashboard-state';
 
-// ─── Constants ──────────────────────────────────────────────────────────────
-
 const SPARK_BARS = ['▁','▂','▃','▄','▅','▆','▇','█'] as const;
 const SPARK_WIDTH = 8;
 const PROGRESS_WIDTH = 30;
@@ -35,11 +33,8 @@ const METRIC_COLORS = {
   freeTier:  C.emerald,
 } as const;
 
-// ─── Sparkline + progress bar rendering ─────────────────────────────────────
-
 function sparkline(values: number[], width = SPARK_WIDTH): string {
   if (values.length === 0) return ' '.repeat(width);
-  // Pad-left so a half-full history still right-aligns.
   const padded = values.length >= width
     ? values.slice(-width)
     : Array(width - values.length).fill(0).concat(values);
@@ -119,7 +114,6 @@ function makeMetricTile(
   return { box: tile, refs: { value, unit, spark, footLeft, footRight } };
 }
 
-// Per-metric updaters bake in the unit formatting and footer layout.
 function updateTunnelsTile(refs: TileRefs, m: MetricTunnels): void {
   refs.value.content     = String(m.value);
   refs.unit.content      = `/${m.max}`;
@@ -192,7 +186,6 @@ interface ServiceRowRefs {
   reqs:     TextRenderable;
   latency:  TextRenderable;
   status:   TextRenderable;
-  /** Backing snapshot row, used by the caller to identify "open this service". */
   data:     ServiceRow;
 }
 
@@ -229,8 +222,6 @@ function buildServicesPanel(
   mkHead('STATUS',   SCOLS.status);
   panel.add(header);
 
-  // Pre-allocate row refs for the maximum slot count. We mutate their
-  // contents in update() rather than rebuilding the tree.
   const rows: ServiceRowRefs[] = [];
   for (let i = 0; i < SERVICE_SLOT_COUNT; i++) {
     const row = new BoxRenderable(renderer, {
@@ -256,7 +247,6 @@ function buildServicesPanel(
 
     rows.push({
       box: row, num, badge, endpoint, reqs, latency, status,
-      // Placeholder until first update() call.
       data: { key: '', type: 'idle', endpoint: '', reqs: '—', latency: '—', status: 'idle' },
     });
   }
@@ -295,7 +285,6 @@ function updateServicesRows(rows: ServiceRowRefs[], data: ServiceRow[]): void {
                        :                        C.dim;
   }
 }
-
 
 interface ActivityRowRefs {
   box:   BoxRenderable;
@@ -365,15 +354,10 @@ function updateActivityRows(rows: ActivityRowRefs[], data: ActivityRow[]): void 
   }
 }
 
-
 export interface ActiveDashboard {
-  /** Count of selectable rows in the services table (incl. the idle row). */
   rowCount: number;
-  /** Highlight a specific row by toggling its left selection bar. */
   setSelection(idx: number): void;
-  /** Re-paint metric values, services rows, and activity feed. */
   update(snapshot: DashboardSnapshot): void;
-  /** Returns the service row at the given index, for "open service" navigation. */
   getServiceAt(idx: number): ServiceRow | null;
 }
 
@@ -404,7 +388,6 @@ export function buildActiveBody(
   const activity = buildActivityPanel(renderer, bottomRow);
   body.add(bottomRow);
 
-  // Selection state
   const setSelection = (idx: number): void => {
     const max     = services.rows.length - 1;
     const clamped = Math.max(0, Math.min(max, idx));
@@ -422,7 +405,6 @@ export function buildActiveBody(
     updateActivityRows (activity.rows,  snapshot.activity);
   };
 
-  // Initial paint + default selection
   update(initial);
   setSelection(0);
 

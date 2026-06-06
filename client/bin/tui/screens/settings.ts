@@ -1,26 +1,34 @@
-/**
- * Settings screen - wallet balances and editable user defaults.
- */
 import {
   createCliRenderer,
   BoxRenderable,
   TextRenderable,
   TextAttributes,
   type CliRenderer,
-  type RootRenderable,
 } from '@opentui/core';
 import { C } from '../../theme';
+import { makeBadge, makeKeyBar, makeTopBar, shortMiddle, termCols, upper } from '../chrome.ts';
+import {
+  makePrefsPane,
+  prefFieldsFromPrefs,
+  persistField,
+  renderPrefFields,
+  type PrefField,
+} from './settings-prefs.ts';
 import { loadConfig } from '../../lib/config.ts';
-import { loadPrefs, savePrefs, type Preferences } from '../../lib/store.ts';
-import { privateKeyToAccount } from 'viem/accounts';
-import type { Chain } from 'viem';
-import { createKeyPairSignerFromBytes } from '@solana/signers';
-import { base58 } from '@scure/base';
+import { loadPrefs } from '../../lib/store.ts';
+import {
+  resolveEvmAddress,
+  resolveEvmEthBalance,
+  resolveEvmUsdcBalance,
+  resolveSvmAddress,
+  resolveSvmSolBalance,
+  resolveSvmUsdcBalance,
+  resolveIcpPrincipal,
+  resolveIcpCanisterBalance,
+} from '../../lib/wallet-balances.ts';
 import { readFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
-
-const VERSION = '2.4.1';
 
 const EVM_NETWORKS = [
   { key: 'ethereum', label: 'Ethereum', chainId: 1,        usdc: null },
@@ -42,48 +50,7 @@ const ICP_CANISTERS = [
   { id: 'xafvr-biaaa-aaaai-aql5q-cai', symbol: 'TESTICP' },
 ] as const;
 
-const ERC20_BALANCE_ABI = [{
-  name: 'balanceOf', type: 'function', stateMutability: 'view',
-  inputs: [{ name: 'account', type: 'address' }],
-  outputs: [{ name: '', type: 'uint256' }],
-}] as const;
-
-const icrc1Idl = ({ IDL }: { IDL: any }) => IDL.Service({
-  icrc1_balance_of: IDL.Func(
-    [IDL.Record({ owner: IDL.Principal, subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)) })],
-    [IDL.Nat], ['query'],
-  ),
-  icrc1_symbol: IDL.Func([], [IDL.Text], ['query']),
-  icrc1_decimals: IDL.Func([], [IDL.Nat8], ['query']),
-});
-
 type Tab = 'wallet' | 'prefs';
-type FieldKind = 'text' | 'toggle';
-type PrefFieldId =
-  | 'displayName' | 'theme'
-  | 'defaultProxyPort' | 'defaultCacheTtl' | 'defaultBudget' | 'defaultVerbose'
-  | 'defaultRegion' | 'defaultNetwork' | 'defaultExcludeNode'
-  | 'defaultProtocol' | 'defaultTarget'
-  | 'defaultWsModel' | 'defaultWsMinutes' | 'defaultWsMegabytes';
-
-type PrefField = {
-  id: PrefFieldId;
-  label: string;
-  kind: FieldKind;
-  value: string;
-  options?: string[];
-  hint: string;
-  refs?: FieldRefs;
-  section: 'identity' | 'proxy' | 'tunnel' | 'websocket';
-};
-
-type FieldRefs = {
-  row: BoxRenderable;
-  label: TextRenderable;
-  inputBox: BoxRenderable;
-  value: TextRenderable;
-  suffix?: TextRenderable;
-};
 
 type WalletRefs = {
   walletName: TextRenderable;
@@ -102,107 +69,11 @@ type WalletRefs = {
   proxyUrl: TextRenderable;
 };
 
-function terminalColumns(): number {
-  return Math.max(96, process.stdout.columns || 168);
-}
-
-function labelText(text: string): string {
-  return text.toUpperCase();
-}
-
-function shortMiddle(value: string | undefined, front = 6, back = 4): string {
-  if (!value) return '—';
-  if (value.length <= front + back + 1) return value;
-  return `${value.slice(0, front)}…${value.slice(-back)}`;
-}
-
-function acctLabel(): string {
-  const prefs = loadPrefs();
-  const cfg = loadConfig();
-  return prefs.displayName
-    || cfg.wallet_name
-    || shortMiddle(cfg.addresses?.evm)
-    || 'guest';
-}
-
 function setupDateLabel(raw?: string): string {
   if (!raw) return '—';
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return raw;
   return date.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }).replace(',', '');
-}
-
-function makeBadge(
-  renderer: CliRenderer,
-  text: string,
-  opts: { bg?: string; fg?: string } = {},
-): BoxRenderable {
-  const bg = opts.bg ?? C.slate;
-  const box = new BoxRenderable(renderer, { flexDirection: 'row', paddingX: 1, backgroundColor: bg });
-  box.add(new TextRenderable(renderer, {
-    content: text,
-    fg: opts.fg ?? C.dark,
-    bg,
-    attributes: TextAttributes.BOLD,
-  }));
-  return box;
-}
-
-function makeTopBar(renderer: CliRenderer, root: RootRenderable): void {
-  const topBar = new BoxRenderable(renderer, {
-    width: '100%',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingX: 2,
-    paddingY: 0,
-    border: ['bottom'],
-    borderColor: C.line2,
-    backgroundColor: C.dark,
-  });
-
-  const brand = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, backgroundColor: C.dark });
-  brand.add(new TextRenderable(renderer, {
-    content: '▲ CONSENSUS',
-    fg: C.white,
-    bg: C.dark,
-    attributes: TextAttributes.BOLD,
-  }));
-  brand.add(new TextRenderable(renderer, {
-    content: 'your private network, on demand',
-    fg: C.dim,
-    bg: C.dark,
-  }));
-
-  const status = new BoxRenderable(renderer, { flexDirection: 'row', gap: 3, backgroundColor: C.dark });
-  status.add(new TextRenderable(renderer, {
-    content: '● connected',
-    fg: C.emerald,
-    bg: C.dark,
-    attributes: TextAttributes.BOLD,
-  }));
-  status.add(new TextRenderable(renderer, {
-    content: `acct ${acctLabel()}`,
-    fg: C.slate,
-    bg: C.dark,
-    attributes: TextAttributes.BOLD,
-  }));
-  status.add(new TextRenderable(renderer, {
-    content: `bal $${Number(process.env.CONSENSUS_BALANCE_USD ?? 24.18).toFixed(2)}`,
-    fg: C.slate,
-    bg: C.dark,
-    attributes: TextAttributes.BOLD,
-  }));
-  status.add(new TextRenderable(renderer, {
-    content: `v ${VERSION}`,
-    fg: C.slate,
-    bg: C.dark,
-    attributes: TextAttributes.BOLD,
-  }));
-
-  topBar.add(brand);
-  topBar.add(status);
-  root.add(topBar);
 }
 
 function makeTabs(renderer: CliRenderer, initial: Tab): {
@@ -317,7 +188,7 @@ function makeInfoCard(renderer: CliRenderer, title: string, opts: { width?: numb
     backgroundColor: C.dark,
   });
   box.add(new TextRenderable(renderer, {
-    content: labelText(title),
+    content: upper(title),
     height: 1,
     fg: C.dim,
     bg: C.dark,
@@ -357,9 +228,6 @@ function makeWalletPanel(
   height: number,
   width: number | '100%' = '100%',
 ): { box: BoxRenderable; body: BoxRenderable } {
-  // opentui paints the panel title in the border color, so we color the border
-  // the same shade as the glyph to keep the title legible against the title
-  // hue in the mock (EVM=emerald, Solana=accent, ICP=amber).
   const box = new BoxRenderable(renderer, {
     width,
     height,
@@ -392,7 +260,7 @@ function makeTableHeader(renderer: CliRenderer, columns: Array<{ label: string; 
   });
   for (const col of columns) {
     row.add(new TextRenderable(renderer, {
-      content: labelText(col.label).padEnd(col.width),
+      content: upper(col.label).padEnd(col.width),
       height: 1,
       fg: C.dim,
       bg: C.dark,
@@ -422,11 +290,6 @@ function makeTableRow(
   return { row, values };
 }
 
-/**
- * Row of the form `● LABEL  <value>` where the bullet, label, and value each
- * carry their own color (matching the panel hue, dim, and slate respectively
- * in the mock).
- */
 function makeAddrRow(
   renderer: CliRenderer,
   bulletColor: string,
@@ -452,194 +315,23 @@ function parseAmount(text: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function makeFooter(renderer: CliRenderer, tab: Tab): { box: BoxRenderable; right: TextRenderable; setTab(tab: Tab): void } {
-  const box = new BoxRenderable(renderer, {
-    width: '100%',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingX: 2,
-    paddingY: 0,
-    border: ['top'],
-    borderColor: C.line2,
-    backgroundColor: C.panel,
-  });
-  const chips = new BoxRenderable(renderer, { flexDirection: 'row', gap: 2, backgroundColor: C.panel });
-  const hints = [
-    { key: 'W', label: 'wallet' },
-    { key: 'P', label: 'preferences' },
-    { key: 'R', label: 'refresh' },
-    { key: '↑↓', label: 'navigate ·' },
-    { key: '↵←→', label: 'edit' },
-    { key: 'B', label: 'back' },
-  ];
-  for (const hint of hints) {
-    const pair = new BoxRenderable(renderer, {
-      flexDirection: 'row',
-      gap: 1,
-      alignItems: 'center',
-      backgroundColor: C.panel,
-    });
-    pair.add(makeBadge(renderer, hint.key));
-    pair.add(new TextRenderable(renderer, { content: hint.label, fg: C.slate, bg: C.panel }));
-    chips.add(pair);
-  }
-  const right = new TextRenderable(renderer, {
-    content: tab === 'wallet' ? 'SETTINGS · WALLET' : 'SETTINGS · PREFS',
-    fg: C.dim,
-    bg: C.panel,
-    attributes: TextAttributes.BOLD,
-  });
-  box.add(chips);
-  box.add(right);
-  return {
-    box,
-    right,
-    setTab(next: Tab) {
-      right.content = next === 'wallet' ? 'SETTINGS · WALLET' : 'SETTINGS · PREFS';
-    },
-  };
-}
+const FOOTER_HINTS = [
+  { key: 'W', label: 'wallet' },
+  { key: 'P', label: 'preferences' },
+  { key: 'R', label: 'refresh' },
+  { key: '↑↓', label: 'navigate ·' },
+  { key: '↵←→', label: 'edit' },
+  { key: 'B', label: 'back' },
+];
 
-async function resolveEvmAddress(privateKey: string): Promise<`0x${string}` | '(invalid key)'> {
-  try {
-    return privateKeyToAccount(
-      (privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`) as `0x${string}`,
-    ).address;
-  } catch {
-    return '(invalid key)';
-  }
-}
-
-async function getEvmClient(chainId: number) {
-  const { createPublicClient, http } = await import('viem');
-  const chains = await import('viem/chains');
-  const map: Record<number, Chain> = {
-    1: chains.mainnet,
-    8453: chains.base,
-    84532: chains.baseSepolia,
-    11155111: chains.sepolia,
-  };
-  const chain = map[chainId];
-  if (!chain) throw new Error('unsupported chain');
-  return createPublicClient({ chain, transport: http() });
-}
-
-async function resolveEvmEthBalance(address: `0x${string}`, chainId: number): Promise<string> {
-  try {
-    const { formatEther } = await import('viem');
-    const client = await getEvmClient(chainId);
-    const bal = await client.getBalance({ address });
-    return `${parseFloat(formatEther(bal)).toFixed(6)} ETH`;
-  } catch {
-    return '—';
-  }
-}
-
-async function resolveEvmUsdcBalance(
-  address: `0x${string}`,
-  chainId: number,
-  usdcAddress: `0x${string}`,
-): Promise<string> {
-  try {
-    const { formatUnits } = await import('viem');
-    const client = await getEvmClient(chainId);
-    const bal = await client.readContract({
-      address: usdcAddress,
-      abi: ERC20_BALANCE_ABI,
-      functionName: 'balanceOf',
-      args: [address],
-    }) as bigint;
-    return `${parseFloat(formatUnits(bal, 6)).toFixed(2)} USDC`;
-  } catch {
-    return '—';
-  }
-}
-
-async function resolveSvmAddress(privateKey: string): Promise<string> {
-  try {
-    const signer = await createKeyPairSignerFromBytes(base58.decode(privateKey));
-    return signer.address;
-  } catch {
-    return '(invalid key)';
-  }
-}
-
-async function resolveSvmSolBalance(address: string, rpcUrl: string): Promise<string> {
-  try {
-    const { createSolanaRpc } = await import('@solana/rpc');
-    const result = await (createSolanaRpc(rpcUrl).getBalance as Function)(address).send();
-    const lamports: bigint =
-      result !== null && typeof result === 'object' && 'value' in result
-        ? (result as { value: bigint }).value
-        : (result as bigint);
-    return `${(Number(lamports) / 1e9).toFixed(6)} SOL`;
-  } catch {
-    return '—';
-  }
-}
-
-async function resolveSvmUsdcBalance(address: string, rpcUrl: string, usdcMint: string): Promise<string> {
-  try {
-    const res = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'getTokenAccountsByOwner',
-        params: [address, { mint: usdcMint }, { encoding: 'jsonParsed' }],
-      }),
-    });
-    const data = await res.json() as {
-      result?: { value?: Array<{ account?: { data?: { parsed?: { info?: { tokenAmount?: { uiAmount?: number } } } } } }> };
-    };
-    const amount = data.result?.value?.[0]?.account?.data?.parsed?.info?.tokenAmount?.uiAmount ?? 0;
-    return `${Number(amount).toFixed(2)} USDC`;
-  } catch {
-    return '—';
-  }
-}
-
-async function resolveIcpPrincipal(pemPath: string): Promise<string> {
-  try {
-    const pem = readFileSync(resolvePath(pemPath.replace(/^~/, homedir())), 'utf8');
-    const { Secp256k1KeyIdentity } = await import('@dfinity/identity-secp256k1');
-    return Secp256k1KeyIdentity.fromPem(pem).getPrincipal().toText();
-  } catch {
-    return '(invalid PEM)';
-  }
-}
-
-async function resolveIcpCanisterBalance(
-  Actor: any,
-  agent: unknown,
-  principal: unknown,
-  canisterId: string,
-  fallback: string,
-): Promise<{ symbol: string; formatted: string }> {
-  try {
-    const ledger = Actor.createActor(icrc1Idl, { agent, canisterId }) as {
-      icrc1_balance_of(a: { owner: unknown; subaccount: never[] }): Promise<bigint>;
-      icrc1_symbol(): Promise<string>;
-      icrc1_decimals(): Promise<number>;
-    };
-    const [balance, symbol, decimals] = await Promise.all([
-      ledger.icrc1_balance_of({ owner: principal, subaccount: [] }),
-      ledger.icrc1_symbol(),
-      ledger.icrc1_decimals(),
-    ]);
-    const sym = (symbol || fallback).trim();
-    const dec = Number.isFinite(Number(decimals)) ? Number(decimals) : 8;
-    return { symbol: sym, formatted: `${(Number(balance) / 10 ** dec).toFixed(4)}` };
-  } catch {
-    return { symbol: fallback, formatted: '—' };
-  }
+function footerLabel(tab: Tab): string {
+  return tab === 'wallet' ? 'SETTINGS · WALLET' : 'SETTINGS · PREFS';
 }
 
 function makeWalletPane(renderer: CliRenderer): { pane: BoxRenderable; refs: WalletRefs } {
   const cfg = loadConfig();
   const lease = cfg.leased_node;
-  const cols = terminalColumns();
+  const cols = termCols();
   const contentWidth = Math.max(88, cols - 4);
   const gap = 2;
   const cardWidth = Math.max(20, Math.floor((contentWidth - gap * 3) / 4));
@@ -803,7 +495,7 @@ function makeWalletPane(renderer: CliRenderer): { pane: BoxRenderable; refs: Wal
   });
   proxyGroup.add(proxyUrl);
   proxyGroup.add(new TextRenderable(renderer, { content: '·', fg: C.dim, bg: C.dark }));
-  proxyGroup.add(makeBadge(renderer, 'R'));
+  proxyGroup.add(makeBadge(renderer, 'R').box);
   proxyGroup.add(new TextRenderable(renderer, { content: 'refresh', fg: C.slate, bg: C.dark }));
   summary.add(spendGroup);
   summary.add(proxyGroup);
@@ -839,371 +531,6 @@ function makeWalletPane(renderer: CliRenderer): { pane: BoxRenderable; refs: Wal
   };
 }
 
-function networkPrefToOption(caip2: string | undefined): string {
-  if (!caip2) return 'Base';
-  if (caip2.startsWith('solana:')) return 'Solana';
-  return 'Base';
-}
-
-function networkOptionToPref(option: string): string {
-  return option === 'Solana'
-    ? 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'
-    : 'eip155:8453';
-}
-
-function makeInputField(
-  renderer: CliRenderer,
-  parent: BoxRenderable,
-  label: string,
-  field: PrefField,
-  opts: { width?: number; suffix?: string; labelWidth?: number } = {},
-): FieldRefs {
-  const row = new BoxRenderable(renderer, {
-    width: '100%',
-    flexDirection: 'row',
-    gap: 2,
-    alignItems: 'center',
-    backgroundColor: C.dark,
-  });
-  const labelRef = new TextRenderable(renderer, {
-    content: label.padEnd(opts.labelWidth ?? 15),
-    height: 1,
-    fg: C.dim,
-    bg: C.dark,
-    attributes: TextAttributes.BOLD,
-  });
-  const inputBox = new BoxRenderable(renderer, {
-    width: opts.width ?? 22,
-    flexDirection: 'row',
-    paddingX: 1,
-    border: true,
-    borderStyle: 'rounded',
-    borderColor: C.line2,
-    backgroundColor: C.panel,
-  });
-  const value = new TextRenderable(renderer, {
-    content: field.value || ' ',
-    height: 1,
-    fg: field.value ? C.slate : C.dim,
-    bg: C.panel,
-    attributes: TextAttributes.BOLD,
-  });
-  inputBox.add(value);
-  row.add(labelRef);
-  row.add(inputBox);
-  let suffixRef: TextRenderable | undefined;
-  if (opts.suffix) {
-    suffixRef = new TextRenderable(renderer, {
-      content: opts.suffix,
-      height: 1,
-      fg: C.dim,
-      bg: C.dark,
-      attributes: TextAttributes.BOLD,
-    });
-    row.add(suffixRef);
-  }
-  parent.add(row);
-  return { row, label: labelRef, inputBox, value, suffix: suffixRef };
-}
-
-function makeToggleField(
-  renderer: CliRenderer,
-  parent: BoxRenderable,
-  label: string,
-  field: PrefField,
-  opts: { suffix?: string; labelWidth?: number } = {},
-): FieldRefs {
-  const row = new BoxRenderable(renderer, {
-    width: '100%',
-    flexDirection: 'row',
-    gap: 2,
-    alignItems: 'center',
-    backgroundColor: C.dark,
-  });
-  const labelRef = new TextRenderable(renderer, {
-    content: label.padEnd(opts.labelWidth ?? 15),
-    height: 1,
-    fg: C.dim,
-    bg: C.dark,
-    attributes: TextAttributes.BOLD,
-  });
-  const inputBox = new BoxRenderable(renderer, {
-    flexDirection: 'row',
-    gap: 1,
-    alignItems: 'center',
-    backgroundColor: C.dark,
-  });
-  const value = new TextRenderable(renderer, { content: '', fg: C.slate, bg: C.dark });
-  inputBox.add(value);
-  row.add(labelRef);
-  row.add(inputBox);
-  let suffixRef: TextRenderable | undefined;
-  if (opts.suffix) {
-    suffixRef = new TextRenderable(renderer, {
-      content: opts.suffix,
-      height: 1,
-      fg: C.dim,
-      bg: C.dark,
-      attributes: TextAttributes.BOLD,
-    });
-    row.add(suffixRef);
-  }
-  parent.add(row);
-  return { row, label: labelRef, inputBox, value, suffix: suffixRef };
-}
-
-function makeSectionHeader(
-  renderer: CliRenderer,
-  parent: BoxRenderable,
-  title: string,
-  innerWidth: number,
-): void {
-  const row = new BoxRenderable(renderer, {
-    width: '100%',
-    height: 1,
-    flexDirection: 'row',
-    gap: 1,
-    backgroundColor: C.dark,
-  });
-  row.add(new TextRenderable(renderer, {
-    content: labelText(title),
-    height: 1,
-    fg: C.dim,
-    bg: C.dark,
-    attributes: TextAttributes.BOLD,
-  }));
-  const dashes = Math.max(8, innerWidth - title.length - 2);
-  row.add(new TextRenderable(renderer, {
-    content: '─'.repeat(dashes),
-    height: 1,
-    fg: C.line2,
-    bg: C.dark,
-  }));
-  parent.add(row);
-}
-
-function makePrefPair(
-  renderer: CliRenderer,
-  parent: BoxRenderable,
-  leftWidth: number,
-  rightWidth: number,
-): { left: BoxRenderable; right: BoxRenderable } {
-  const row = new BoxRenderable(renderer, {
-    width: '100%',
-    flexDirection: 'row',
-    gap: 4,
-    alignItems: 'center',
-    backgroundColor: C.dark,
-  });
-  const left = new BoxRenderable(renderer, {
-    width: leftWidth,
-    flexDirection: 'column',
-    backgroundColor: C.dark,
-  });
-  const right = new BoxRenderable(renderer, {
-    width: rightWidth,
-    flexDirection: 'column',
-    backgroundColor: C.dark,
-  });
-  row.add(left);
-  row.add(right);
-  parent.add(row);
-  return { left, right };
-}
-
-function makePrefsPane(renderer: CliRenderer, fields: PrefField[]): {
-  pane: BoxRenderable;
-  hint: TextRenderable;
-} {
-  const cols = terminalColumns();
-  const contentWidth = Math.max(88, cols - 8);
-  const panelInner = contentWidth - 4;
-  const leftWidth = Math.max(42, Math.floor((panelInner - 4) / 2));
-  const rightWidth = Math.max(42, panelInner - leftWidth - 4);
-  const pane = new BoxRenderable(renderer, {
-    id: 'settings-prefs-pane',
-    width: '100%',
-    flexGrow: 1,
-    flexDirection: 'column',
-    paddingX: 2,
-    paddingTop: 1,
-    backgroundColor: C.dark,
-  });
-
-  const panel = new BoxRenderable(renderer, {
-    width: '100%',
-    flexGrow: 1,
-    flexDirection: 'column',
-    paddingX: 2,
-    paddingY: 1,
-    border: true,
-    borderStyle: 'single',
-    borderColor: C.line2,
-    title: ' DEFAULTS ',
-    backgroundColor: C.dark,
-  });
-
-  const byId = Object.fromEntries(fields.map((f) => [f.id, f])) as Record<PrefFieldId, PrefField>;
-
-  makeSectionHeader(renderer, panel, 'Identity', panelInner);
-  let pair = makePrefPair(renderer, panel, leftWidth, rightWidth);
-  byId.displayName.refs = makeInputField(renderer, pair.left, 'Display name', byId.displayName, { width: 24 });
-  byId.theme.refs = makeToggleField(renderer, pair.right, 'Theme', byId.theme);
-
-  makeSectionHeader(renderer, panel, 'Proxy defaults', panelInner);
-  pair = makePrefPair(renderer, panel, leftWidth, rightWidth);
-  byId.defaultProxyPort.refs = makeInputField(renderer, pair.left, 'Proxy port', byId.defaultProxyPort, { width: 13 });
-  byId.defaultCacheTtl.refs = makeInputField(renderer, pair.right, 'Cache TTL', byId.defaultCacheTtl, { width: 13, suffix: 'sec' });
-  pair = makePrefPair(renderer, panel, leftWidth, rightWidth);
-  byId.defaultBudget.refs = makeInputField(renderer, pair.left, 'Spend limit', byId.defaultBudget, { width: 13, suffix: 'USD / session' });
-  byId.defaultVerbose.refs = makeToggleField(renderer, pair.right, 'Verbose', byId.defaultVerbose);
-  pair = makePrefPair(renderer, panel, leftWidth, rightWidth);
-  byId.defaultRegion.refs = makeInputField(renderer, pair.left, 'Region', byId.defaultRegion, { width: 22, suffix: 'blank = auto' });
-  byId.defaultNetwork.refs = makeToggleField(renderer, pair.right, 'Network', byId.defaultNetwork, { suffix: 'USDC' });
-  pair = makePrefPair(renderer, panel, leftWidth, rightWidth);
-  byId.defaultExcludeNode.refs = makeInputField(renderer, pair.left, 'Exclude node', byId.defaultExcludeNode, { width: 34 });
-
-  makeSectionHeader(renderer, panel, 'Tunnel defaults', panelInner);
-  pair = makePrefPair(renderer, panel, leftWidth, rightWidth);
-  byId.defaultProtocol.refs = makeToggleField(renderer, pair.left, 'Tunnel proto', byId.defaultProtocol);
-  byId.defaultTarget.refs = makeInputField(renderer, pair.right, 'Tunnel target', byId.defaultTarget, { width: 22 });
-
-  makeSectionHeader(renderer, panel, 'Websocket defaults', panelInner);
-  pair = makePrefPair(renderer, panel, leftWidth, rightWidth);
-  byId.defaultWsModel.refs = makeToggleField(renderer, pair.left, 'WS model', byId.defaultWsModel);
-  byId.defaultWsMinutes.refs = makeInputField(renderer, pair.right, 'WS duration', byId.defaultWsMinutes, { width: 13, suffix: 'min' });
-  pair = makePrefPair(renderer, panel, leftWidth, rightWidth);
-  byId.defaultWsMegabytes.refs = makeInputField(renderer, pair.left, 'WS data', byId.defaultWsMegabytes, { width: 13, suffix: 'MB' });
-
-  pane.add(panel);
-
-  const hintBox = new BoxRenderable(renderer, {
-    width: '100%',
-    height: 3,
-    flexDirection: 'row',
-    paddingX: 2,
-    marginTop: 1,
-    border: true,
-    borderStyle: 'single',
-    borderColor: C.line2,
-    backgroundColor: C.panel,
-  });
-  const hint = new TextRenderable(renderer, {
-    content: '',
-    fg: C.slate,
-    bg: C.panel,
-    attributes: TextAttributes.BOLD,
-  });
-  hintBox.add(hint);
-  pane.add(hintBox);
-  return { pane, hint };
-}
-
-function prefFieldsFromPrefs(prefs: Preferences): PrefField[] {
-  return [
-    { id: 'displayName', value: prefs.displayName, kind: 'text', label: 'Display name', hint: 'Display name · shown in the top-bar acct chip and the landing welcome message', section: 'identity' },
-    { id: 'theme', value: prefs.theme, kind: 'toggle', options: ['auto', 'dark', 'light'], label: 'Theme', hint: 'Theme · auto follows system appearance; restart to fully apply theme changes', section: 'identity' },
-    { id: 'defaultProxyPort', value: String(prefs.defaultProxyPort), kind: 'text', label: 'Proxy port', hint: 'Proxy port · default local proxy listen port', section: 'proxy' },
-    { id: 'defaultCacheTtl', value: String(prefs.defaultCacheTtl || 300), kind: 'text', label: 'Cache TTL', hint: 'Cache TTL · seconds, 0 disables caching', section: 'proxy' },
-    { id: 'defaultBudget', value: prefs.defaultBudget != null ? String(prefs.defaultBudget) : '5.00', kind: 'text', label: 'Spend limit', hint: 'Spend limit · USD cap per paid proxy session', section: 'proxy' },
-    { id: 'defaultVerbose', value: prefs.defaultVerbose ? 'on' : 'off', kind: 'toggle', options: ['off', 'on'], label: 'Verbose', hint: 'Verbose · add Consensus metadata headers by default', section: 'proxy' },
-    { id: 'defaultRegion', value: prefs.defaultRegion ?? 'us-west-1', kind: 'text', label: 'Region', hint: 'Region · blank means automatic node selection', section: 'proxy' },
-    { id: 'defaultNetwork', value: networkPrefToOption(prefs.defaultNetwork), kind: 'toggle', options: ['Base', 'Solana'], label: 'Network', hint: 'Network · default payment network family for USDC', section: 'proxy' },
-    { id: 'defaultExcludeNode', value: prefs.defaultExcludeNode ?? '', kind: 'text', label: 'Exclude node', hint: 'Exclude node · node domain to skip by default', section: 'proxy' },
-    { id: 'defaultProtocol', value: prefs.defaultProtocol, kind: 'toggle', options: ['http', 'tcp'], label: 'Tunnel proto', hint: 'Tunnel proto · default tunnel protocol', section: 'tunnel' },
-    { id: 'defaultTarget', value: prefs.defaultTarget ?? 'localhost', kind: 'text', label: 'Tunnel target', hint: 'Tunnel target · pre-fill target field in new tunnels', section: 'tunnel' },
-    { id: 'defaultWsModel', value: prefs.defaultWsModel, kind: 'toggle', options: ['hybrid', 'time', 'data'], label: 'WS model', hint: 'WS model · default WebSocket billing model', section: 'websocket' },
-    { id: 'defaultWsMinutes', value: String(prefs.defaultWsMinutes || 60), kind: 'text', label: 'WS duration', hint: 'WS duration · default WebSocket session minutes', section: 'websocket' },
-    { id: 'defaultWsMegabytes', value: String(prefs.defaultWsMegabytes || 500), kind: 'text', label: 'WS data', hint: 'WS data · default WebSocket data allowance in MB', section: 'websocket' },
-  ];
-}
-
-function persistField(field: PrefField): void {
-  const raw = field.value.trim();
-  switch (field.id) {
-    case 'defaultProxyPort':
-    case 'defaultCacheTtl':
-    case 'defaultWsMinutes':
-    case 'defaultWsMegabytes': {
-      const n = Number.parseInt(raw, 10);
-      if (!Number.isNaN(n)) savePrefs({ [field.id]: n });
-      break;
-    }
-    case 'defaultBudget': {
-      const n = Number.parseFloat(raw);
-      savePrefs({ defaultBudget: Number.isNaN(n) || raw === '' ? undefined : n });
-      break;
-    }
-    case 'defaultVerbose':
-      savePrefs({ defaultVerbose: raw === 'on' });
-      break;
-    case 'defaultProtocol':
-      savePrefs({ defaultProtocol: raw === 'tcp' ? 'tcp' : 'http' });
-      break;
-    case 'defaultWsModel':
-      savePrefs({ defaultWsModel: raw === 'time' || raw === 'data' ? raw : 'hybrid' });
-      break;
-    case 'theme':
-      savePrefs({ theme: raw === 'dark' || raw === 'light' ? raw : 'auto' });
-      break;
-    case 'defaultNetwork':
-      savePrefs({ defaultNetwork: networkOptionToPref(raw) });
-      break;
-    case 'displayName':
-    case 'defaultRegion':
-    case 'defaultExcludeNode':
-    case 'defaultTarget':
-      savePrefs({ [field.id]: raw || undefined });
-      break;
-  }
-}
-
-function renderToggle(renderer: CliRenderer, field: PrefField, focused: boolean): void {
-  const refs = field.refs;
-  if (!refs) return;
-  while (refs.inputBox.getChildrenCount() > 0) {
-    const child = refs.inputBox.getChildren()[0];
-    if (!child) break;
-    refs.inputBox.remove(child.id);
-  }
-  for (const opt of field.options ?? []) {
-    const active = field.value === opt;
-    const bg = active ? (focused ? C.accent : C.emerald) : C.line2;
-    const chip = new BoxRenderable(renderer, {
-      flexDirection: 'row',
-      paddingX: 1,
-      backgroundColor: bg,
-    });
-    chip.add(new TextRenderable(renderer, {
-      content: opt,
-      height: 1,
-      fg: active ? C.dark : C.slate,
-      bg,
-      attributes: TextAttributes.BOLD,
-    }));
-    refs.inputBox.add(chip);
-  }
-}
-
-function renderPrefFields(renderer: CliRenderer, fields: PrefField[], cursor: number, editBuf: string | null, hint: TextRenderable): void {
-  for (let i = 0; i < fields.length; i++) {
-    const field = fields[i]!;
-    const refs = field.refs;
-    if (!refs) continue;
-    const focused = i === cursor;
-    refs.label.fg = focused ? C.white : C.dim;
-    if (field.kind === 'toggle') {
-      renderToggle(renderer, field, focused);
-    } else {
-      refs.inputBox.borderColor = focused ? C.accent : C.line2;
-      const raw = editBuf !== null && focused ? `${editBuf}█` : field.value;
-      refs.value.content = raw || ' ';
-      refs.value.fg = raw ? C.white : C.dim;
-    }
-  }
-  hint.content = fields[cursor]?.hint ?? '';
-}
-
 async function refreshWallet(refs: WalletRefs, live: () => boolean): Promise<void> {
   const cfg = loadConfig();
   const evmKey = process.env.CONSENSUS_EVM_KEY;
@@ -1216,7 +543,6 @@ async function refreshWallet(refs: WalletRefs, live: () => boolean): Promise<voi
     ref.content = value;
     ref.fg = fg;
   };
-  // Active monetary values render emerald; placeholders/zero stay dim.
   const setBal = (ref: TextRenderable, value: string): void => {
     setVal(ref, value, value === '—' ? C.dim : C.emerald);
   };
@@ -1341,7 +667,7 @@ export async function showSettings(): Promise<'back'> {
   shell.add(walletHeader.box);
   shell.add(wallet.pane);
 
-  const footer = makeFooter(renderer, activeTab);
+  const footer = makeKeyBar(renderer, FOOTER_HINTS, footerLabel(activeTab));
   root.add(footer.box);
 
   let live = true;
@@ -1367,7 +693,7 @@ export async function showSettings(): Promise<'back'> {
     }
     walletHeader.tabs.setActive(tab);
     prefsHeader.tabs.setActive(tab);
-    footer.setTab(tab);
+    footer.right.content = footerLabel(tab);
   };
 
   void refreshWallet(wallet.refs, () => live);

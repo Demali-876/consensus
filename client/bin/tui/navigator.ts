@@ -1,10 +1,3 @@
-/**
- * TUI Navigator
- *
- * Single source of truth for all screen routes.
- * To add a new screen: import it here and add one entry to ROUTES.
- */
-
 import { showLanding, type LandingAction } from './screens/landing';
 import { showTunnelSetup } from './screens/tunnel/setup';
 import { showProxy }      from './screens/proxy/index';
