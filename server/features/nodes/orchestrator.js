@@ -1,5 +1,6 @@
 import crypto                from 'crypto';
 import { isIPv4, isIPv6 }   from 'node:net';
+import rateLimit             from 'express-rate-limit';
 import { paymentMiddleware } from '@x402/express';
 import { provisionNodeDNS }  from '../../utils/dns.js';
 import NodeStore             from '../../data/node_store.js';
@@ -7,6 +8,29 @@ import { observeNode }       from '../ip-pool/observer.ts';
 import { classifyIpRegion }  from '../../utils/region.ts';
 import { assertEmailVerification, isValidEmail, startEmailVerification, verifyEmailCode } from '../../utils/email-verification.ts';
 
+const emailStartLimiter = rateLimit({
+  windowMs:          10 * 60_000,
+  max:               5,
+  standardHeaders:   true,
+  legacyHeaders:     false,
+  message:           { error: 'Too Many Requests' },
+});
+
+const emailVerifyLimiter = rateLimit({
+  windowMs:          10 * 60_000,
+  max:               10,
+  standardHeaders:   true,
+  legacyHeaders:     false,
+  message:           { error: 'Too Many Requests' },
+});
+
+const joinLimiter = rateLimit({
+  windowMs:          10 * 60_000,
+  max:               10,
+  standardHeaders:   true,
+  legacyHeaders:     false,
+  message:           { error: 'Too Many Requests' },
+});
 
 function requireLoopback(req, res, next) {
   const remote = req.socket.remoteAddress ?? '';
@@ -171,7 +195,7 @@ function clearCompletedUpdateState(nodeId, version, source) {
 export function registerNodes(app, httpsServer, x402Server, config) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
-  app.post('/node/email/start', async (req, res) => {
+  app.post('/node/email/start', emailStartLimiter, async (req, res) => {
     try {
       const email = String(req.body?.email ?? '').trim();
       const verification = await startEmailVerification(email);
@@ -181,7 +205,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
     }
   });
 
-  app.post('/node/email/verify', async (req, res) => {
+  app.post('/node/email/verify', emailVerifyLimiter, async (req, res) => {
     try {
       const verified = verifyEmailCode({
         verification_id: String(req.body?.verification_id ?? ''),
@@ -223,6 +247,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
 
   app.post(
     '/node/join',
+    joinLimiter,
     ...joinHandlers,
     async (req, res) => {
       const startTime = Date.now();
