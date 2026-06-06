@@ -442,6 +442,7 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   let requestCount = 0;
   let bytesSent    = 0;
   let bytesRecv    = 0;
+  let totalStreams = 0;
   let tunnelPublicUrl = '';
   let activeStreams   = 0;
   const recentLatencies: number[] = [];
@@ -510,12 +511,14 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
 
     actTile.value.content = String(activeStreams);
     actTile.unit.content  = activeStreams === 1 ? 'stream' : 'streams';
-    actTile.meta.content  = 'live connections';
+    actTile.meta.content  = totalStreams > 0
+      ? `${fmtCount(totalStreams)} total · live connections`
+      : 'live connections';
 
-    const sentMb = bytesSent / 1_048_576;
-    sntTile.value.content = sentMb >= 10 ? sentMb.toFixed(1) : sentMb.toFixed(2);
-    sntTile.unit.content  = 'MB';
-    sntTile.meta.content  = `↓ ${fmtBytes(bytesRecv).replace(/^(\d+(?:\.\d+)?) /, '$1 ')} recv`;
+    const sentParts = fmtBytes(bytesSent).split(' ');
+    sntTile.value.content = sentParts[0] ?? '0';
+    sntTile.unit.content  = sentParts[1] ?? 'B';
+    sntTile.meta.content  = `↓ ${fmtBytes(bytesRecv)} recv`;
 
     if (recentStatuses.length === 0) {
       errTile.value.content = '0.0';
@@ -765,17 +768,18 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
 
           const sock = net.createConnection({ host, port });
 
-          sock.on('connect', () => {
-            sockets.set(frame.streamId, sock);
-            activeStreams = sockets.size;
-            renderTiles();
-            if (frame.payload.length > 0) sock.write(frame.payload);
-          });
+
+          sockets.set(frame.streamId, sock);
+          activeStreams = sockets.size;
+          totalStreams++;
+          renderTiles();
+          if (frame.payload.length > 0) sock.write(frame.payload);
 
           sock.on('data', (data: Buffer) => {
             if (ws?.readyState === WebSocket.OPEN)
               ws.send(encodeFrame(FRAME.STREAM_DATA, frame.streamId, data));
             bytesSent += data.length;
+            renderTiles();
 
             if (setup.protocol !== 'http') return;
             const p = pending.get(frame.streamId);
@@ -867,6 +871,22 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
         case FRAME.STREAM_DATA: {
           const sock = sockets.get(frame.streamId);
           if (sock && !sock.destroyed) sock.write(frame.payload);
+
+          // The server sends STREAM_OPEN with an empty payload and ships the
+          // request bytes in the first STREAM_DATA frame. Parse the request
+          // line out of that frame so the activity log / latency tracking
+          // has a `pending` entry to attach the response to.
+          if (setup.protocol === 'http' && !pending.has(frame.streamId)) {
+            const parsed = parseHttpRequestLine(frame.payload);
+            if (parsed) {
+              pending.set(frame.streamId, {
+                method: parsed.method, path: parsed.path,
+                startedAt: Date.now(), gotStatus: false,
+                respBuf: Buffer.alloc(0), headersDone: false,
+                contentLength: -1, bodyReceived: 0,
+              });
+            }
+          }
           break;
         }
 

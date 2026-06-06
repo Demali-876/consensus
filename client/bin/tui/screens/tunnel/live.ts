@@ -393,13 +393,11 @@ export async function runTunnel(type: 'http' | 'tcp', targetRaw: string): Promis
 
         const sock = net.createConnection({ host: targetHost, port: targetPort });
 
-        sock.on('connect', () => {
-          sockets.set(frame.streamId, sock);
-          if (frame.payload.length > 0) {
-            sock.write(frame.payload);
-            stats.bytesSent += frame.payload.length;
-          }
-        });
+        sockets.set(frame.streamId, sock);
+        if (frame.payload.length > 0) {
+          sock.write(frame.payload);
+          stats.bytesSent += frame.payload.length;
+        }
 
         sock.on('data', (data: Buffer) => {
           stats.bytesRecv += data.length;
