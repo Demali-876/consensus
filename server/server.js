@@ -22,6 +22,7 @@ import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 import { registerUpdater } from './updater.ts';
 import { assertEmailVerificationEnv } from './utils/email-verification.ts';
+import { corsOptions } from './utils/origin.ts';
 import { log } from './utils/log.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -68,7 +69,7 @@ const app = express();
 app.set('trust proxy', 1);
 
 app.use(helmet());
-app.use(cors());
+app.use(cors(corsOptions()));
 app.use(express.json({ limit: '10mb' }));
 registerWhitepaperSignup(app);
 registerUpdater(app, { adminKey: process.env.ADMIN_KEY });

@@ -4,6 +4,7 @@ import type { Express } from 'express';
 import type { Server } from 'http';
 import NodeStore from '../../data/node_store.js';
 import { log } from '../../utils/log.ts';
+import { isOriginAllowed } from '../../utils/origin.ts';
 import { FRAME_TYPE, type FrameType } from './frames.ts';
 import { acceptClientHandshake, createHandshakeReject, decodeHandshakeMessage, encodeHandshakeMessage } from './handshake.ts';
 import { MESSAGE_TYPE, createErrorMessage, decodeMessage, encodeMessage, nowSeconds, type EvalAction, type EvalResponseMessage, type HelloMessage, type ProxyResponseMessage, type TunnelMessage, type UpdateReadyMessage } from './messages.ts';
@@ -187,6 +188,13 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     if (url.pathname !== '/node/tunnel') return;
+
+    if (!isOriginAllowed(req.headers.origin)) {
+      log.warn('node-tunnel', 'upgrade-rejected', { reason: 'origin not allowed', origin: req.headers.origin ?? null });
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
 
     log.info('node-tunnel', 'upgrade-received', {
       remote: req.socket.remoteAddress,
