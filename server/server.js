@@ -34,6 +34,14 @@ const publicLimiter = rateLimit({
   message:           { error: 'Too Many Requests' },
 });
 
+const proxyLimiter = rateLimit({
+  windowMs:          60_000,
+  max:               30,
+  standardHeaders:   true,
+  legacyHeaders:     false,
+  message:           { error: 'Too Many Requests' },
+});
+
 const PORT = 8080;
 const FACILITATOR_URL = process.env.FACILITATOR_URL;
 const EVM_PAY_TO = process.env.EVM_PAY_TO;
@@ -142,7 +150,7 @@ app.get('/stats', publicLimiter, (_req, res) => {
   });
 });
 
-app.post('/proxy', async (req, res, next) => {
+app.post('/proxy', proxyLimiter, async (req, res, next) => {
   const { target_url, method = 'GET', headers = {}, body } = req.body;
   if (!target_url) return next();
 

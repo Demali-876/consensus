@@ -1,7 +1,63 @@
 import crypto from "crypto";
 import type { Express, Request, Response } from "express";
+import rateLimit from "express-rate-limit";
 import NodeStore from "./data/node_store.js";
 import { log } from "./utils/log.ts";
+
+const ADMIN_LOCKOUT_THRESHOLD = 5;
+const ADMIN_LOCKOUT_WINDOW_MS = 15 * 60_000;
+const ADMIN_LOCKOUT_DURATION_MS = 15 * 60_000;
+const ADMIN_SWEEP_INTERVAL_MS = 60_000;
+
+interface AdminAttemptState {
+  failures: number;
+  windowStartedAt: number;
+  lockedUntil: number;
+}
+
+const adminAttempts = new Map<string, AdminAttemptState>();
+
+const adminSweepTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [ip, state] of adminAttempts) {
+    if (state.lockedUntil < now && now - state.windowStartedAt > ADMIN_LOCKOUT_WINDOW_MS) {
+      adminAttempts.delete(ip);
+    }
+  }
+}, ADMIN_SWEEP_INTERVAL_MS);
+adminSweepTimer.unref();
+
+function adminLockedUntil(ip: string): number | null {
+  const state = adminAttempts.get(ip);
+  if (!state) return null;
+  if (state.lockedUntil > Date.now()) return state.lockedUntil;
+  return null;
+}
+
+function recordAdminFailure(ip: string): void {
+  const now = Date.now();
+  const state = adminAttempts.get(ip);
+  if (!state || now - state.windowStartedAt > ADMIN_LOCKOUT_WINDOW_MS) {
+    adminAttempts.set(ip, { failures: 1, windowStartedAt: now, lockedUntil: 0 });
+    return;
+  }
+  state.failures += 1;
+  if (state.failures >= ADMIN_LOCKOUT_THRESHOLD) {
+    state.lockedUntil = now + ADMIN_LOCKOUT_DURATION_MS;
+  }
+}
+
+function clearAdminFailures(ip: string): void {
+  adminAttempts.delete(ip);
+}
+
+const adminLimiter = rateLimit({
+  windowMs:        15 * 60_000,
+  max:             10,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { error: "Too Many Requests" },
+});
 
 interface NodeReleaseManifest {
   product: "consensus-node";
@@ -176,16 +232,28 @@ export function registerUpdater(app: Express, config: UpdaterConfig = {}): void 
     }
   });
 
-  app.post("/admin/manifest", (req: Request, res: Response) => {
+  app.post("/admin/manifest", adminLimiter, (req: Request, res: Response) => {
+    const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
     try {
       if (!config.adminKey) {
         log.error("updater", "manifest-rejected", { reason: "admin key not configured" });
         return res.status(503).json({ error: "Admin key not configured" });
       }
+
+      const lockedUntil = adminLockedUntil(ip);
+      if (lockedUntil != null) {
+        const retryAfterSec = Math.ceil((lockedUntil - Date.now()) / 1000);
+        log.warn("updater", "manifest-rejected", { reason: "locked out", ip, retry_after_s: retryAfterSec });
+        res.set("Retry-After", String(retryAfterSec));
+        return res.status(429).json({ error: "Too many invalid admin key attempts. Try again later." });
+      }
+
       if (!isAdminKeyValid(req.headers["x-admin-key"], config.adminKey)) {
-        log.warn("updater", "manifest-rejected", { reason: "invalid admin key" });
+        recordAdminFailure(ip);
+        log.warn("updater", "manifest-rejected", { reason: "invalid admin key", ip });
         return res.status(403).json({ error: "Invalid admin key" });
       }
+      clearAdminFailures(ip);
 
       const { manifest, required } = req.body as { manifest?: NodeReleaseManifest; required?: boolean };
       if (!manifest?.version) {
