@@ -8,9 +8,17 @@ import { observeNode }       from '../ip-pool/observer.ts';
 import { classifyIpRegion }  from '../../utils/region.ts';
 import { assertEmailVerification, isValidEmail, startEmailVerification, verifyEmailCode } from '../../utils/email-verification.ts';
 
-const emailLimiter = rateLimit({
+const emailStartLimiter = rateLimit({
   windowMs:          10 * 60_000,
   max:               5,
+  standardHeaders:   true,
+  legacyHeaders:     false,
+  message:           { error: 'Too Many Requests' },
+});
+
+const emailVerifyLimiter = rateLimit({
+  windowMs:          10 * 60_000,
+  max:               10,
   standardHeaders:   true,
   legacyHeaders:     false,
   message:           { error: 'Too Many Requests' },
@@ -187,7 +195,7 @@ function clearCompletedUpdateState(nodeId, version, source) {
 export function registerNodes(app, httpsServer, x402Server, config) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
-  app.post('/node/email/start', emailLimiter, async (req, res) => {
+  app.post('/node/email/start', emailStartLimiter, async (req, res) => {
     try {
       const email = String(req.body?.email ?? '').trim();
       const verification = await startEmailVerification(email);
@@ -197,7 +205,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
     }
   });
 
-  app.post('/node/email/verify', emailLimiter, async (req, res) => {
+  app.post('/node/email/verify', emailVerifyLimiter, async (req, res) => {
     try {
       const verified = verifyEmailCode({
         verification_id: String(req.body?.verification_id ?? ''),
