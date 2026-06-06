@@ -5,7 +5,6 @@ import type { Express, Request }      from 'express';
 import type { Server }                from 'http';
 import Router                         from '../../router.ts';
 import { log }                        from '../../utils/log.ts';
-import { isOriginAllowed }            from '../../utils/origin.ts';
 import { generateSlug }               from './slug.ts';
 
 export const FRAME = {
@@ -592,13 +591,6 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
     const url = new URL(req.url!, `http://${req.headers.host}`);
 
     if (url.pathname !== '/tunnel-connect') return;
-
-    if (!isOriginAllowed(req.headers.origin)) {
-      log.warn('public-tunnel', 'connect-rejected', { reason: 'origin not allowed', origin: req.headers.origin ?? null });
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
 
     const token   = url.searchParams.get('token');
     const pending = token ? pendingTokens.get(token) : null;

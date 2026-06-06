@@ -12,7 +12,6 @@ import {
   msToMinutes,
 } from '../../utils/types.js';
 import { isPrivateTarget } from '../../utils/ssrf.ts';
-import { isOriginAllowed } from '../../utils/origin.ts';
 
 export interface Purchase {
   model:     string;
@@ -502,12 +501,6 @@ export function registerWebSocket(
     const url = new URL(req.url!, `https://${req.headers.host}`);
 
     if (url.pathname !== '/ws-connect') return;
-
-    if (!isOriginAllowed(req.headers.origin)) {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
 
     const token   = url.searchParams.get('token');
     const pending = token ? pendingSessions.get(token) : null;
