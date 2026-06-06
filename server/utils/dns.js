@@ -1,10 +1,7 @@
 import https from 'https';
-import { XMLParser } from 'fast-xml-parser';
 
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '',
-});
+const ZONE_NAME = 'canister.software';
+const CF_API_BASE = 'api.cloudflare.com';
 
 // Silent mode flag - set by caller
 let silentMode = false;
@@ -17,96 +14,116 @@ function log(...args) {
   if (!silentMode) console.log(...args);
 }
 
-export async function provisionNodeDNS(subdomain, ipv6, ipv4 = null) {
-  const username = process.env.NAMECHEAP_USERNAME;
-  const apiKey = process.env.NAMECHEAP_API_KEY;
-  const sourceIp = process.env.NAMECHEAP_SOURCEIP;
+function cfCredentials() {
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  const zoneId = process.env.CLOUDFLARE_ZONE_ID;
+  if (!apiToken || !zoneId) {
+    throw new Error('CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID must be set');
+  }
+  return { apiToken, zoneId };
+}
 
+function cfRequest(method, pathname, body = null) {
+  const { apiToken } = cfCredentials();
+  const payload = body ? JSON.stringify(body) : null;
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: CF_API_BASE,
+        path: pathname,
+        method,
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          'Content-Type': 'application/json',
+          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          let parsed;
+          try {
+            parsed = JSON.parse(data);
+          } catch (parseError) {
+            reject(new Error(`Failed to parse Cloudflare response: ${parseError.message}`));
+            return;
+          }
+
+          if (!parsed.success) {
+            const errorMsg = (parsed.errors || [])
+              .map((e) => e.message || String(e))
+              .join(', ') || `HTTP ${res.statusCode}`;
+            reject(new Error(`Cloudflare API error: ${errorMsg}`));
+            return;
+          }
+
+          resolve(parsed.result);
+        });
+      },
+    );
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function findDnsRecords(name, type = null) {
+  const { zoneId } = cfCredentials();
+  const params = new URLSearchParams({ name, per_page: '100' });
+  if (type) params.set('type', type);
+
+  const result = await cfRequest('GET', `/client/v4/zones/${zoneId}/dns_records?${params.toString()}`);
+  return (result || []).map((record) => ({
+    id:      record.id,
+    hostname: record.name,
+    type:    record.type,
+    address: record.content,
+    ttl:     record.ttl,
+  }));
+}
+
+async function upsertDnsRecord({ name, type, address, ttl = 300 }) {
+  const { zoneId } = cfCredentials();
+  const existing = await findDnsRecords(name, type);
+  const body = { type, name, content: address, ttl, proxied: false };
+
+  if (existing.length > 0) {
+    await cfRequest('PUT', `/client/v4/zones/${zoneId}/dns_records/${existing[0].id}`, body);
+    for (const stale of existing.slice(1)) {
+      await cfRequest('DELETE', `/client/v4/zones/${zoneId}/dns_records/${stale.id}`);
+    }
+  } else {
+    await cfRequest('POST', `/client/v4/zones/${zoneId}/dns_records`, body);
+  }
+}
+
+async function deleteDnsRecords(name, type = null) {
+  const { zoneId } = cfCredentials();
+  const existing = await findDnsRecords(name, type);
+  for (const record of existing) {
+    await cfRequest('DELETE', `/client/v4/zones/${zoneId}/dns_records/${record.id}`);
+  }
+  return existing.length;
+}
+
+export async function provisionNodeDNS(subdomain, ipv6, ipv4 = null) {
   const nodeSubdomain = subdomain.split('.')[0];
+  const fqdn = `${nodeSubdomain}.consensus.${ZONE_NAME}`;
 
   log(`Provisioning DNS for ${subdomain}`);
   if (ipv6) log(`   IPv6: ${ipv6}`);
   if (ipv4) log(`   IPv4: ${ipv4}`);
 
   try {
-    const currentRecords = await getNamecheapDNS();
-
-    const newRecords = [];
-
-    if (ipv6) {
-      newRecords.push({
-        hostname: `${nodeSubdomain}.consensus`,
-        type: 'AAAA',
-        address: ipv6,
-        ttl: 300,
-      });
-    }
-
-    if (ipv4) {
-      newRecords.push({
-        hostname: `${nodeSubdomain}.consensus`,
-        type: 'A',
-        address: ipv4,
-        ttl: 300,
-      });
-    }
-
-    const allRecords = [...currentRecords, ...newRecords];
-
-    const params = new URLSearchParams({
-      ApiUser: username,
-      ApiKey: apiKey,
-      UserName: username,
-      ClientIp: sourceIp,
-      Command: 'namecheap.domains.dns.setHosts',
-      SLD: 'canister',
-      TLD: 'software',
-    });
-
-    allRecords.forEach((record, idx) => {
-      const num = idx + 1;
-      params.append(`HostName${num}`, record.hostname);
-      params.append(`RecordType${num}`, record.type);
-      params.append(`Address${num}`, record.address);
-      params.append(`TTL${num}`, record.ttl || 300);
-    });
-
-    const url = `https://api.namecheap.com/xml.response?${params.toString()}`;
-
-    return new Promise((resolve, reject) => {
-      https
-        .get(url, (res) => {
-          let data = '';
-          res.on('data', (chunk) => (data += chunk));
-          res.on('end', () => {
-            try {
-              const result = xmlParser.parse(data);
-
-              const apiResponse = result.ApiResponse;
-              if (apiResponse.Status === 'OK') {
-                log(`   ✓ DNS updated successfully\n`);
-                resolve(true);
-              } else {
-                const errors = apiResponse.Errors?.Error || [];
-                const errorMsg = Array.isArray(errors)
-                  ? errors.map((e) => e['#text'] || e).join(', ')
-                  : errors['#text'] || errors;
-
-                console.error(`   ✗ DNS update failed: ${errorMsg}`);
-                reject(new Error(`DNS provisioning failed: ${errorMsg}`));
-              }
-            } catch (parseError) {
-              console.error('   ✗ Failed to parse response');
-              console.error(data);
-              reject(parseError);
-            }
-          });
-        })
-        .on('error', reject);
-    });
+    if (ipv6) await upsertDnsRecord({ name: fqdn, type: 'AAAA', address: ipv6 });
+    if (ipv4) await upsertDnsRecord({ name: fqdn, type: 'A', address: ipv4 });
+    log(`   ✓ DNS provisioned successfully\n`);
+    return true;
   } catch (error) {
-    console.error(`   ✗ DNS error: ${error.message}`);
-    throw error;
+    console.error(`   ✗ DNS provisioning failed: ${error.message}`);
+    throw new Error(`DNS provisioning failed: ${error.message}`);
   }
 }
 
@@ -114,105 +131,37 @@ export async function updateNodeDNS(subdomain, ipv6, ipv4 = null) {
   log(`🔄 Updating DNS for ${subdomain}`);
 
   const nodeSubdomain = subdomain.split('.')[0];
-  const currentRecords = await getNamecheapDNS();
+  const fqdn = `${nodeSubdomain}.consensus.${ZONE_NAME}`;
 
-  const filteredRecords = currentRecords.filter((record) => {
-    return record.hostname !== `${nodeSubdomain}.consensus`;
-  });
+  try {
+    if (ipv6) await upsertDnsRecord({ name: fqdn, type: 'AAAA', address: ipv6 });
+    else await deleteDnsRecords(fqdn, 'AAAA');
 
-  const newRecords = [];
+    if (ipv4) await upsertDnsRecord({ name: fqdn, type: 'A', address: ipv4 });
+    else await deleteDnsRecords(fqdn, 'A');
 
-  if (ipv6) {
-    newRecords.push({
-      hostname: `${nodeSubdomain}.consensus`,
-      type: 'AAAA',
-      address: ipv6,
-      ttl: 300,
-    });
+    log(`   ✓ DNS updated successfully\n`);
+    return true;
+  } catch (error) {
+    console.error(`   ✗ DNS update failed: ${error.message}`);
+    throw new Error(`DNS update failed: ${error.message}`);
   }
-
-  if (ipv4) {
-    newRecords.push({
-      hostname: `${nodeSubdomain}.consensus`,
-      type: 'A',
-      address: ipv4,
-      ttl: 300,
-    });
-  }
-
-  const allRecords = [...filteredRecords, ...newRecords];
-
-  return setNamecheapDNS(allRecords);
 }
 
 export async function removeNodeDNS(subdomain) {
   log(`🗑️  Removing DNS for ${subdomain}`);
 
   const nodeSubdomain = subdomain.split('.')[0];
-  const currentRecords = await getNamecheapDNS();
+  const fqdn = `${nodeSubdomain}.consensus.${ZONE_NAME}`;
 
-  const filteredRecords = currentRecords.filter((record) => {
-    return record.hostname !== `${nodeSubdomain}.consensus`;
-  });
-
-  log(`   Removing ${currentRecords.length - filteredRecords.length} record(s)`);
-
-  return setNamecheapDNS(filteredRecords);
-}
-
-async function getNamecheapDNS() {
-  const username = process.env.NAMECHEAP_USERNAME;
-  const apiKey = process.env.NAMECHEAP_API_KEY;
-  const sourceIp = process.env.NAMECHEAP_SOURCEIP;
-
-  const url = `https://api.namecheap.com/xml.response?ApiUser=${username}&ApiKey=${apiKey}&UserName=${username}&ClientIp=${sourceIp}&Command=namecheap.domains.dns.getHosts&SLD=canister&TLD=software`;
-
-  return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => {
-          try {
-            const result = xmlParser.parse(data);
-            const apiResponse = result.ApiResponse;
-            if (apiResponse.Status !== 'OK') {
-              const errors = apiResponse.Errors?.Error || [];
-              const errorMsg = Array.isArray(errors)
-                ? errors.map((e) => e['#text'] || e).join(', ')
-                : errors['#text'] || errors;
-              throw new Error(`Failed to get DNS records: ${errorMsg}`);
-            }
-
-            const commandResponse = apiResponse.CommandResponse;
-            const domainDNS = commandResponse?.DomainDNSGetHostsResult;
-
-            if (!domainDNS || !domainDNS.host) {
-              resolve([]);
-              return;
-            }
-
-            let hosts = domainDNS.host;
-            if (!Array.isArray(hosts)) {
-              hosts = [hosts];
-            }
-
-            const records = hosts.map((host) => ({
-              hostname: host.Name,
-              type: host.Type,
-              address: host.Address,
-              ttl: parseInt(host.TTL) || 300,
-            }));
-
-            resolve(records);
-          } catch (error) {
-            console.error('Failed to parse DNS response:', error.message);
-            reject(error);
-          }
-        });
-      })
-      .on('error', reject);
-  });
+  try {
+    const removed = await deleteDnsRecords(fqdn);
+    log(`   Removed ${removed} record(s)`);
+    return true;
+  } catch (error) {
+    console.error(`   ✗ DNS removal failed: ${error.message}`);
+    throw new Error(`DNS removal failed: ${error.message}`);
+  }
 }
 
 export async function updateServerDDNS() {
@@ -226,12 +175,17 @@ export async function updateServerDDNS() {
 
     log(`📡 Current Public IP: ${currentIP}\n`);
 
-    log('📋 Fetching current DNS records...');
-    const records = await getNamecheapDNS();
-    log(`   ✓ Found ${records.length} existing records\n`);
+    const mainHost = `consensus.${ZONE_NAME}`;
+    const proxyHost = `consensus.proxy.${ZONE_NAME}`;
 
-    const mainRecord = records.find((r) => r.hostname === 'consensus' && r.type === 'A');
-    const proxyRecord = records.find((r) => r.hostname === 'consensus.proxy' && r.type === 'A');
+    log('📋 Fetching current DNS records...');
+    const [mainRecords, proxyRecords] = await Promise.all([
+      findDnsRecords(mainHost, 'A'),
+      findDnsRecords(proxyHost, 'A'),
+    ]);
+    const mainRecord = mainRecords[0] ?? null;
+    const proxyRecord = proxyRecords[0] ?? null;
+    log(`   ✓ Found ${mainRecords.length + proxyRecords.length} existing record(s)\n`);
 
     let needsUpdate = false;
 
@@ -256,32 +210,15 @@ export async function updateServerDDNS() {
 
     log('\n🔄 Updating DNS records...');
 
-    const updatedRecords = records.filter(
-      (r) =>
-        !(r.hostname === 'consensus' && r.type === 'A') &&
-        !(r.hostname === 'consensus.proxy' && r.type === 'A')
-    );
-
-    updatedRecords.push({
-      hostname: 'consensus',
-      type: 'A',
-      address: currentIP,
-      ttl: 300,
-    });
-
-    updatedRecords.push({
-      hostname: 'consensus.proxy',
-      type: 'A',
-      address: currentIP,
-      ttl: 300,
-    });
-
-    await setNamecheapDNS(updatedRecords);
+    await Promise.all([
+      upsertDnsRecord({ name: mainHost, type: 'A', address: currentIP }),
+      upsertDnsRecord({ name: proxyHost, type: 'A', address: currentIP }),
+    ]);
 
     log('   ✓ DNS updated successfully\n');
     log('✅ DDNS update complete!\n');
-    log(`Main Server:  https://consensus.canister.software → ${currentIP}`);
-    log(`Proxy Server: https://consensus.proxy.canister.software → ${currentIP}`);
+    log(`Main Server:  https://${mainHost} → ${currentIP}`);
+    log(`Proxy Server: https://${proxyHost} → ${currentIP}`);
     log('\n');
 
     return { updated: true, ip: currentIP };
@@ -293,7 +230,6 @@ export async function updateServerDDNS() {
 
 async function getCurrentIP() {
   try {
-    // Try IPv4
     const response = await fetch('https://api.ipify.org', {
       signal: AbortSignal.timeout(50000),
     });
@@ -302,60 +238,4 @@ async function getCurrentIP() {
     console.error('Failed to get current IP:', error.message);
     return null;
   }
-}
-
-async function setNamecheapDNS(records) {
-  const username = process.env.NAMECHEAP_USERNAME;
-  const apiKey = process.env.NAMECHEAP_API_KEY;
-  const sourceIp = process.env.NAMECHEAP_SOURCEIP;
-
-  const params = new URLSearchParams({
-    ApiUser: username,
-    ApiKey: apiKey,
-    UserName: username,
-    ClientIp: sourceIp,
-    Command: 'namecheap.domains.dns.setHosts',
-    SLD: 'canister',
-    TLD: 'software',
-  });
-
-  records.forEach((record, idx) => {
-    const num = idx + 1;
-    params.append(`HostName${num}`, record.hostname);
-    params.append(`RecordType${num}`, record.type);
-    params.append(`Address${num}`, record.address);
-    params.append(`TTL${num}`, record.ttl || 300);
-  });
-
-  const url = `https://api.namecheap.com/xml.response?${params.toString()}`;
-
-  return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => {
-          try {
-            const result = xmlParser.parse(data);
-
-            const apiResponse = result.ApiResponse;
-            if (apiResponse.Status === 'OK') {
-              log(`   ✓ DNS updated successfully\n`);
-              resolve(true);
-            } else {
-              const errors = apiResponse.Errors?.Error || [];
-              const errorMsg = Array.isArray(errors)
-                ? errors.map((e) => e['#text'] || e).join(', ')
-                : errors['#text'] || errors;
-              console.error(`   ✗ DNS update failed: ${errorMsg}`);
-              reject(new Error(`DNS update failed: ${errorMsg}`));
-            }
-          } catch (parseError) {
-            console.error('   ✗ Failed to parse response');
-            reject(parseError);
-          }
-        });
-      })
-      .on('error', reject);
-  });
 }
