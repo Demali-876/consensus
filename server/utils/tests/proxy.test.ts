@@ -22,6 +22,8 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http   from 'node:http';
 import ConsensusProxy from '../../features/proxy/proxy.ts';
+import Router from '../../router.ts';
+import { noSsrf } from './_test-helpers.ts';
 
 const UPSTREAM_PORT = 19_991;
 const BASE          = `http://localhost:${UPSTREAM_PORT}`;
@@ -63,8 +65,17 @@ let proxy: ConsensusProxy;
 
 function freshProxy(): ConsensusProxy {
   proxy?.destroy();
-  proxy = new ConsensusProxy();
+  proxy = new ConsensusProxy({ ssrfCheck: noSsrf });
   return proxy;
+}
+
+function fixedRouter(node: { id: string; region: string; domain?: string | null }): Router {
+  return {
+    selectNode: () => node,
+    incrementRequest: () => undefined,
+    decrementRequest: () => undefined,
+    getStats: () => ({}),
+  } as unknown as Router;
 }
 
 before(() => new Promise<void>(resolve => upstream.listen(UPSTREAM_PORT, resolve)));
@@ -516,7 +527,7 @@ describe('getStats', () => {
   });
 
   it('hit_rate is 0 on a fresh proxy with no requests', () => {
-    const p = new ConsensusProxy();
+    const p = new ConsensusProxy({ ssrfCheck: noSsrf });
     assert.equal(p.getStats().hit_rate, 0);
     p.destroy();
   });
@@ -544,6 +555,58 @@ describe('Input validation', () => {
     const params = { target_url: `${BASE}/deterministic`, method: 'POST', body: { x: 42 } };
     const keys   = Array.from({ length: 10 }, () => proxy.computeDedupeKey(params));
     assert.ok(new Set(keys).size === 1, 'All 10 calls must produce the same key');
+  });
+});
+
+describe('Node routing', () => {
+  before(() => { resetUpstream(); proxy?.destroy(); });
+
+  it('always executes the orchestrator server node directly', async () => {
+    let tunnelCalls = 0;
+    const p = new ConsensusProxy({
+      router: fixedRouter({ id: 'server', region: 'local', domain: 'server.invalid' }),
+      nodeTunnel: {
+        getNodeSession: () => ({ mode: 'control', ws: { readyState: 1 } }),
+        requestProxy: async () => {
+          tunnelCalls++;
+          throw new Error('server node must not use its own tunnel');
+        },
+      },
+      ssrfCheck: noSsrf,
+    });
+
+    try {
+      const r = await p.handleRequest(`${BASE}/server-node`, 'GET', {}, undefined, 60);
+      assert.equal(r.status, 200);
+      assert.equal(r.served_by, 'proxy-direct');
+      assert.equal(tunnelCalls, 0);
+    } finally {
+      p.destroy();
+    }
+  });
+
+  it('skips the tunnel when a selected node has no connected control session', async () => {
+    let tunnelCalls = 0;
+    const p = new ConsensusProxy({
+      router: fixedRouter({ id: 'offline-node', region: 'test' }),
+      nodeTunnel: {
+        getNodeSession: () => null,
+        requestProxy: async () => {
+          tunnelCalls++;
+          throw new Error('disconnected tunnel must not be called');
+        },
+      },
+      ssrfCheck: noSsrf,
+    });
+
+    try {
+      const r = await p.handleRequest(`${BASE}/offline-node`, 'GET', {}, undefined, 60);
+      assert.equal(r.status, 200);
+      assert.equal(r.served_by, 'proxy-direct');
+      assert.equal(tunnelCalls, 0);
+    } finally {
+      p.destroy();
+    }
   });
 });
 

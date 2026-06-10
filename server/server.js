@@ -50,6 +50,19 @@ const ICP_PAY_TO = process.env.ICP_PAY_TO;
 
 const FREE_MODE = process.env.FREE_MODE === 'true';
 
+function proxyTargetForLog(value) {
+  try {
+    const target = new URL(String(value));
+    return {
+      target_origin: target.origin,
+      target_path: target.pathname,
+      target_has_query: Boolean(target.search),
+    };
+  } catch {
+    return { target_origin: 'invalid', target_path: null, target_has_query: false };
+  }
+}
+
 if (!FREE_MODE) {
   if (!process.env.FACILITATOR_URL) throw new Error('FACILITATOR_URL is missing from .env');
   if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO');
@@ -154,11 +167,31 @@ app.post('/proxy', proxyLimiter, async (req, res, next) => {
   const { target_url, method = 'GET', headers = {}, body } = req.body;
   if (!target_url) return next();
 
+  const requestId = crypto.randomUUID();
+  const requestStartedAt = Date.now();
+  res.locals.proxyRequestId = requestId;
+  res.locals.proxyRequestStartedAt = requestStartedAt;
+  log.info('proxy-http', 'request-received', {
+    request_id: requestId,
+    method: String(method).toUpperCase(),
+    ...proxyTargetForLog(target_url),
+  });
+
   const dedupeKey = proxy.computeDedupeKey({ target_url, method, headers, body });
   const cached = proxy.getCached(dedupeKey);
 
   if (cached) {
-    console.log(`[Cache HIT - Pre-Payment] ${dedupeKey.substring(0, 12)}...`);
+    log.info('proxy-http', 'request-completed', {
+      request_id: requestId,
+      method: String(method).toUpperCase(),
+      status: cached.status,
+      cache_layer: 'pre-payment',
+      cached: true,
+      served_by: cached.served_by ?? null,
+      dedupe_key: dedupeKey.substring(0, 12),
+      total_ms: Date.now() - requestStartedAt,
+      ...proxyTargetForLog(target_url),
+    });
     return res.json({
       status: cached.status,
       statusText: cached.statusText,
@@ -172,6 +205,12 @@ app.post('/proxy', proxyLimiter, async (req, res, next) => {
     });
   }
 
+  log.info('proxy-http', 'cache-miss', {
+    request_id: requestId,
+    method: String(method).toUpperCase(),
+    dedupe_key: dedupeKey.substring(0, 12),
+    ...proxyTargetForLog(target_url),
+  });
   next();
 });
 
@@ -196,6 +235,8 @@ if (!FREE_MODE) {
 
 app.post('/proxy', async (req, res) => {
   const startTime = Date.now();
+  const requestId = res.locals.proxyRequestId ?? crypto.randomUUID();
+  const requestStartedAt = res.locals.proxyRequestStartedAt ?? startTime;
 
   try {
     const { target_url, method = 'GET', headers = {}, body } = req.body;
@@ -206,6 +247,12 @@ app.post('/proxy', async (req, res) => {
 
     const methodUpper = String(method).toUpperCase();
     const isVerbose = Boolean(headers['x-verbose'] || headers['X-Verbose']);
+    log.info('proxy-http', 'execution-started', {
+      request_id: requestId,
+      method: methodUpper,
+      verbose: isVerbose,
+      ...proxyTargetForLog(target_url),
+    });
 
     if (
       !headers['x-idempotency-key'] &&
@@ -218,6 +265,17 @@ app.post('/proxy', async (req, res) => {
     const response = await proxy.handleRequest(target_url, methodUpper, headers, body);
 
     const processingTime = Date.now() - startTime;
+    log.info('proxy-http', 'request-completed', {
+      request_id: requestId,
+      method: methodUpper,
+      status: response.status,
+      cached: response.cached ?? false,
+      served_by: response.served_by ?? null,
+      dedupe_key: response.dedupe_key?.substring(0, 12) ?? null,
+      processing_ms: processingTime,
+      total_ms: Date.now() - requestStartedAt,
+      ...proxyTargetForLog(target_url),
+    });
 
     const fullResponse = {
       status: response.status,
@@ -244,6 +302,13 @@ app.post('/proxy', async (req, res) => {
     return res.status(fullResponse.status).json(payload);
   } catch (error) {
     if (res.headersSent) return;
+    log.error('proxy-http', 'request-failed', {
+      request_id: requestId,
+      method: String(req.body?.method ?? 'GET').toUpperCase(),
+      total_ms: Date.now() - requestStartedAt,
+      message: error instanceof Error ? error.message : String(error),
+      ...proxyTargetForLog(req.body?.target_url),
+    });
     res.status(500).json({
       error: 'Proxy request failed',
       message: error.message,

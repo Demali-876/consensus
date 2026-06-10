@@ -156,7 +156,9 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
 
   const footer = buildFooter(renderer, [
     { key: 'R',    label: 'rescan'       },
+    { key: 'Tab',  label: 'list ⇄ form'  },
     { key: '↑↓',   label: 'navigate'     },
+    { key: '[ ]',  label: 'jump section' },
     { key: '↵',    label: 'edit · toggle'},
     { key: '1-5',  label: 'select'       },
     { key: 'M',    label: 'bookmark'     },
@@ -181,7 +183,9 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
   ];
 
   type Section = 'lists' | 'form';
-  let section: Section = 'lists';
+  // Reverse proxy usually targets a remote upstream (not a detected localhost
+  // process), so default focus to the form. Tab still toggles back to lists.
+  let section: Section = 'form';
   let listIdx = 0;
   let formIdx = 0;
   let editing = false;
@@ -195,6 +199,28 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
     'cacheTtl', 'maxEntries',
     ...(freeMode ? [] as FieldId[] : ['family' as FieldId, 'chain' as FieldId]),
   ];
+
+  // Section boundaries for the `[` / `]` shortcut — jumps focus between
+  // UPSTREAM, LISTENER, CACHE, and (when paid) PAYMENT groups.
+  const SECTION_STARTS: ReadonlyArray<{ label: string; index: number }> = [
+    { label: 'UPSTREAM', index: FORM_FIELD_ORDER.indexOf('host')       },
+    { label: 'LISTENER', index: FORM_FIELD_ORDER.indexOf('listenPort') },
+    { label: 'CACHE',    index: FORM_FIELD_ORDER.indexOf('cacheTtl')   },
+    ...(freeMode ? [] : [{ label: 'PAYMENT', index: FORM_FIELD_ORDER.indexOf('family') }]),
+  ].filter(s => s.index >= 0);
+
+  function jumpSection(direction: -1 | 1): void {
+    const cur = formIdx;
+    if (direction === 1) {
+      const next = SECTION_STARTS.find(s => s.index > cur);
+      formIdx = next ? next.index : SECTION_STARTS[0]!.index;
+    } else {
+      const reversed = [...SECTION_STARTS].reverse();
+      const prev = reversed.find(s => s.index < cur);
+      formIdx = prev ? prev.index : SECTION_STARTS.at(-1)!.index;
+    }
+    rerender();
+  }
 
   const get = (id: FieldId): string => fields.find(f => f.id === id)?.value ?? '';
   const set = (id: FieldId, v: string): void => {
@@ -394,6 +420,11 @@ async function showReverseSetupInternal(): Promise<ReverseSetupOutcome> {
         rerender();
         return;
       }
+
+      // [ / ] jump to previous / next section boundary in the form.
+      if (section === 'form' && key.sequence === '[') { jumpSection(-1); return; }
+      if (section === 'form' && key.sequence === ']') { jumpSection( 1); return; }
+
       if (key.name === 'up' || key.name === 'k') {
         if (section === 'lists') listIdx = Math.max(0, listIdx - 1);
         else                     formIdx = Math.max(0, formIdx - 1);

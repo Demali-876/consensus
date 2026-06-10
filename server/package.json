@@ -4,7 +4,9 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run test:dedupe && node --import tsx/esm --test --test-timeout 30000 utils/tests/detector.test.ts utils/tests/proxy.test.ts utils/tests/reverse-proxy.test.ts utils/tests/security.test.ts",
+    "test:dedupe": "node --import tsx/esm utils/tests/proxy-dedupe.test.ts",
+    "test:all": "npm run test && node --import tsx/esm --test --test-timeout 30000 utils/tests/wss.test.ts utils/tests/security-perf.test.ts",
     "start": "dotenvx run -- node --import tsx/esm server.js"
   },
   "keywords": [],

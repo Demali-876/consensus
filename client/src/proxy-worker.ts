@@ -197,6 +197,8 @@ export type ReverseWorkerOptions = {
     onResponse?: (ctx: ReverseResponseCtx) => void | Promise<void>;
     onError?:    (err: Error, req: http.IncomingMessage, res: http.ServerResponse) => void;
   };
+  /** Structured lifecycle logging. Defaults to console output when omitted. */
+  onLog?:    (event: string, fields: Record<string, unknown>) => void;
   /** Called after every request with updated stats. */
   onStats?:  (stats: WorkerStats) => void;
 };
@@ -257,7 +259,34 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
   const recentOutcomes: boolean[] = [];
   let lastStatusCode: number | undefined;
 
-  console.log(`[ReverseProxy] startup requested on :${opts.port ?? 'auto'}`);
+  const logEvent = (event: string, fields: Record<string, unknown> = {}) => {
+    if (opts.onLog) {
+      try { opts.onLog(event, fields); } catch { /* logging must never affect proxy traffic */ }
+      return;
+    }
+    console.log(JSON.stringify({ scope: 'reverse-proxy', event, ...fields }));
+  };
+
+  const safePath = (value: string | undefined): string => {
+    const raw = value ?? '/';
+    const queryAt = raw.indexOf('?');
+    return queryAt >= 0 ? `${raw.slice(0, queryAt)}?<redacted>` : raw;
+  };
+
+  const errorFields = (err: unknown): Record<string, unknown> => ({
+    error_name: err instanceof Error ? err.name : 'Error',
+    error_message: err instanceof Error ? err.message : String(err),
+  });
+
+  logEvent('startup-requested', {
+    listen_port: opts.port ?? 'auto',
+    upstream_host: opts.upstream.host,
+    upstream_port: opts.upstream.port,
+    upstream_protocol: opts.upstream.protocol ?? 'http',
+    local_cache_ttl_ms: opts.cache?.ttl ?? 30_000,
+    local_cache_max_entries: opts.cache?.maxSize ?? 1_000,
+    consensus_cache_ttl_s: opts.cacheTtl ?? null,
+  });
 
   const recordResult = (latencyMs: number, ok: boolean, statusCode?: number) => {
     pushRecent(recentLatencies, latencyMs);
@@ -286,6 +315,7 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
     strategy:         'manual',
     cache_ttl:        opts.cacheTtl,
     limit_usd:        opts.budget,
+    verbose:          true,
     on_limit_reached: () => opts.onStats?.(snapshot()),
   });
 
@@ -299,8 +329,15 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
   const server = http.createServer(async (req, res) => {
     const requestStartedAt = performance.now();
     counters.requests++;
+    const requestId = `${startedAt}-${counters.requests}`;
     const cacheKey = `${req.method}:${req.url}`;
     const tryCache = defaultCacheable(req);
+    logEvent('request-received', {
+      request_id: requestId,
+      method: req.method ?? 'GET',
+      path: safePath(req.url),
+      local_cache_eligible: tryCache,
+    });
 
     // ── Local cache HIT — no payment, no network call ───────────────────────
     if (tryCache) {
@@ -311,10 +348,21 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
         res.writeHead(rctx.statusCode, { ...rctx.headers, 'x-cache': 'HIT', 'x-cache-hits': String(entry.hits) });
         counters.bytesSent += entry.body.length;
         res.end(entry.body);
-        recordResult(elapsedMs(requestStartedAt), true, rctx.statusCode);
+        const latencyMs = elapsedMs(requestStartedAt);
+        recordResult(latencyMs, true, rctx.statusCode);
+        logEvent('local-cache-hit', {
+          request_id: requestId,
+          status: rctx.statusCode,
+          cache_entry_hits: entry.hits,
+          body_bytes: Buffer.byteLength(entry.body),
+          total_ms: Math.round(latencyMs),
+        });
         opts.onStats?.(snapshot());
         return;
       }
+      logEvent('local-cache-miss', { request_id: requestId });
+    } else {
+      logEvent('local-cache-skip', { request_id: requestId });
     }
 
     // ── onRequest hook — block, rewrite, or reroute before consensus ────────
@@ -334,20 +382,38 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
       if (verdict === false) {
         res.writeHead(403);
         res.end('Forbidden');
-        recordResult(elapsedMs(requestStartedAt), false, 403);
+        const latencyMs = elapsedMs(requestStartedAt);
+        recordResult(latencyMs, false, 403);
+        logEvent('request-blocked', {
+          request_id: requestId,
+          status: 403,
+          total_ms: Math.round(latencyMs),
+        });
         opts.onStats?.(snapshot());
         return;
       }
     } catch (err) {
+      const latencyMs = elapsedMs(requestStartedAt);
       if (opts.hooks?.onError) {
         opts.hooks.onError(err as Error, req, res);
-        recordResult(elapsedMs(requestStartedAt), false);
+        recordResult(latencyMs, false);
+        logEvent('hook-error', {
+          request_id: requestId,
+          total_ms: Math.round(latencyMs),
+          ...errorFields(err),
+        });
         opts.onStats?.(snapshot());
         return;
       }
       res.writeHead(500);
       res.end(`Hook error: ${(err as Error).message}`);
-      recordResult(elapsedMs(requestStartedAt), false, 500);
+      recordResult(latencyMs, false, 500);
+      logEvent('hook-error', {
+        request_id: requestId,
+        status: 500,
+        total_ms: Math.round(latencyMs),
+        ...errorFields(err),
+      });
       opts.onStats?.(snapshot());
       return;
     }
@@ -355,6 +421,15 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
     // ── Cache MISS — route through consensus network ─────────────────────────
     try {
       const targetUrl = `${ctx.target.protocol}://${ctx.target.host}:${ctx.target.port}${ctx.url}`;
+      const consensusStartedAt = performance.now();
+      logEvent('consensus-request-started', {
+        request_id: requestId,
+        method: ctx.method,
+        target_host: ctx.target.host,
+        target_port: ctx.target.port,
+        target_protocol: ctx.target.protocol,
+        path: safePath(ctx.url),
+      });
 
       const result = await client.request({
         target_url: targetUrl,
@@ -380,15 +455,37 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
 
       res.writeHead(rctx.statusCode, { ...rctx.headers, 'x-cache': tryCache ? 'MISS' : 'SKIP' });
       counters.bytesSent += body.length;
+      counters.bytesRecv += Buffer.byteLength(body);
       counters.spend      = client.getBudget().spent_usd;
       res.end(body);
 
-      recordResult(elapsedMs(requestStartedAt), true, rctx.statusCode);
+      const latencyMs = elapsedMs(requestStartedAt);
+      const meta = result.meta;
+      recordResult(latencyMs, true, rctx.statusCode);
+      logEvent('consensus-request-completed', {
+        request_id: requestId,
+        status: rctx.statusCode,
+        local_cache: tryCache ? 'MISS' : 'SKIP',
+        stored_in_local_cache: tryCache && result.status >= 200 && result.status < 300,
+        consensus_cached: meta?.cached ?? null,
+        served_by: meta?.served_by ?? null,
+        dedupe_key: typeof meta?.dedupe_key === 'string' ? meta.dedupe_key.slice(0, 12) : null,
+        server_processing_ms: meta?.processing_ms ?? null,
+        consensus_round_trip_ms: Math.round(elapsedMs(consensusStartedAt)),
+        total_ms: Math.round(latencyMs),
+        body_bytes: Buffer.byteLength(body),
+      });
       opts.onStats?.(snapshot());
     } catch (err) {
+      const latencyMs = elapsedMs(requestStartedAt);
       if (opts.hooks?.onError) {
         opts.hooks.onError(err as Error, req, res);
-        recordResult(elapsedMs(requestStartedAt), false);
+        recordResult(latencyMs, false);
+        logEvent('consensus-request-failed', {
+          request_id: requestId,
+          total_ms: Math.round(latencyMs),
+          ...errorFields(err),
+        });
         opts.onStats?.(snapshot());
         return;
       }
@@ -396,21 +493,41 @@ async function startReverseProxy(opts: ReverseWorkerOptions): Promise<ProxyWorke
         res.writeHead(502);
         res.end(`Bad Gateway: ${(err as Error).message}`);
       }
-      recordResult(elapsedMs(requestStartedAt), false, 502);
+      recordResult(latencyMs, false, 502);
+      logEvent('consensus-request-failed', {
+        request_id: requestId,
+        status: 502,
+        total_ms: Math.round(latencyMs),
+        ...errorFields(err),
+      });
       opts.onStats?.(snapshot());
     }
   });
 
   const port = await bindServer(server, opts.port, 'reverse proxy');
-  console.log(`[ReverseProxy] listening on :${port}`);
+  logEvent('listening', {
+    listen_port: port,
+    upstream_host: opts.upstream.host,
+    upstream_port: opts.upstream.port,
+    upstream_protocol: opts.upstream.protocol ?? 'http',
+  });
 
   return {
     type: 'reverse',
     port,
     stats: snapshot,
-    stop:  () => new Promise((resolve, reject) =>
-      server.close((err) => (err ? reject(err) : resolve())),
-    ),
+    stop:  () => new Promise((resolve, reject) => {
+      logEvent('stopping', { listen_port: port, requests: counters.requests, cache_hits: cache.hits });
+      server.close((err) => {
+        if (err) {
+          logEvent('stop-failed', { listen_port: port, ...errorFields(err) });
+          reject(err);
+          return;
+        }
+        logEvent('stopped', { listen_port: port });
+        resolve();
+      });
+    }),
   };
 }
 

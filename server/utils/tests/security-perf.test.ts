@@ -19,11 +19,9 @@ import path from 'node:path';
 import fs from 'node:fs';
 import ConsensusProxy from '../../features/proxy/proxy.ts';
 import { WalletStore } from '../../../x402-proxy/data/store.js';
+import { noSsrf } from './_test-helpers.ts';
 
 const gzipAsync = promisify(zlib.gzip);
-
-// SSRF bypass used by all proxy tests: lets localhost targets through.
-const noSsrf = async (_url: string) => false;
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 

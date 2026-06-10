@@ -10,6 +10,7 @@ import { MESSAGE_TYPE, createErrorMessage, decodeMessage, encodeMessage, nowSeco
 import { openFrame, sealFrame, type SecureSession } from './secure-channel.ts';
 
 interface PendingTunnelRequest {
+  kind: 'proxy' | 'update';
   resolve: (message: TunnelMessage) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -246,7 +247,10 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
         return;
       }
       sessions.delete(session.id);
-      if (session.nodeId) byNodeId.delete(session.nodeId);
+      if (session.nodeId && byNodeId.get(session.nodeId) === session.id) {
+        byNodeId.delete(session.nodeId);
+      }
+      rejectPendingProxyRequests(session, new Error(`Node tunnel disconnected: ${session.nodeId ?? session.id}`));
       if (session.nodeId && session.update?.state === 'updating') {
         NodeStore.setNodeUpdateState(session.nodeId, 'updating', {
           update_id: session.update.id,
@@ -790,13 +794,17 @@ async function requestProxy(
     body_encoding?: 'utf8' | 'base64';
   },
 ): Promise<ProxyResponseMessage> {
+  if (session.ws.readyState !== WebSocket.OPEN) {
+    throw new Error(`Control tunnel not connected for node: ${session.nodeId ?? session.id}`);
+  }
+
   const id = crypto.randomUUID();
   const response = new Promise<TunnelMessage>((resolve, reject) => {
     const timer = setTimeout(() => {
       session.pending.delete(id);
       reject(new Error(`Node proxy request timed out: ${id}`));
     }, 30_000);
-    session.pending.set(id, { resolve, reject, timer });
+    session.pending.set(id, { kind: 'proxy', resolve, reject, timer });
   });
 
   await sendEncrypted(session, {
@@ -857,7 +865,7 @@ async function prepareNodeUpdate(nodeId: string, manifest: Record<string, unknow
       });
       reject(new Error(`Node update prepare timed out: ${nodeId}`));
     }, 180_000);
-    session.pending.set(updateId, { resolve, reject, timer });
+    session.pending.set(updateId, { kind: 'update', resolve, reject, timer });
   });
 
   await sendEncrypted(session, {
@@ -1295,6 +1303,15 @@ function resolvePending(session: NodeTunnelSession, message: TunnelMessage): voi
     pending.reject(new Error(message.message));
   } else {
     pending.resolve(message);
+  }
+}
+
+function rejectPendingProxyRequests(session: NodeTunnelSession, error: Error): void {
+  for (const [id, pending] of session.pending) {
+    if (pending.kind !== 'proxy') continue;
+    clearTimeout(pending.timer);
+    pending.reject(error);
+    session.pending.delete(id);
   }
 }
 

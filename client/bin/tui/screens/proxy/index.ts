@@ -71,6 +71,7 @@ async function runReverse(): Promise<void> {
       port:          setup.listenPort || undefined,
       cache:         { ttl: setup.cacheTtl, maxSize: setup.cacheMaxSize },
       preferNetwork: setup.preferNetwork,
+      onLog:          (event, fields) => { writeTraceLog(`reverseProxy.${event}`, fields); },
     });
   } catch (err) {
     const logPath = writeCrashLog('reverse proxy start', err, { setup });

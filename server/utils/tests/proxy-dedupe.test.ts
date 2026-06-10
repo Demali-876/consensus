@@ -252,8 +252,106 @@ async function main(): Promise<void> {
     assert.equal(callsByPath.get('/flaky'), 2, 'failed response should NOT have been cached');
   });
 
-  // ─── 6. Load / fan-out ────────────────────────────────────────────────────
-  header('6. Load fan-out');
+  // ─── 6. Body hash canonicalization ────────────────────────────────────────
+  header('6. Body hashing');
+
+  await run('object body — key order does NOT change the dedupe key', async () => {
+    const k1 = proxy.computeDedupeKey({
+      target_url: `${TARGET_BASE}/body`, method: 'POST',
+      body: { a: 1, b: 2, c: 3 },
+    });
+    const k2 = proxy.computeDedupeKey({
+      target_url: `${TARGET_BASE}/body`, method: 'POST',
+      body: { c: 3, a: 1, b: 2 },
+    });
+    assert.equal(k1, k2);
+  });
+
+  await run('nested object — key order at every depth does NOT change the key', async () => {
+    const k1 = proxy.computeDedupeKey({
+      target_url: `${TARGET_BASE}/body`, method: 'POST',
+      body: { outer: { x: 1, y: 2 }, list: [{ a: 1, b: 2 }, { c: 3 }] },
+    });
+    const k2 = proxy.computeDedupeKey({
+      target_url: `${TARGET_BASE}/body`, method: 'POST',
+      body: { list: [{ b: 2, a: 1 }, { c: 3 }], outer: { y: 2, x: 1 } },
+    });
+    assert.equal(k1, k2);
+  });
+
+  await run('array order DOES change the key (arrays are semantic)', async () => {
+    const k1 = proxy.computeDedupeKey({
+      target_url: `${TARGET_BASE}/body`, method: 'POST', body: [1, 2, 3],
+    });
+    const k2 = proxy.computeDedupeKey({
+      target_url: `${TARGET_BASE}/body`, method: 'POST', body: [3, 2, 1],
+    });
+    assert.notEqual(k1, k2);
+  });
+
+  await run('null vs missing body → same key (both empty bodies)', async () => {
+    const k1 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/body`, method: 'POST', body: null });
+    const k2 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/body`, method: 'POST' });
+    assert.equal(k1, k2);
+  });
+
+  await run('object body and equivalent JSON string body → same key', async () => {
+    const k1 = proxy.computeDedupeKey({
+      target_url: `${TARGET_BASE}/body`, method: 'POST', body: { x: 1 },
+    });
+    const k2 = proxy.computeDedupeKey({
+      target_url: `${TARGET_BASE}/body`, method: 'POST', body: '{"x":1}',
+    });
+    assert.equal(k1, k2);
+  });
+
+  // ─── 7. URL canonicalization ──────────────────────────────────────────────
+  header('7. URL canonicalization');
+
+  await run('query param order does NOT change the key', async () => {
+    const k1 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/q?a=1&b=2`, method: 'GET' });
+    const k2 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/q?b=2&a=1`, method: 'GET' });
+    assert.equal(k1, k2);
+  });
+
+  await run('URL fragment is dropped — same key with/without #frag', async () => {
+    const k1 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/q#section`, method: 'GET' });
+    const k2 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/q`,         method: 'GET' });
+    assert.equal(k1, k2);
+  });
+
+  await run('hostname case is normalised', async () => {
+    const k1 = proxy.computeDedupeKey({ target_url: 'http://EXAMPLE.com/path',  method: 'GET' });
+    const k2 = proxy.computeDedupeKey({ target_url: 'http://example.com/path',  method: 'GET' });
+    assert.equal(k1, k2);
+  });
+
+  // ─── 8. TTL expiry ────────────────────────────────────────────────────────
+  header('8. TTL expiry');
+
+  await run('cache entry expires after x-cache-ttl seconds', async () => {
+    resetCounters();
+    const key = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/short`, method: 'GET', headers: { 'x-cache-ttl': '1' } });
+    proxy.clearKey(key);
+    await callProxy('/short', { 'x-cache-ttl': '1' });
+    await callProxy('/short', { 'x-cache-ttl': '1' });   // still inside 1s window
+    assert.equal(callsByPath.get('/short') ?? 0, 1, 'second call inside TTL should hit cache');
+    await new Promise((r) => setTimeout(r, 1_200));      // wait past TTL
+    await callProxy('/short', { 'x-cache-ttl': '1' });
+    assert.equal(callsByPath.get('/short') ?? 0, 2, 'call after TTL expiry should re-fetch');
+  });
+
+  await run('TTL is clamped to a minimum of 1s when 0 is requested', async () => {
+    resetCounters();
+    const key = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/zeroTtl`, method: 'GET', headers: { 'x-cache-ttl': '0' } });
+    proxy.clearKey(key);
+    await callProxy('/zeroTtl', { 'x-cache-ttl': '0' });
+    await callProxy('/zeroTtl', { 'x-cache-ttl': '0' }); // immediately after, still cached
+    assert.equal(callsByPath.get('/zeroTtl') ?? 0, 1, '0 should be clamped to 1s minimum, not "no cache"');
+  });
+
+  // ─── 9. Load / fan-out ────────────────────────────────────────────────────
+  header('9. Load fan-out');
 
   await run('100 concurrent requests across 10 keys → exactly 10 upstream calls', async () => {
     resetCounters();

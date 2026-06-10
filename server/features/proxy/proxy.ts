@@ -5,6 +5,7 @@ import https                             from 'node:https';
 import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
 import crypto                            from 'node:crypto';
+import { WebSocket }                     from 'ws';
 import Router                            from '../../router.ts';
 import { resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts';
 
@@ -40,7 +41,16 @@ export interface ProxyConfig {
       body?: string;
       body_encoding?: 'utf8' | 'base64';
     }>;
+    getNodeSession?(nodeId: string): { mode?: string; ws?: { readyState?: number } } | null;
   };
+  /**
+   * Optional override for the SSRF / DNS-resolution check that runs at the top
+   * of every handleRequest. Defaults to `resolveAndCheckTarget` (production:
+   * blocks private/loopback ranges and rewrites the URL to the resolved IP).
+   * Tests pass a permissive function that returns a synthetic SafeResolution
+   * so localhost upstreams aren't blocked.
+   */
+  ssrfCheck?: (target_url: string) => Promise<SafeResolution>;
 }
 
 export interface ProxyResponse {
@@ -208,6 +218,7 @@ export default class ConsensusProxy {
   private stats:           { total_requests: number; cache_hits: number; cache_misses: number };
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
+  private ssrfCheck:       (target_url: string) => Promise<SafeResolution>;
   private cleanupTimer:    ReturnType<typeof setInterval>;
 
   constructor(config: ProxyConfig = {}) {
@@ -223,6 +234,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.ssrfCheck       = config.ssrfCheck ?? resolveAndCheckTarget;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
   }
@@ -250,7 +262,7 @@ export default class ConsensusProxy {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const resolved = await resolveAndCheckTarget(target_url);
+    const resolved = await this.ssrfCheck(target_url);
 
     const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
@@ -317,12 +329,22 @@ export default class ConsensusProxy {
     try {
       console.log(`[Route to Node] ${node.id} (${node.region})`);
 
+      // The orchestrator registers itself for routing, but it never opens a
+      // control tunnel or needs to proxy through its own public domain.
+      if (node.id === 'server') {
+        console.log('[Route to Self] Selected orchestrator node');
+        return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+      }
+
       const forwardHeaders: Headers = {};
       for (const [k, v] of Object.entries(headers)) {
         if (!STRIP_REQUEST_HEADERS.has(k.toLowerCase())) forwardHeaders[k] = v;
       }
 
-      if (this.nodeTunnel) {
+      // Avoid entering a tunnel implementation that cannot currently deliver
+      // to the selected node. requestProxy checks again to cover disconnects.
+      const session = this.nodeTunnel?.getNodeSession?.(node.id);
+      if (session?.mode === 'control' && session.ws?.readyState === WebSocket.OPEN) {
         try {
           const result = await this.executeViaTunnel(node, target_url, method, forwardHeaders, body);
           const finalResult = { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id };
