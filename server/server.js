@@ -63,6 +63,18 @@ function proxyTargetForLog(value) {
   }
 }
 
+function proxyRequestTargetForLog(targetUrl, targetRef) {
+  if (targetRef?.kind === 'tunnel') {
+    return {
+      target_kind: 'private-tunnel',
+      tunnel_id: String(targetRef.tunnel_id ?? ''),
+      target_path: typeof targetRef.path === 'string' ? targetRef.path.split('?')[0] : null,
+      target_has_query: typeof targetRef.path === 'string' && targetRef.path.includes('?'),
+    };
+  }
+  return { target_kind: 'url', ...proxyTargetForLog(targetUrl) };
+}
+
 if (!FREE_MODE) {
   if (!process.env.FACILITATOR_URL) throw new Error('FACILITATOR_URL is missing from .env');
   if (!EVM_PAY_TO || !SOLANA_PAY_TO || !ICP_PAY_TO) throw new Error('Missing required env var(s): EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO');
@@ -107,7 +119,14 @@ const nodeStats = registerNodes(app, server, x402Server, {
   SOLANA_PAY_TO,
   ICP_PAY_TO,
 });
-const proxy = new ConsensusProxy({ router: router, nodeTunnel: nodeTunnelStats });
+const proxy = new ConsensusProxy({
+  router,
+  nodeTunnel: nodeTunnelStats,
+  privateTunnel: {
+    authorize: tunnelStats.authorizePrivateTarget,
+    execute: tunnelStats.executePrivateHttp,
+  },
+});
 
 app.get('/', publicLimiter, (req, res) => {
   res.json({
@@ -164,8 +183,8 @@ app.get('/stats', publicLimiter, (_req, res) => {
 });
 
 app.post('/proxy', proxyLimiter, async (req, res, next) => {
-  const { target_url, method = 'GET', headers = {}, body } = req.body;
-  if (!target_url) return next();
+  const { target_url, target_ref, method = 'GET', headers = {}, body } = req.body;
+  if (!target_url && target_ref?.kind !== 'tunnel') return next();
 
   const requestId = crypto.randomUUID();
   const requestStartedAt = Date.now();
@@ -174,10 +193,28 @@ app.post('/proxy', proxyLimiter, async (req, res, next) => {
   log.info('proxy-http', 'request-received', {
     request_id: requestId,
     method: String(method).toUpperCase(),
-    ...proxyTargetForLog(target_url),
+    ...proxyRequestTargetForLog(target_url, target_ref),
   });
 
-  const dedupeKey = proxy.computeDedupeKey({ target_url, method, headers, body });
+  let dedupeKey;
+  try {
+    if (target_ref?.kind === 'tunnel') {
+      await proxy.authorizeTunnelTarget(target_ref);
+      dedupeKey = proxy.computeTunnelDedupeKey({ target_ref, method, headers, body });
+    } else {
+      dedupeKey = proxy.computeDedupeKey({ target_url, method, headers, body });
+    }
+  } catch (error) {
+    const status = Number(error?.statusCode) || 400;
+    log.warn('proxy-http', 'request-rejected', {
+      request_id: requestId,
+      method: String(method).toUpperCase(),
+      status,
+      message: error instanceof Error ? error.message : String(error),
+      ...proxyRequestTargetForLog(target_url, target_ref),
+    });
+    return res.status(status).json({ error: error instanceof Error ? error.message : 'Invalid proxy target' });
+  }
   const cached = proxy.getCached(dedupeKey);
 
   if (cached) {
@@ -190,11 +227,12 @@ app.post('/proxy', proxyLimiter, async (req, res, next) => {
       served_by: cached.served_by ?? null,
       dedupe_key: dedupeKey.substring(0, 12),
       total_ms: Date.now() - requestStartedAt,
-      ...proxyTargetForLog(target_url),
+      ...proxyRequestTargetForLog(target_url, target_ref),
     });
     return res.json({
       status: cached.status,
       statusText: cached.statusText,
+      headers: cached.headers,
       data: cached.data,
       meta: {
         cached: true,
@@ -209,7 +247,7 @@ app.post('/proxy', proxyLimiter, async (req, res, next) => {
     request_id: requestId,
     method: String(method).toUpperCase(),
     dedupe_key: dedupeKey.substring(0, 12),
-    ...proxyTargetForLog(target_url),
+    ...proxyRequestTargetForLog(target_url, target_ref),
   });
   next();
 });
@@ -239,10 +277,10 @@ app.post('/proxy', async (req, res) => {
   const requestStartedAt = res.locals.proxyRequestStartedAt ?? startTime;
 
   try {
-    const { target_url, method = 'GET', headers = {}, body } = req.body;
+    const { target_url, target_ref, method = 'GET', headers = {}, body } = req.body;
 
-    if (!target_url) {
-      return res.status(400).json({ error: 'Missing target_url' });
+    if (!target_url && target_ref?.kind !== 'tunnel') {
+      return res.status(400).json({ error: 'Missing target_url or target_ref' });
     }
 
     const methodUpper = String(method).toUpperCase();
@@ -251,7 +289,7 @@ app.post('/proxy', async (req, res) => {
       request_id: requestId,
       method: methodUpper,
       verbose: isVerbose,
-      ...proxyTargetForLog(target_url),
+      ...proxyRequestTargetForLog(target_url, target_ref),
     });
 
     if (
@@ -262,7 +300,9 @@ app.post('/proxy', async (req, res) => {
       headers['x-idempotency-key'] = crypto.randomBytes(16).toString('hex');
     }
 
-    const response = await proxy.handleRequest(target_url, methodUpper, headers, body);
+    const response = target_ref?.kind === 'tunnel'
+      ? await proxy.handleTunnelRequest(target_ref, methodUpper, headers, body)
+      : await proxy.handleRequest(target_url, methodUpper, headers, body);
 
     const processingTime = Date.now() - startTime;
     log.info('proxy-http', 'request-completed', {
@@ -274,7 +314,7 @@ app.post('/proxy', async (req, res) => {
       dedupe_key: response.dedupe_key?.substring(0, 12) ?? null,
       processing_ms: processingTime,
       total_ms: Date.now() - requestStartedAt,
-      ...proxyTargetForLog(target_url),
+      ...proxyRequestTargetForLog(target_url, target_ref),
     });
 
     const fullResponse = {
@@ -307,9 +347,10 @@ app.post('/proxy', async (req, res) => {
       method: String(req.body?.method ?? 'GET').toUpperCase(),
       total_ms: Date.now() - requestStartedAt,
       message: error instanceof Error ? error.message : String(error),
-      ...proxyTargetForLog(req.body?.target_url),
+      ...proxyRequestTargetForLog(req.body?.target_url, req.body?.target_ref),
     });
-    res.status(500).json({
+    const status = Number(error?.statusCode) || 500;
+    res.status(status).json({
       error: 'Proxy request failed',
       message: error.message,
       timestamp: new Date().toISOString(),

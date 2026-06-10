@@ -416,7 +416,7 @@ export function ProxyClient(
   ): Promise<ProxyResponseShape> {
     const targetUrl = String(payload.target_url || '').trim();
     if (!targetUrl) {
-      throw new ProxyClientError('target_url is required when proxy is in stand-down mode');
+      throw new ProxyClientError('Private tunnel requests cannot bypass the proxy in stand-down mode');
     }
 
     const method = String(payload.method || 'GET').toUpperCase();
@@ -481,7 +481,7 @@ export function ProxyClient(
     };
 
     const proxyResult = await requestProxy({
-      target_url: String(payload.target_url || ''),
+      ...(payload.target_ref ? { target_ref: payload.target_ref } : { target_url: String(payload.target_url || '') }),
       method: String(payload.method || 'GET').toUpperCase(),
       headers: controlHeaders,
       ...(typeof payload.body !== 'undefined' ? { body: payload.body } : {}),

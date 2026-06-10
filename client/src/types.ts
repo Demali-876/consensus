@@ -226,7 +226,13 @@ export type ProxyClientOptions = {
 };
 
 export type ProxyPayload = {
-  target_url: string;
+  target_url?: string;
+  target_ref?: {
+    kind: 'tunnel';
+    tunnel_id: string;
+    capability: string;
+    path: string;
+  };
   method: string;
   headers: Record<string, string>;
   body?: unknown;

@@ -38,6 +38,8 @@ interface PendingToken {
   tunnelId: string;
   expires:  number;
   type:     'http' | 'tcp';
+  visibility: 'public' | 'private';
+  proxyCapabilityHash?: Buffer;
   nodeId?:  string | null;
   targetHost?: string;
   targetPort?: number;
@@ -46,6 +48,8 @@ interface PendingToken {
 interface TunnelEntry {
   tunnelId: string;
   type:     'http' | 'tcp';
+  visibility: 'public' | 'private';
+  proxyCapabilityHash?: Buffer;
   ws:       WebSocket;
   streams:  Map<number, TunnelStream>;
   nodeId?:  string | null;
@@ -67,8 +71,50 @@ let   streamCounter = 0;
 
 const TCP_PORT = 20_000;
 const WS_BACKPRESSURE_BYTES = parseInt(process.env.TUNNEL_WS_BACKPRESSURE_BYTES ?? '', 10) || 1 * 1024 * 1024;
+const MAX_HTTP_REQUEST_BYTES = 10 * 1024 * 1024;
+const MAX_HTTP_RESPONSE_BYTES = 50 * 1024 * 1024;
 
 const STRIP_HEADERS = new Set(['connection', 'content-length', 'transfer-encoding']);
+const STRIP_PRIVATE_PROXY_HEADERS = new Set([
+  ...STRIP_HEADERS,
+  'accept-encoding', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+  'te', 'trailer', 'upgrade',
+  'x-idempotency-key', 'idempotency-key',
+  'x-payment', 'x-verbose', 'x-api-key', 'x-cache-ttl',
+  'x-node-region', 'x-node-domain', 'x-node-exclude',
+  'x-forwarded-for', 'x-real-ip', 'forwarded',
+]);
+
+export interface PrivateTunnelTarget {
+  kind: 'tunnel';
+  tunnel_id: string;
+  capability: string;
+  path: string;
+}
+
+export interface TunnelHttpRequest {
+  method: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+}
+
+export interface TunnelHttpResponse {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  data: unknown;
+  timestamp: number;
+}
+
+class TunnelRequestError extends Error {
+  statusCode: number;
+
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.name = 'TunnelRequestError';
+    this.statusCode = statusCode;
+  }
+}
 
 interface RelayStream {
   streamId?: string;
@@ -293,12 +339,64 @@ function buildRawRequest(req: Request): Buffer {
   return body.length > 0 ? Buffer.concat([head, body]) : head;
 }
 
-function parseRawResponse(buf: Buffer): { status: number; headers: Record<string, string>; body: Buffer } {
+function encodeProxyBody(body: unknown): Buffer {
+  if (body === undefined || body === null) return Buffer.alloc(0);
+  if (Buffer.isBuffer(body)) return body;
+  if (typeof body === 'string') return Buffer.from(body);
+  return Buffer.from(JSON.stringify(body));
+}
+
+function buildPrivateProxyRawRequest(target: PrivateTunnelTarget, request: TunnelHttpRequest): Buffer {
+  const method = String(request.method || 'GET').toUpperCase();
+  if (!/^[A-Z]+$/.test(method)) throw new TunnelRequestError(400, 'Invalid tunnel request method');
+  if (
+    typeof target.path !== 'string' ||
+    !target.path.startsWith('/') ||
+    target.path.includes('\r') ||
+    target.path.includes('\n')
+  ) {
+    throw new TunnelRequestError(400, 'Invalid tunnel request path');
+  }
+
+  const lines = [`${method} ${target.path} HTTP/1.1`];
+  let hasHost = false;
+  let hasContentType = false;
+  for (const [rawKey, rawValue] of Object.entries(request.headers ?? {})) {
+    const key = rawKey.toLowerCase();
+    const value = String(rawValue);
+    if (STRIP_PRIVATE_PROXY_HEADERS.has(key)) continue;
+    if (!/^[!#$%&'*+\-.^_`|~0-9a-z]+$/i.test(rawKey) || value.includes('\r') || value.includes('\n')) {
+      throw new TunnelRequestError(400, 'Invalid tunnel request header');
+    }
+    if (key === 'host') hasHost = true;
+    if (key === 'content-type') hasContentType = true;
+    lines.push(`${rawKey}: ${value}`);
+  }
+
+  const methodCanHaveBody = method !== 'GET' && method !== 'HEAD';
+  const body = methodCanHaveBody ? encodeProxyBody(request.body) : Buffer.alloc(0);
+  if (body.length > MAX_HTTP_REQUEST_BYTES) {
+    throw new TunnelRequestError(413, 'Tunnel request body too large');
+  }
+  if (body.length && !hasContentType && typeof request.body === 'object' && !Buffer.isBuffer(request.body)) {
+    lines.push('content-type: application/json');
+  }
+  if (!hasHost) lines.push('host: localhost');
+  if (body.length) lines.push(`content-length: ${body.length}`);
+  lines.push('connection: close');
+
+  const head = Buffer.from(lines.join('\r\n') + '\r\n\r\n');
+  return body.length > 0 ? Buffer.concat([head, body]) : head;
+}
+
+function parseRawResponse(buf: Buffer): { status: number; statusText: string; headers: Record<string, string>; body: Buffer } {
   const headerEnd = buf.indexOf('\r\n\r\n');
-  if (headerEnd === -1) return { status: 502, headers: {}, body: Buffer.alloc(0) };
+  if (headerEnd === -1) return { status: 502, statusText: 'Bad Gateway', headers: {}, body: Buffer.alloc(0) };
 
   const lines  = buf.subarray(0, headerEnd).toString().split('\r\n');
-  const status = parseInt(lines[0].split(' ')[1]);
+  const statusLine = lines[0].split(' ');
+  const status = parseInt(statusLine[1]);
+  const statusText = statusLine.slice(2).join(' ');
   const headers: Record<string, string> = {};
 
   for (let i = 1; i < lines.length; i++) {
@@ -314,7 +412,12 @@ function parseRawResponse(buf: Buffer): { status: number; headers: Record<string
     delete headers['transfer-encoding'];
   }
 
-  return { status, headers, body };
+  return {
+    status: Number.isInteger(status) ? status : 502,
+    statusText,
+    headers,
+    body,
+  };
 }
 
 function decodeChunkedBody(buf: Buffer): Buffer {
@@ -341,6 +444,132 @@ function decodeChunkedBody(buf: Buffer): Buffer {
   }
 
   return Buffer.concat(chunks);
+}
+
+function privateCapabilityHash(capability: string): Buffer {
+  return crypto.createHash('sha256').update(capability).digest();
+}
+
+function getAuthorizedPrivateTunnel(target: PrivateTunnelTarget): TunnelEntry {
+  if (
+    !target ||
+    target.kind !== 'tunnel' ||
+    typeof target.tunnel_id !== 'string' ||
+    typeof target.capability !== 'string'
+  ) {
+    throw new TunnelRequestError(400, 'Invalid private tunnel target');
+  }
+
+  const tunnel = activeTunnels.get(target.tunnel_id);
+  const providedHash = privateCapabilityHash(target.capability);
+  const authorized = Boolean(
+    tunnel &&
+    tunnel.visibility === 'private' &&
+    tunnel.type === 'http' &&
+    tunnel.ws.readyState === WebSocket.OPEN &&
+    tunnel.proxyCapabilityHash &&
+    providedHash.length === tunnel.proxyCapabilityHash.length &&
+    crypto.timingSafeEqual(providedHash, tunnel.proxyCapabilityHash),
+  );
+  if (!authorized) throw new TunnelRequestError(403, 'Invalid private tunnel target');
+  return tunnel!;
+}
+
+function executeRawHttpViaTunnel(
+  tunnel: TunnelEntry,
+  rawRequest: Buffer,
+  method: string,
+  path: string,
+): Promise<{ status: number; statusText: string; headers: Record<string, string>; body: Buffer }> {
+  if (tunnel.ws.readyState !== WebSocket.OPEN) {
+    throw new TunnelRequestError(503, 'Tunnel not connected');
+  }
+
+  const streamId = (++streamCounter) >>> 0;
+  const chunks: Buffer[] = [];
+  let responseBytes = 0;
+  let settled = false;
+  const loggedPath = path.includes('?') ? `${path.slice(0, path.indexOf('?'))}?<redacted>` : path;
+
+  log.info('public-tunnel', 'http-stream-open', {
+    tunnel_id: tunnel.tunnelId,
+    visibility: tunnel.visibility,
+    stream_id: streamId,
+    method,
+    url: loggedPath,
+    node_id: tunnel.nodeId ?? null,
+    target_host: tunnel.targetHost ?? null,
+    target_port: tunnel.targetPort ?? null,
+  });
+
+  return new Promise((resolve, reject) => {
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      tunnel.streams.delete(streamId);
+      fn();
+    };
+    const fail = (statusCode: number, message: string) => {
+      closeTunnelStream(tunnel, streamId, message);
+      finish(() => reject(new TunnelRequestError(statusCode, message)));
+    };
+    const timer = setTimeout(() => fail(504, 'Tunnel timeout'), 30_000);
+
+    const handlers: Omit<TunnelStream, 'streamId'> = {
+      onData: (payload: Buffer) => {
+        if (settled) return;
+        responseBytes += payload.length;
+        if (responseBytes > MAX_HTTP_RESPONSE_BYTES) {
+          fail(502, 'Tunnel response too large');
+          return;
+        }
+        chunks.push(payload);
+      },
+      onEnd: () => finish(() => {
+        const response = parseRawResponse(Buffer.concat(chunks));
+        log.info('public-tunnel', 'http-stream-complete', {
+          tunnel_id: tunnel.tunnelId,
+          visibility: tunnel.visibility,
+          stream_id: streamId,
+          status: response.status,
+          response_bytes: response.body.length,
+        });
+        resolve(response);
+      }),
+      onReset: () => {
+        log.warn('public-tunnel', 'http-stream-reset', {
+          tunnel_id: tunnel.tunnelId,
+          visibility: tunnel.visibility,
+          stream_id: streamId,
+        });
+        finish(() => reject(new TunnelRequestError(502, 'Tunnel reset stream')));
+      },
+    };
+
+    tunnel.streams.set(streamId, { streamId, ...handlers });
+    openTunnelStream(tunnel, streamId, rawRequest, handlers);
+  });
+}
+
+async function executePrivateHttpViaTunnel(
+  target: PrivateTunnelTarget,
+  request: TunnelHttpRequest,
+): Promise<TunnelHttpResponse> {
+  const tunnel = getAuthorizedPrivateTunnel(target);
+  const rawRequest = buildPrivateProxyRawRequest(target, request);
+  const response = await executeRawHttpViaTunnel(tunnel, rawRequest, request.method, target.path);
+  const text = response.body.toString('utf8');
+  let data: unknown;
+  try { data = JSON.parse(text); } catch { data = text; }
+
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+    data,
+    timestamp: Date.now(),
+  };
 }
 
 function parseTarget(value: unknown): { host?: string; port?: number } {
@@ -394,7 +623,7 @@ function startTcpGateway(): void {
       socket.setTimeout(0);
 
       const tunnel = activeTunnels.get(tunnelId);
-      if (!tunnel || tunnel.ws.readyState !== WebSocket.OPEN) {
+      if (!tunnel || tunnel.visibility !== 'public' || tunnel.ws.readyState !== WebSocket.OPEN) {
         socket.write('ERR tunnel-not-found\n');
         socket.destroy();
         return;
@@ -451,6 +680,10 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
 
   app.post('/tunnel', (req, res) => {
     const type = (req.body?.type === 'tcp') ? 'tcp' : 'http';
+    const visibility = req.body?.visibility === 'private' ? 'private' : 'public';
+    if (visibility === 'private' && type !== 'http') {
+      return res.status(400).json({ error: 'Private proxy tunnels must use HTTP mode' });
+    }
     const target = parseTarget(req.body?.target ?? req.body?.target_url ?? req.body?.target_host ?? req.body?.host);
     const targetHost = target.host;
     const targetPort = targetHost
@@ -470,11 +703,13 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
       return res.status(503).json({ error: 'No route available for target-backed tunnel' });
     }
     const token   = crypto.randomBytes(32).toString('hex');
+    const proxyCapability = visibility === 'private' ? crypto.randomBytes(32).toString('hex') : null;
     const expires = Date.now() + 60_000;
 
     log.info('public-tunnel', 'created', {
       tunnel_id: tunnelId,
       type,
+      visibility,
       node_id: node?.id ?? null,
       target_host: targetHost ?? null,
       target_port: targetPort ?? null,
@@ -485,19 +720,26 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
       tunnelId,
       expires,
       type,
+      visibility,
+      proxyCapabilityHash: proxyCapability ? privateCapabilityHash(proxyCapability) : undefined,
       nodeId: node?.id ?? null,
       targetHost,
       targetPort: targetPort ?? undefined,
     });
+    const connectProtocol = req.protocol === 'https' ? 'wss' : 'ws';
+    const connectHost = req.get('host') ?? 'consensus.canister.software';
 
     res.json({
       tunnelId,
       type,
       token,
-      connect_url: `wss://consensus.canister.software/tunnel-connect?token=${token}`,
+      connect_url: `${connectProtocol}://${connectHost}/tunnel-connect?token=${token}`,
       expires_in:  60,
       node_id: node?.id ?? null,
-      ...(type === 'http'
+      ...(proxyCapability ? { proxy_capability: proxyCapability } : {}),
+      ...(visibility === 'private'
+        ? {}
+        : type === 'http'
         ? { public_url: `https://${tunnelId}.tunnel.canister.software` }
         : { tcp_addr:   `tcp.tunnel.canister.software:${TCP_PORT}` }
       ),
@@ -522,7 +764,7 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
 
     function handleTunnelRequest() {
       const tunnel = activeTunnels.get(subdomain);
-      if (!tunnel || tunnel.ws.readyState !== WebSocket.OPEN) {
+      if (!tunnel || tunnel.visibility !== 'public' || tunnel.ws.readyState !== WebSocket.OPEN) {
         log.warn('public-tunnel', 'http-request-unavailable', {
           tunnel_id: subdomain,
           host,
@@ -533,55 +775,21 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
         return;
       }
 
-      const streamId = (++streamCounter) >>> 0;
-      const rawReq   = buildRawRequest(req);
-      const chunks:  Buffer[] = [];
-
-      log.info('public-tunnel', 'http-stream-open', {
-        tunnel_id: subdomain,
-        stream_id: streamId,
-        method: req.method,
-        url: req.url,
-        node_id: tunnel.nodeId ?? null,
-        target_host: tunnel.targetHost ?? null,
-        target_port: tunnel.targetPort ?? null,
-      });
-      const timer = setTimeout(() => {
-        tunnel.streams.delete(streamId);
-        closeTunnelStream(tunnel, streamId, 'http tunnel timeout');
-        if (!res.headersSent) res.status(504).json({ error: 'Tunnel timeout' });
-      }, 30_000);
-
-      const handlers: Omit<TunnelStream, 'streamId'> = {
-        onData: (payload: Buffer) => chunks.push(payload),
-        onEnd: () => {
-          clearTimeout(timer);
-          tunnel.streams.delete(streamId);
-          const { status, headers, body } = parseRawResponse(Buffer.concat(chunks));
-          log.info('public-tunnel', 'http-stream-complete', {
-            tunnel_id: subdomain,
-            stream_id: streamId,
-            status,
-            response_bytes: body.length,
-          });
+      void executeRawHttpViaTunnel(tunnel, buildRawRequest(req), req.method, req.url)
+        .then(({ status, headers, body }) => {
           const skip = new Set(['content-length', 'transfer-encoding', 'connection']);
           for (const [k, v] of Object.entries(headers)) {
             if (!skip.has(k)) res.setHeader(k, v);
           }
           res.status(status).send(body);
-        },
-        onReset: () => {
-          clearTimeout(timer);
-          tunnel.streams.delete(streamId);
-          log.warn('public-tunnel', 'http-stream-reset', {
-            tunnel_id: subdomain,
-            stream_id: streamId,
-          });
-          if (!res.headersSent) res.status(502).json({ error: 'Tunnel reset stream' });
-        },
-      };
-      tunnel.streams.set(streamId, { streamId, ...handlers });
-      openTunnelStream(tunnel, streamId, rawReq, handlers);
+        })
+        .catch((error) => {
+          if (!res.headersSent) {
+            res.status((error as TunnelRequestError).statusCode ?? 502).json({
+              error: error instanceof Error ? error.message : 'Tunnel request failed',
+            });
+          }
+        });
     }
   });
 
@@ -613,12 +821,14 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
       return;
     }
 
-    const { tunnelId, type, nodeId, targetHost, targetPort } = pending;
+    const { tunnelId, type, visibility, proxyCapabilityHash, nodeId, targetHost, targetPort } = pending;
     pendingTokens.delete(token!);
 
     tunnelWss.handleUpgrade(req, socket, head, (ws) => {
       (ws as any).tunnelId = tunnelId;
       (ws as any).type = type;
+      (ws as any).visibility = visibility;
+      (ws as any).proxyCapabilityHash = proxyCapabilityHash;
       (ws as any).nodeId = nodeId;
       (ws as any).targetHost = targetHost;
       (ws as any).targetPort = targetPort;
@@ -633,6 +843,8 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
       ws,
       streams: new Map(),
       type: (ws as any).type,
+      visibility: (ws as any).visibility,
+      proxyCapabilityHash: (ws as any).proxyCapabilityHash,
       nodeId: (ws as any).nodeId,
       targetHost: (ws as any).targetHost,
       targetPort: (ws as any).targetPort,
@@ -641,6 +853,7 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
     log.info('public-tunnel', 'owner-connected', {
       tunnel_id: tunnelId,
       type: tunnel.type,
+      visibility: tunnel.visibility,
       node_id: tunnel.nodeId ?? null,
       target_host: tunnel.targetHost ?? null,
       target_port: tunnel.targetPort ?? null,
@@ -717,6 +930,10 @@ export function registerTunnel(app: Express, server: Server, options: { router?:
   }, 10_000);
 
   return {
+    authorizePrivateTarget: (target: PrivateTunnelTarget) => {
+      getAuthorizedPrivateTunnel(target);
+    },
+    executePrivateHttp: executePrivateHttpViaTunnel,
     getStats: () => ({
       active_tunnels: activeTunnels.size,
       pending_tokens: pendingTokens.size,

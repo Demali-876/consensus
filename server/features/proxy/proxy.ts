@@ -8,6 +8,7 @@ import crypto                            from 'node:crypto';
 import { WebSocket }                     from 'ws';
 import Router                            from '../../router.ts';
 import { resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts';
+import type { PrivateTunnelTarget, TunnelHttpResponse } from '../tunnel/tunnel.ts';
 
 const httpAgent  = new http.Agent ({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
@@ -51,6 +52,14 @@ export interface ProxyConfig {
    * so localhost upstreams aren't blocked.
    */
   ssrfCheck?: (target_url: string) => Promise<SafeResolution>;
+  privateTunnel?: {
+    authorize(target: PrivateTunnelTarget): void | Promise<void>;
+    execute(target: PrivateTunnelTarget, input: {
+      method: string;
+      headers?: Headers;
+      body?: RequestBody;
+    }): Promise<TunnelHttpResponse>;
+  };
 }
 
 export interface ProxyResponse {
@@ -79,6 +88,13 @@ export interface ProxyStats {
 
 interface DedupeParams {
   target_url: string;
+  method:     string;
+  headers?:   Headers;
+  body?:      RequestBody;
+}
+
+interface TunnelDedupeParams {
+  target_ref: PrivateTunnelTarget;
   method:     string;
   headers?:   Headers;
   body?:      RequestBody;
@@ -197,6 +213,17 @@ function getScope(headers: Headers): string {
   return 'global';
 }
 
+function getPrivateTunnelScope(headers: Headers): string {
+  const sensitive: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (lower === 'authorization' || lower === 'cookie' || lower === 'x-api-key') {
+      sensitive[lower] = sha256Hex(value);
+    }
+  }
+  return Object.keys(sensitive).length > 0 ? sha256Hex(stableStringify(sensitive)) : 'global';
+}
+
 function generateDedupeKey({ target_url, method, headers = {}, body }: DedupeParams): string {
   const semanticHeaders = canonicalizeSemanticHeaders(headers);
   const canonical = {
@@ -211,6 +238,28 @@ function generateDedupeKey({ target_url, method, headers = {}, body }: DedupePar
   return sha256Hex(stableStringify(canonical));
 }
 
+function canonicalizeTunnelPath(raw: string): string {
+  if (!raw.startsWith('/')) throw new TypeError(`Invalid tunnel path: ${raw}`);
+  const canonical = new URL(canonicalizeUrl(new URL(raw, 'http://private-tunnel.invalid').toString()));
+  return `${canonical.pathname}${canonical.search}`;
+}
+
+function generateTunnelDedupeKey({ target_ref, method, headers = {}, body }: TunnelDedupeParams): string {
+  if (target_ref?.kind !== 'tunnel' || !target_ref.tunnel_id) {
+    throw new TypeError('Invalid private tunnel target');
+  }
+  const canonical = {
+    v:         1,
+    scope:     getPrivateTunnelScope(headers),
+    method:    method.toUpperCase(),
+    tunnel_id: target_ref.tunnel_id,
+    path:      canonicalizeTunnelPath(target_ref.path),
+    headers:   canonicalizeSemanticHeaders(headers),
+    body_hash: computeBodyHash(body),
+  };
+  return sha256Hex(stableStringify(canonical));
+}
+
 export default class ConsensusProxy {
   private cache:           NodeCache;
   private pendingRequests: Map<string, Promise<ProxyResponse>>;
@@ -218,6 +267,7 @@ export default class ConsensusProxy {
   private stats:           { total_requests: number; cache_hits: number; cache_misses: number };
   private router:          Router;
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
+  private privateTunnel?:  ProxyConfig['privateTunnel'];
   private ssrfCheck:       (target_url: string) => Promise<SafeResolution>;
   private cleanupTimer:    ReturnType<typeof setInterval>;
 
@@ -234,6 +284,7 @@ export default class ConsensusProxy {
     this.stats           = { total_requests: 0, cache_hits: 0, cache_misses: 0 };
     this.router          = config.router ?? new Router();
     this.nodeTunnel      = config.nodeTunnel;
+    this.privateTunnel   = config.privateTunnel;
     this.ssrfCheck       = config.ssrfCheck ?? resolveAndCheckTarget;
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
@@ -305,6 +356,70 @@ export default class ConsensusProxy {
       ? this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved)
       : (console.log('[Self-Fallback] No nodes available, executing directly'),
          this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved));
+
+    this.pendingRequests.set(dedupeKey, promise);
+    try {
+      return await promise;
+    } finally {
+      this.pendingRequests.delete(dedupeKey);
+    }
+  }
+
+  async authorizeTunnelTarget(target: PrivateTunnelTarget): Promise<void> {
+    if (!this.privateTunnel) throw new TypeError('Private tunnel proxying is unavailable');
+    await this.privateTunnel.authorize(target);
+  }
+
+  async handleTunnelRequest(
+    target_ref: PrivateTunnelTarget,
+    method:     string,
+    headers:    Headers = {},
+    body?:      RequestBody,
+    cacheTTL?:  number,
+  ): Promise<ProxyResponse> {
+    await this.authorizeTunnelTarget(target_ref);
+    const dedupeKey = generateTunnelDedupeKey({ target_ref, method, headers, body });
+    const ttlRaw = headers['x-cache-ttl']
+      ?? Object.entries(headers).find(([k]) => k.toLowerCase() === 'x-cache-ttl')?.[1];
+    const ttlFromHdr = ttlRaw !== undefined ? Number(ttlRaw) : NaN;
+    const resolvedTTL = cacheTTL !== undefined ? cacheTTL
+      : Number.isInteger(ttlFromHdr) && ttlFromHdr >= 0 ? ttlFromHdr
+      : 300;
+    const ttl = Math.min(MAX_CACHE_TTL_SEC, resolvedTTL === 0 ? 1 : Math.max(1, resolvedTTL));
+
+    this.stats.total_requests++;
+    const cached = this.cache.get<ProxyResponse>(dedupeKey);
+    if (cached) {
+      this.stats.cache_hits++;
+      return { ...cached, cached: true, payment_required: false, dedupe_key: dedupeKey };
+    }
+
+    const pending = this.pendingRequests.get(dedupeKey);
+    if (pending) {
+      this.stats.cache_hits++;
+      const response = await pending;
+      return { ...response, cached: true, payment_required: false, dedupe_key: dedupeKey };
+    }
+
+    this.stats.cache_misses++;
+    const promise = this.privateTunnel!.execute(target_ref, { method, headers, body })
+      .then((response): ProxyResponse => {
+        const finalResponse: ProxyResponse = {
+          ...response,
+          cached: false,
+          payment_required: true,
+          dedupe_key: dedupeKey,
+          served_by: 'private-tunnel',
+        };
+        if (response.status >= 200 && response.status < 300) {
+          this.cache.set(dedupeKey, finalResponse, ttl);
+        }
+        return finalResponse;
+      })
+      .catch((error) => {
+        this.removePaidStatus(dedupeKey);
+        throw error;
+      });
 
     this.pendingRequests.set(dedupeKey, promise);
     try {
@@ -536,6 +651,10 @@ export default class ConsensusProxy {
 
   computeDedupeKey(params: DedupeParams): string {
     return generateDedupeKey(params);
+  }
+
+  computeTunnelDedupeKey(params: TunnelDedupeParams): string {
+    return generateTunnelDedupeKey(params);
   }
 
   getCached(dedupeKey: string): ProxyResponse | null {

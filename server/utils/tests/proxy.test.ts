@@ -558,6 +558,105 @@ describe('Input validation', () => {
   });
 });
 
+describe('Private tunnel proxying', () => {
+  const target = {
+    kind: 'tunnel' as const,
+    tunnel_id: 'private-test-tunnel',
+    capability: 'valid-capability',
+    path: '/users?b=2&a=1',
+  };
+
+  it('authorizes before execution, coalesces misses, and caches successful responses', async () => {
+    let authorizeCalls = 0;
+    let executeCalls = 0;
+    const p = new ConsensusProxy({
+      privateTunnel: {
+        authorize: (candidate) => {
+          authorizeCalls++;
+          if (candidate.capability !== target.capability) {
+            throw Object.assign(new Error('Invalid private tunnel target'), { statusCode: 403 });
+          }
+        },
+        execute: async (_candidate, input) => {
+          executeCalls++;
+          await sleep(25);
+          return {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'application/json' },
+            data: { method: input.method, execution: executeCalls },
+            timestamp: Date.now(),
+          };
+        },
+      },
+    });
+
+    try {
+      const concurrent = await Promise.all(Array.from({ length: 5 }, () =>
+        p.handleTunnelRequest(target, 'GET', {}, undefined, 60),
+      ));
+      assert.equal(executeCalls, 1);
+      assert.equal(concurrent.filter(result => result.cached).length, 4);
+
+      const cached = await p.handleTunnelRequest(
+        { ...target, path: '/users?a=1&b=2' },
+        'GET',
+        {},
+        undefined,
+        60,
+      );
+      assert.equal(cached.cached, true);
+      assert.equal(executeCalls, 1);
+      assert.equal(authorizeCalls, 6, 'every request must authorize before cache lookup');
+    } finally {
+      p.destroy();
+    }
+  });
+
+  it('does not include the capability in the dedupe key, but rejects it before cache access', async () => {
+    const p = new ConsensusProxy({
+      privateTunnel: {
+        authorize: (candidate) => {
+          if (candidate.capability !== target.capability) {
+            throw Object.assign(new Error('Invalid private tunnel target'), { statusCode: 403 });
+          }
+        },
+        execute: async () => ({
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data: 'private',
+          timestamp: Date.now(),
+        }),
+      },
+    });
+
+    try {
+      const validKey = p.computeTunnelDedupeKey({ target_ref: target, method: 'GET' });
+      const invalidTarget = { ...target, capability: 'wrong-capability' };
+      const invalidKey = p.computeTunnelDedupeKey({ target_ref: invalidTarget, method: 'GET' });
+      assert.equal(validKey, invalidKey);
+      assert.notEqual(
+        validKey,
+        p.computeTunnelDedupeKey({
+          target_ref: target,
+          method: 'GET',
+          headers: { authorization: 'Bearer user-a' },
+        }),
+        'authenticated tunnel requests must not share the global cache scope',
+      );
+
+      await p.handleTunnelRequest(target, 'GET', {}, undefined, 60);
+      await assert.rejects(
+        () => p.handleTunnelRequest(invalidTarget, 'GET', {}, undefined, 60),
+        (error: any) => error?.statusCode === 403,
+      );
+    } finally {
+      p.destroy();
+    }
+  });
+});
+
 describe('Node routing', () => {
   before(() => { resetUpstream(); proxy?.destroy(); });
 
