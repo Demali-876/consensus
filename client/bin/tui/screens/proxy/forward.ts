@@ -210,7 +210,7 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     { id: 'appPort',        value: '' },
     { id: 'appEntry',       value: '' },
     { id: 'appCheckPath',   value: prefs.defaultTarget ?? '/' },
-    { id: 'autoLaunch',     value: 'off', options: ['off', 'on'] },
+    { id: 'autoLaunch',     value: 'on',  options: ['off', 'on'] },
     { id: 'nodeRegion',     value: prefs.defaultRegion ?? '' },
     { id: 'nodeDomain',     value: '' },
     { id: 'nodeExclude',    value: prefs.defaultExcludeNode ?? '' },
@@ -321,6 +321,31 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
     'cacheTtl', 'verbose',
     ...(freeMode ? [] as FieldId[] : ['budget' as FieldId, 'family' as FieldId, 'chain' as FieldId]),
   ];
+
+  // Section boundaries — the indexes in FORM_FIELD_ORDER where each named
+  // group starts. Used by the `[` / `]` shortcut to jump between sections
+  // instead of scrolling field-by-field.
+  const SECTION_STARTS: ReadonlyArray<{ label: string; index: number }> = [
+    { label: 'APP',         index: FORM_FIELD_ORDER.indexOf('appPort')    },
+    { label: 'NODE',        index: FORM_FIELD_ORDER.indexOf('nodeRegion') },
+    { label: 'ROUTING',     index: FORM_FIELD_ORDER.indexOf('routes')     },
+    { label: 'PERFORMANCE', index: FORM_FIELD_ORDER.indexOf('cacheTtl')   },
+    ...(freeMode ? [] : [{ label: 'WALLET', index: FORM_FIELD_ORDER.indexOf('budget') }]),
+  ].filter(s => s.index >= 0);
+
+  function jumpSection(direction: -1 | 1): void {
+    const cur = formIdx;
+    if (direction === 1) {
+      const next = SECTION_STARTS.find(s => s.index > cur);
+      formIdx = next ? next.index : SECTION_STARTS[0]!.index;
+    } else {
+      const reversed = [...SECTION_STARTS].reverse();
+      const prev = reversed.find(s => s.index < cur);
+      formIdx = prev ? prev.index : SECTION_STARTS.at(-1)!.index;
+    }
+    rerender();
+  }
+
 
   function collect(): ForwardSetupResult {
     const out: ForwardSetupResult = {};
@@ -475,6 +500,12 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
         return;
       }
 
+      // [ / ] jump to previous / next section boundary within the form so
+      // settings groups (APP, NODE, ROUTING, PERFORMANCE, WALLET) are reachable
+      // in one keystroke instead of arrow-keying through every field.
+      if (section === 'form' && key.sequence === '[') { jumpSection(-1); return; }
+      if (section === 'form' && key.sequence === ']') { jumpSection( 1); return; }
+
       if (key.name === 'up' || key.name === 'k') {
         if (section === 'lists') listIdx = Math.max(0, listIdx - 1);
         else                     formIdx = Math.max(0, formIdx - 1);
@@ -525,10 +556,15 @@ async function showForwardSetupInternal(): Promise<ForwardSetupOutcome> {
   });
 }
 
-function makeFooterHints(_section: 'lists' | 'form'): FooterHint[] {
+function makeFooterHints(section: 'lists' | 'form'): FooterHint[] {
+  const formOnly: FooterHint[] = section === 'form'
+    ? [{ key: '[ ]', label: 'jump section' }]
+    : [];
   return [
     { key: 'R',    label: 'rescan'       },
+    { key: 'Tab',  label: 'list ⇄ form'  },
     { key: '↑↓',   label: 'navigate'     },
+    ...formOnly,
     { key: '↵',    label: 'edit · toggle'},
     { key: '1-5',  label: 'select'       },
     { key: 'M',    label: 'bookmark'     },

@@ -26,6 +26,7 @@ import { showTour } from './tour';
 import { buildActiveBody, type ActiveDashboard } from './landing-active';
 import { computeSnapshot } from '../../lib/dashboard-state';
 import { workerRegistry } from './proxy/hub';
+import { getActiveTunnel, subscribe as subscribeTunnel } from '../../lib/tunnel-runtime';
 
 const BANNER_FONT: FontName = 'Pagga';
 
@@ -249,7 +250,8 @@ export async function showLanding(): Promise<LandingAction> {
        process.env.CONSENSUS_FORCE_ACTIVE === '1'
     || workerRegistry.length > 0
     || recentSession
-    || Boolean(config.leased_node);
+    || Boolean(config.leased_node)
+    || Boolean(getActiveTunnel());
 
   const renderer = await createCliRenderer({
     exitOnCtrlC:        false,
@@ -496,6 +498,7 @@ export async function showLanding(): Promise<LandingAction> {
   cardRefs[2]!.tag.content = '— nodes · — regions';
   cardRefs[3]!.tag.content = 'pay-per-message';
 
+
   body.add(cardRow);
 
   const lower = new BoxRenderable(renderer, {
@@ -712,11 +715,20 @@ export async function showLanding(): Promise<LandingAction> {
     let confirming = false;
     let modalOpen  = false;
 
+    // Tunnel runtime emits notifications on every request/state change.
+    // We only need this to re-trigger the active-dashboard refresh path so
+    // the tunnel's live counters appear without waiting for the 1s poll.
+    const unsubscribeTunnel = subscribeTunnel(() => {
+      if (!live || !dashboard) return;
+      dashboard.update(computeSnapshot());
+    });
+
     const teardown = (): void => {
       live = false;
       clearInterval(clockTimer);
       clearInterval(healthTimer);
       if (dashboardTimer) clearInterval(dashboardTimer);
+      unsubscribeTunnel();
       renderer.destroy();
     };
 

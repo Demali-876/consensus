@@ -1,6 +1,7 @@
 
 import { workerRegistry } from '../tui/screens/proxy/hub';
 import { loadConfig, loadSessions, loadSpending, type SessionRecord } from './store';
+import { getActiveTunnel } from './tunnel-runtime';
 
 export interface MetricTunnels {
   value:      number;     // currently active tunnels
@@ -193,9 +194,14 @@ export function computeSnapshot(): DashboardSnapshot {
   history.bytesSinceStart = Math.max(history.bytesSinceStart, totalBytes);
 
   // ── Tunnels metric ──────────────────────────────────────────────────────
-  const tunnelsActive = activeSessions.filter(
+  // The runtime singleton (one active tunnel at most) is the source of truth
+  // for an in-process tunnel; sessions.json only gets a record once the tunnel
+  // stops. Add 1 here so the metric reflects the live state, not just history.
+  const runtimeTunnel = getActiveTunnel();
+  const sessionTunnels = activeSessions.filter(
     s => s.type === 'tunnel-http' || s.type === 'tunnel-tcp',
   ).length;
+  const tunnelsActive = sessionTunnels + (runtimeTunnel ? 1 : 0);
   history.peakTunnels = Math.max(history.peakTunnels, tunnelsActive);
   push(history.tunnels, tunnelsActive);
 
@@ -245,7 +251,25 @@ export function computeSnapshot(): DashboardSnapshot {
     });
   }
 
-  // 2. Cross-process sessions (tunnels, ws, etc.) from sessions.json.
+  // 2a. Live in-process tunnel from the runtime singleton — has real latency
+  // and request counters available, unlike the sessions.json fallback below.
+  if (runtimeTunnel) {
+    const avgLat = runtimeTunnel.recentLatencies.length > 0
+      ? runtimeTunnel.recentLatencies.reduce((a, b) => a + b, 0) / runtimeTunnel.recentLatencies.length
+      : undefined;
+    rows.push({
+      key:      `tunnel-${runtimeTunnel.tunnelId || 'live'}`,
+      type:     'tnl',
+      endpoint: runtimeTunnel.publicUrl ||
+                `${runtimeTunnel.setup.target}${runtimeTunnel.setup.port ? ':' + runtimeTunnel.setup.port : ''}`,
+      reqs:     fmtReqs(runtimeTunnel.requestCount),
+      latency:  fmtLatency(avgLat),
+      status:   runtimeTunnel.status === 'connected' ? 'live' :
+                runtimeTunnel.status === 'connecting' ? 'recon' : 'idle',
+    });
+  }
+
+  // 2b. Cross-process sessions (tunnels, ws, etc.) from sessions.json.
   for (const s of activeSessions) {
     // Skip what we already have via workerRegistry to avoid double-listing.
     if (s.type === 'http-proxy' || s.type === 'reverse-proxy') continue;
@@ -347,6 +371,21 @@ export function computeSnapshot(): DashboardSnapshot {
       glyphColor: 'accent',
       text:  'lease acquired',
       tail:  `${config.leased_node.domain}${config.leased_node.region ? ' · ' + config.leased_node.region : ''}`,
+    });
+  }
+
+  // Surface the live runtime tunnel as a "tunnel up" event so it appears in
+  // the activity feed even before its sessions.json record exists.
+  if (runtimeTunnel) {
+    events.push({
+      at:    runtimeTunnel.startedAt,
+      time:  fmtHms(runtimeTunnel.startedAt),
+      kind:  'tunnel-up',
+      glyph: '●',
+      glyphColor: 'emerald',
+      text:  'tunnel up',
+      tail:  runtimeTunnel.publicUrl ||
+             `${runtimeTunnel.setup.target}${runtimeTunnel.setup.port ? ':' + runtimeTunnel.setup.port : ''}`,
     });
   }
 

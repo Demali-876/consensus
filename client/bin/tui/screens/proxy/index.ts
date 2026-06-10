@@ -2,22 +2,13 @@ import { showProxyHub, registerWorker, removeWorker, type WorkerEntry } from './
 import { showForwardSetup }   from './forward.js';
 import { showReverseSetup }   from './reverse.js';
 import { showProxyDashboard } from './dashboard.js';
-import { dispatchProxy }      from '../../../../src/proxy-worker.js';
-import type { ProxyWorkerHandle, WorkerStats } from '../../../../src/proxy-worker.js';
+import { dispatchProxy, startPreloadCollector }      from '../../../../src/proxy-worker.js';
+import type { ProxyWorkerHandle } from '../../../../src/proxy-worker.js';
 import { createAppState } from '../../../lib/app-manager.js';
 import { writeCrashLog, writeTraceLog } from '../../../lib/crash-log';
 import { loadPrefs } from '../../../lib/store.ts';
 import { createCliRenderer, BoxRenderable, TextRenderable } from '@opentui/core';
 import { C }                  from '../../../theme';
-
-function createPreloadHandle(port: number): ProxyWorkerHandle {
-  const startedAt = Date.now();
-  const stats = (): WorkerStats => ({
-    requests: 0, bytesSent: 0, bytesRecv: 0,
-    uptime: Date.now() - startedAt, spend: 0,
-  });
-  return { type: 'forward', port, stats, stop: async () => {} };
-}
 
 async function runForward(): Promise<void> {
   writeTraceLog('proxy.runForward.enter');
@@ -26,7 +17,16 @@ async function runForward(): Promise<void> {
   if (!setup) return;
   if ('swap' in setup) return runReverse();
 
-  const handle = createPreloadHandle(loadPrefs().defaultProxyPort);
+  let handle: ProxyWorkerHandle;
+  try {
+    handle = await startPreloadCollector({ port: loadPrefs().defaultProxyPort });
+  } catch (err) {
+    const logPath = writeCrashLog('preload collector start', err);
+    writeTraceLog('proxy.runForward.collectorError', {
+      message: err instanceof Error ? err.message : String(err), logPath,
+    });
+    return;
+  }
 
   const routeLabel = setup.nodeDomain ?? setup.nodeRegion ?? 'auto';
   const label = setup.appPort ? `app:${setup.appPort} → ${routeLabel}` : routeLabel;

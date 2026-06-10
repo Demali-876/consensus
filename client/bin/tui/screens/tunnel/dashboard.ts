@@ -1,6 +1,4 @@
-import net       from 'net';
 import crypto    from 'node:crypto';
-import WebSocket from 'ws';
 import {
   createCliRenderer,
   type CliRenderer,
@@ -11,52 +9,24 @@ import {
 import { C } from '../../../theme';
 import { makeBadge } from '../../chrome.ts';
 import { makeSpin } from '../../../lib/spinners.ts';
-import { saveSession } from '../../../lib/store.ts';
+import {
+  getActiveTunnel,
+  startTunnel,
+  stopTunnel,
+  subscribe as subscribeTunnel,
+  type TunnelSnapshot,
+  type TunnelLogEntry,
+} from '../../../lib/tunnel-runtime.ts';
 import type { TunnelSetupResult } from './setup.ts';
 
-const SERVER = process.env.CONSENSUS_SERVER_URL ?? 'https://consensus.canister.software';
 const IS_PREVIEW = process.env.CONSENSUS_PREVIEW_TUNNEL === '1';
-
-const FRAME = {
-  STREAM_OPEN:  0x01,
-  STREAM_DATA:  0x02,
-  STREAM_END:   0x03,
-  STREAM_RESET: 0x04,
-  PING:         0x05,
-  PONG:         0x06,
-} as const;
-
-function encodeFrame(type: number, streamId: number, payload: Buffer = Buffer.alloc(0)): Buffer {
-  const header = Buffer.allocUnsafe(5);
-  header.writeUInt8(type, 0);
-  header.writeUInt32BE(streamId, 1);
-  return Buffer.concat([header, payload]);
-}
-
-function decodeFrame(data: Buffer): { type: number; streamId: number; payload: Buffer } {
-  return { type: data.readUInt8(0), streamId: data.readUInt32BE(1), payload: data.subarray(5) };
-}
-
-function parseHttpRequestLine(payload: Buffer): { method: string; path: string } | null {
-  const text  = payload.toString('utf8', 0, Math.min(payload.length, 512));
-  const line  = text.split('\r\n')[0] ?? '';
-  const parts = line.split(' ');
-  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
-  return { method: parts[0], path: parts[1] };
-}
-
-function parseHttpStatusCode(data: Buffer): number | null {
-  const text = data.toString('utf8', 0, Math.min(data.length, 64));
-  const m    = text.match(/^HTTP\/\d+\.?\d*\s+(\d{3})/);
-  return m ? parseInt(m[1]!) : null;
-}
 
 function fmtStatus(code: number): string {
   if (code === 0)   return '—';
   if (code < 300)   return `${code} OK`;
-  if (code === 304) return `${code} NM`;       // Not Modified (matches the design copy)
+  if (code === 304) return `${code} NM`;
   if (code < 400)   return `${code} RDR`;
-  if (code === 404) return `${code} NF`;       // Not Found (design uses 'NF')
+  if (code === 404) return `${code} NF`;
   if (code < 500)   return `${code} ERR`;
   return `${code} FAIL`;
 }
@@ -64,7 +34,7 @@ function fmtStatus(code: number): string {
 function statusFg(code: number): string {
   if (code === 0)     return C.dim;
   if (code < 300)     return C.emerald;
-  if (code < 400)     return C.accent;          // 3xx → purple per design
+  if (code < 400)     return C.accent;
   if (code < 500)     return C.amber;
   return C.red;
 }
@@ -105,7 +75,7 @@ function fmtCount(n: number): string {
 }
 
 const SPARK_BARS = ['▁','▂','▃','▄','▅','▆','▇','█'] as const;
-const SPARK_WIDTH = 40;          // matches design "LAST 40" footer
+const SPARK_WIDTH = 40;
 
 function sparkline(values: number[], width = SPARK_WIDTH): string {
   if (values.length === 0) return ' '.repeat(width);
@@ -129,26 +99,6 @@ const METHOD_FG: Record<string, string> = {
   TCP:     C.cyan,
 };
 
-type LogEntry = {
-  time:       string;
-  method:     string;
-  path:       string;
-  statusCode: number;
-  latencyMs?: number;
-  size?:      number;       // response body bytes (for SIZE column)
-};
-
-type PendingStream = {
-  method:        string;
-  path:          string;
-  startedAt:     number;
-  gotStatus:     boolean;
-  respBuf:       Buffer;
-  headersDone:   boolean;
-  contentLength: number;     // -1 = unknown
-  bodyReceived:  number;
-};
-
 type LogRowRef = {
   box:     BoxRenderable;
   time:    TextRenderable;
@@ -160,7 +110,7 @@ type LogRowRef = {
 };
 
 const MAX_LOG = 20;
-const MAX_LATENCY_SAMPLES = SPARK_WIDTH;       // 40 — drives both stats and the bottom sparkline
+const MAX_LATENCY_SAMPLES = SPARK_WIDTH;
 
 interface MetricTileRefs {
   box:      BoxRenderable;
@@ -221,7 +171,7 @@ const FAKE_PATHS = [
 const FAKE_METHODS = ['GET','GET','GET','GET','GET','GET','POST','POST','POST','DELETE','PUT','PATCH'];
 const FAKE_STATUSES = [200,200,200,200,200,200,200,202,204,304,404,502];
 
-function fakeEntry(): LogEntry {
+function fakeEntry(): TunnelLogEntry {
   const method = FAKE_METHODS[Math.floor(Math.random() * FAKE_METHODS.length)]!;
   const path   = FAKE_PATHS  [Math.floor(Math.random() * FAKE_PATHS.length)]!;
   const code   = FAKE_STATUSES[Math.floor(Math.random() * FAKE_STATUSES.length)]!;
@@ -229,15 +179,14 @@ function fakeEntry(): LogEntry {
   const isCached = code === 304;
   const lat = isSlow ? 600 + Math.random() * 800
             : isCached ? 5 + Math.random() * 20
-            : 20 + Math.random() * 280;
-  const size = code === 304 ? 0
-            : Math.floor(500 + Math.random() * 55_000);
+            : 20 + Math.random() * 200;
   return {
-    time: fmtClock(Date.now()),
-    method, path,
+    time:       fmtClock(Date.now()),
+    method,
+    path,
     statusCode: code,
     latencyMs:  Math.round(lat),
-    size,
+    size:       Math.floor(200 + Math.random() * 8000),
   };
 }
 
@@ -412,20 +361,25 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   const footerChips = new BoxRenderable(renderer, {
     flexDirection: 'row', gap: 2, alignItems: 'center', backgroundColor: C.panel,
   });
-  type Hint = { key: string; label: string; stub?: boolean };
+  type Hint = { key: string; label: string; stub?: boolean; danger?: boolean };
   const HINTS: Hint[] = [
     { key: 'C',   label: 'clear log'    },
     { key: 'F',   label: 'filter',         stub: true },
     { key: 'P',   label: 'pause stream',   stub: true },
     { key: '↑↓',  label: 'scroll',         stub: true },
     { key: '↵',   label: 'inspect',        stub: true },
-    { key: 'Q',   label: 'stop tunnel' },
+    { key: 'Q',   label: 'back · tunnel keeps running' },
+    { key: 'X',   label: 'stop tunnel', danger: true },
   ];
   for (const h of HINTS) {
     const pair = new BoxRenderable(renderer, { flexDirection: 'row', gap: 1, alignItems: 'center', backgroundColor: C.panel });
-    pair.add(makeBadge(renderer, h.key, { bg: C.slate, fg: C.white }).box);
+    const badgeBg = h.danger ? C.red : C.slate;
+    const badgeFg = h.danger ? C.dark : C.white;
+    pair.add(makeBadge(renderer, h.key, { bg: badgeBg, fg: badgeFg }).box);
     pair.add(new TextRenderable(renderer, {
-      content: h.label, fg: h.stub ? C.dim : C.slate, bg: C.panel,
+      content: h.label,
+      fg: h.stub ? C.dim : (h.danger ? C.red : C.slate),
+      bg: C.panel,
     }));
     footerChips.add(pair);
   }
@@ -433,20 +387,9 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   footer.add(new TextRenderable(renderer, { content: 'ACTIVE TUNNEL', fg: C.dim, bg: C.panel }));
   root.add(footer);
 
-  let live       = true;
-  let connected  = false;
-  let paused     = false;
-  const startedAt = Date.now();
-  const log: LogEntry[] = [];
-  const sessionId = crypto.randomUUID();
-  let requestCount = 0;
-  let bytesSent    = 0;
-  let bytesRecv    = 0;
-  let totalStreams = 0;
-  let tunnelPublicUrl = '';
-  let activeStreams   = 0;
-  const recentLatencies: number[] = [];
-  const recentStatuses:  number[] = [];   // capped at 100, used for error-rate tile
+  let live    = true;
+  let cleared = 0;          // number of leading entries to hide for the "clear log" affordance
+  let paused  = false;      // reserved — stub key, not wired into runtime yet
 
   const targetStr = [setup.target, setup.port].filter(Boolean).join(':');
   const fwdMeta   = IS_PREVIEW
@@ -456,7 +399,19 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
   fwdTile.unit.content  = '';
   fwdTile.meta.content  = fwdMeta;
 
-  function renderLog(): void {
+  // Preview-mode local snapshot — drives the same render functions as live mode.
+  let previewSnap: TunnelSnapshot | null = null;
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
+  let previewActiveJitter: ReturnType<typeof setInterval> | null = null;
+
+  // Visible portion of the log: snapshot.log minus any entries the user "cleared".
+  function visibleLog(snap: TunnelSnapshot | null): TunnelLogEntry[] {
+    if (!snap) return [];
+    return cleared > 0 ? snap.log.slice(0, Math.max(0, snap.log.length - cleared)) : snap.log;
+  }
+
+  function renderLog(snap: TunnelSnapshot | null): void {
+    const log = visibleLog(snap);
     for (let i = 0; i < MAX_LOG; i++) {
       const e = log[i];
       const r = logRows[i]!;
@@ -482,8 +437,9 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     }
   }
 
-  function renderLatency(): void {
-    if (recentLatencies.length === 0) {
+  function renderLatency(snap: TunnelSnapshot | null): void {
+    const samples = snap?.recentLatencies ?? [];
+    if (samples.length === 0) {
       latCur.val.content = '—';
       latAvg.val.content = '—';
       latP95.val.content = '—';
@@ -491,35 +447,42 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
       sparkRef.content    = ' '.repeat(SPARK_WIDTH);
       return;
     }
-    const cur = recentLatencies.at(-1)!;
-    const avg = recentLatencies.reduce((s, v) => s + v, 0) / recentLatencies.length;
-    const sorted = [...recentLatencies].sort((a, b) => a - b);
+    const cur = samples.at(-1)!;
+    const avg = samples.reduce((s, v) => s + v, 0) / samples.length;
+    const sorted = [...samples].sort((a, b) => a - b);
     const p95idx = Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1);
     const p95 = sorted[p95idx]!;
     latCur.val.content = `${Math.round(cur)}ms`;
     latAvg.val.content = `${Math.round(avg)}ms`;
     latP95.val.content = `${Math.round(p95)}ms`;
     latLast.val.content = '';
-    sparkRef.content    = sparkline(recentLatencies, SPARK_WIDTH);
+    sparkRef.content    = sparkline(samples.slice(-MAX_LATENCY_SAMPLES), SPARK_WIDTH);
   }
 
-  function renderTiles(): void {
+  function renderTiles(snap: TunnelSnapshot | null): void {
+    const requestCount = snap?.requestCount ?? 0;
+    const startedAt    = snap?.startedAt ?? Date.now();
+    const uptimeMin    = Math.max(1, (Date.now() - startedAt) / 60_000);
+    const rpm          = Math.round(requestCount / uptimeMin);
     reqTile.value.content = fmtCount(requestCount);
-    const uptimeMin = Math.max(1, (Date.now() - startedAt) / 60_000);
-    const rpm = Math.round(requestCount / uptimeMin);
     reqTile.meta.content  = `~${rpm} / min`;
 
+    const activeStreams = snap?.activeStreams ?? 0;
+    const totalStreams  = snap?.totalStreams ?? 0;
     actTile.value.content = String(activeStreams);
     actTile.unit.content  = activeStreams === 1 ? 'stream' : 'streams';
     actTile.meta.content  = totalStreams > 0
       ? `${fmtCount(totalStreams)} total · live connections`
       : 'live connections';
 
+    const bytesSent = snap?.bytesSent ?? 0;
+    const bytesRecv = snap?.bytesRecv ?? 0;
     const sentParts = fmtBytes(bytesSent).split(' ');
     sntTile.value.content = sentParts[0] ?? '0';
     sntTile.unit.content  = sentParts[1] ?? 'B';
     sntTile.meta.content  = `↓ ${fmtBytes(bytesRecv)} recv`;
 
+    const recentStatuses = snap?.recentStatuses ?? [];
     if (recentStatuses.length === 0) {
       errTile.value.content = '0.0';
       errTile.unit.content  = '%';
@@ -532,381 +495,237 @@ export async function showTunnelDashboard(setup: TunnelSetupResult): Promise<voi
     errTile.meta.content    = `last ${Math.min(100, recentStatuses.length || 0)} reqs`;
   }
 
-  function pushEntry(entry: LogEntry): void {
-    if (!live || paused) return;
-    requestCount++;
-    if (entry.size) bytesSent += entry.size;
-    log.unshift(entry);
-    if (log.length > MAX_LOG) log.pop();
-    if (entry.latencyMs != null) {
-      recentLatencies.push(entry.latencyMs);
-      if (recentLatencies.length > MAX_LATENCY_SAMPLES) recentLatencies.shift();
+  function renderChrome(snap: TunnelSnapshot | null): void {
+    if (!snap) {
+      connStatusRef.content = '○ NO TUNNEL';
+      connStatusRef.fg      = C.dim;
+      urlRef.content        = '—';
+      regionRef.content     = '— · auto';
+      streamDot.fg          = C.dim;
+      streamLbl.content     = 'idle';
+      return;
     }
-    if (entry.statusCode > 0) {
-      recentStatuses.push(entry.statusCode);
-      if (recentStatuses.length > 100) recentStatuses.shift();
+    switch (snap.status) {
+      case 'connecting':
+        connStatusRef.content = '○ CONNECTING';
+        connStatusRef.fg      = C.amber;
+        streamDot.fg          = C.amber;
+        streamLbl.content     = 'connecting';
+        break;
+      case 'connected':
+        connStatusRef.content = '● CONNECTED';
+        connStatusRef.fg      = C.emerald;
+        streamDot.fg          = C.emerald;
+        streamLbl.content     = 'streaming';
+        break;
+      case 'disconnected':
+        connStatusRef.content = `○ ${snap.statusReason ?? 'DISCONNECTED'}`;
+        connStatusRef.fg      = C.red;
+        streamDot.fg          = C.red;
+        streamLbl.content     = 'idle';
+        break;
+      case 'closed':
+        connStatusRef.content = '○ CLOSED';
+        connStatusRef.fg      = C.dim;
+        streamDot.fg          = C.dim;
+        streamLbl.content     = 'idle';
+        break;
     }
-    renderLog();
-    renderLatency();
-    renderTiles();
+    urlRef.content    = snap.publicUrl || '—';
+    regionRef.content = `${snap.region} · auto`;
   }
 
-  function setConnected(url: string, region = 'sfo'): void {
-    connected = true;
-    connStatusRef.content = '● CONNECTED';
-    connStatusRef.fg      = C.emerald;
-    tunnelPublicUrl = url;
-    urlRef.content = url;
-    regionRef.content = `${region} · auto`;
+  function renderAll(snap: TunnelSnapshot | null): void {
+    renderChrome(snap);
+    renderTiles(snap);
+    renderLog(snap);
+    renderLatency(snap);
   }
 
-  function setDisconnected(reason: string, color: string = C.amber): void {
-    connected = false;
-    connStatusRef.content = `○ ${reason}`;
-    connStatusRef.fg      = color;
-    streamDot.fg          = color;
-    streamLbl.content     = 'idle';
-  }
-
-  renderLog();
-  renderLatency();
-  renderTiles();
+  // Initial render. Will be overwritten as soon as the runtime emits its first event.
+  renderAll(getActiveTunnel());
 
   const spin      = makeSpin('checking');
   const spinTimer = setInterval(() => {
-    if (!live || connected) return;
-    connStatusRef.content = `${spin()} CONNECTING`;
+    if (!live) return;
+    const snap = previewSnap ?? getActiveTunnel();
+    if (snap?.status === 'connecting') {
+      connStatusRef.content = `${spin()} CONNECTING`;
+    }
   }, 100);
 
   const clockTimer = setInterval(() => {
     if (!live) return;
+    const snap = previewSnap ?? getActiveTunnel();
+    const startedAt = snap?.startedAt ?? Date.now();
     uptimeRef.content = fmtHms(Date.now() - startedAt);
-    renderTiles();
+    // The clock tick is also a periodic re-render so rpm and recv counters stay fresh
+    // even between runtime events.
+    renderTiles(snap);
   }, 1000);
 
-  let ws: WebSocket | null = null;
-  const sockets = new Map<number, net.Socket>();
-  let previewTimer: ReturnType<typeof setInterval> | null = null;
-  let previewActiveJitter: ReturnType<typeof setInterval> | null = null;
+  let unsubscribe: () => void = () => {};
 
-  const shutdown = (): void => {
+  // Tear down the *view* only — keep the runtime tunnel alive.
+  const closeView = (): void => {
     if (!live) return;
     live = false;
     clearInterval(spinTimer);
     clearInterval(clockTimer);
-    if (previewTimer) clearInterval(previewTimer);
+    if (previewTimer) clearTimeout(previewTimer);
     if (previewActiveJitter) clearInterval(previewActiveJitter);
-    for (const s of sockets.values()) s.destroy();
-    sockets.clear();
-    try { ws?.close(); } catch { /* ignore */ }
-    const endedAt = Date.now();
-    saveSession({
-      id:         sessionId,
-      type:       setup.protocol === 'http' ? 'tunnel-http' : 'tunnel-tcp',
-      url:        tunnelPublicUrl,
-      target:     targetStr,
-      startedAt,
-      endedAt,
-      durationMs: endedAt - startedAt,
-      outcome:    'user-quit',
-      spendUsd:   0,
-      requests:   requestCount,
-      bytesIn:    bytesRecv,
-      bytesOut:   bytesSent,
-    });
+    unsubscribe();
     renderer.destroy();
   };
 
-  const inputDone = new Promise<void>(resolve => {
-    renderer.keyInput.on('keypress', (key) => {
-      if (!live) return;
-      if (key.name === 'c' || key.name === 'C') {
-        log.splice(0);
-        renderLog();
-        return;
-      }
-      if (key.ctrl && key.name === 'c') { shutdown(); resolve(); return; }
-      if (key.name === 'q' || key.name === 'Q' || key.name === 'b' || key.name === 'B') {
-        shutdown(); resolve();
-      }
-    });
-  });
+  // Tear down the runtime tunnel as well as the view.
+  const stopAndClose = async (): Promise<void> => {
+    try { await stopTunnel(); } catch { /* best-effort */ }
+    closeView();
+  };
 
+  // ── Preview mode ──────────────────────────────────────────────────────────
+  // Synthetic data path used by the design preview. Doesn't touch the runtime;
+  // builds a local snapshot that the render functions consume.
   if (IS_PREVIEW) {
     const slug = crypto.createHash('sha1').update(`${setup.protocol}:${targetStr}`).digest('hex').slice(0, 4);
     const url  = setup.protocol === 'http'
       ? `https://t-${slug}.consensus.canister.software`
       : `tcp://t-${slug}.consensus.canister.software:${5000 + (parseInt(slug, 16) % 50_000)}`;
 
+    previewSnap = {
+      setup,
+      tunnelId:        slug,
+      publicUrl:       url,
+      region:          'sfo',
+      status:          'connecting',
+      statusReason:    null,
+      startedAt:       Date.now(),
+      bytesSent:       0,
+      bytesRecv:       0,
+      requestCount:    0,
+      totalStreams:    0,
+      activeStreams:   0,
+      log:             [],
+      recentLatencies: [],
+      recentStatuses:  [],
+    };
+
+    const refresh = () => renderAll(previewSnap);
+
     setTimeout(() => {
-      if (!live) return;
-      setConnected(url, 'sfo');
-      for (let i = 0; i < 8; i++) pushEntry(fakeEntry());
+      if (!live || !previewSnap) return;
+      previewSnap = { ...previewSnap, status: 'connected' };
+      for (let i = 0; i < 8; i++) {
+        const e = fakeEntry();
+        previewSnap.log.unshift(e);
+        if (previewSnap.log.length > MAX_LOG) previewSnap.log.pop();
+        previewSnap.requestCount++;
+        previewSnap.totalStreams++;
+        if (e.latencyMs != null) previewSnap.recentLatencies.push(e.latencyMs);
+        if (e.statusCode) previewSnap.recentStatuses.push(e.statusCode);
+        if (e.size) previewSnap.bytesSent += e.size;
+      }
+      refresh();
     }, 350);
 
     const schedule = (): void => {
       const wait = 400 + Math.random() * 1000;
       previewTimer = setTimeout(() => {
-        if (!live) return;
-        pushEntry(fakeEntry());
-        bytesRecv += Math.floor(20_000 + Math.random() * 80_000);
+        if (!live || !previewSnap) return;
+        const e = fakeEntry();
+        previewSnap.log.unshift(e);
+        if (previewSnap.log.length > MAX_LOG) previewSnap.log.pop();
+        previewSnap.requestCount++;
+        previewSnap.totalStreams++;
+        if (e.latencyMs != null) {
+          previewSnap.recentLatencies.push(e.latencyMs);
+          if (previewSnap.recentLatencies.length > MAX_LATENCY_SAMPLES) previewSnap.recentLatencies.shift();
+        }
+        if (e.statusCode) {
+          previewSnap.recentStatuses.push(e.statusCode);
+          if (previewSnap.recentStatuses.length > 100) previewSnap.recentStatuses.shift();
+        }
+        if (e.size) previewSnap.bytesSent += e.size;
+        previewSnap.bytesRecv += Math.floor(20_000 + Math.random() * 80_000);
+        refresh();
         schedule();
-      }, wait) as unknown as ReturnType<typeof setInterval>;
+      }, wait);
     };
     schedule();
 
     previewActiveJitter = setInterval(() => {
-      if (!live) return;
-      activeStreams = 1 + Math.floor(Math.random() * 4);
-      renderTiles();
+      if (!live || !previewSnap) return;
+      previewSnap.activeStreams = 1 + Math.floor(Math.random() * 4);
+      refresh();
     }, 1800);
 
-    await inputDone;
+    await new Promise<void>(resolve => {
+      renderer.keyInput.on('keypress', (key) => {
+        if (!live) return;
+        if (key.name === 'c' || key.name === 'C') {
+          if (previewSnap) previewSnap.log.splice(0);
+          renderLog(previewSnap);
+          return;
+        }
+        if (key.ctrl && key.name === 'c') { closeView(); resolve(); return; }
+        if (key.name === 'q' || key.name === 'Q' || key.name === 'b' || key.name === 'B') {
+          closeView(); resolve(); return;
+        }
+        if (key.name === 'x' || key.name === 'X') {
+          closeView(); resolve(); return;
+        }
+        if (key.name === 'p' || key.name === 'P') {
+          paused = !paused;
+          return;
+        }
+      });
+    });
     return;
   }
 
-  const tunnelDone = (async () => {
-    let registration: {
-      tunnelId: string; type: 'http' | 'tcp'; token: string;
-      connect_url: string; public_url?: string; tcp_addr?: string;
-    };
-
+  // ── Live mode ─────────────────────────────────────────────────────────────
+  // Either re-attach to the existing tunnel or start a new one.
+  let current = getActiveTunnel();
+  if (!current) {
     try {
-      const res = await fetch(`${SERVER}/tunnel`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: setup.protocol }),
-      });
-      if (!res.ok) {
-        if (!live) return;
-        setDisconnected(`${res.status} ${res.statusText}`, C.red);
-        return;
-      }
-      registration = await res.json() as typeof registration;
+      current = await startTunnel(setup);
     } catch (err) {
-      if (!live) return;
-      setDisconnected((err as Error).message, C.red);
-      return;
+      connStatusRef.content = `○ ${(err as Error).message}`;
+      connStatusRef.fg      = C.red;
+      streamDot.fg          = C.red;
+      streamLbl.content     = 'idle';
     }
+  }
+  renderAll(current);
 
+  unsubscribe = subscribeTunnel((snap) => {
     if (!live) return;
+    renderAll(snap);
+  });
 
-    const publicUrl = registration.public_url ?? registration.tcp_addr ?? '';
-
-    ws = new WebSocket(registration.connect_url, { perMessageDeflate: false });
-    ws.binaryType = 'nodebuffer';
-
-    let pingTimer: ReturnType<typeof setInterval> | null = null;
-
-    ws.on('open', () => {
-      pingTimer = setInterval(() => {
-        if (ws?.readyState === WebSocket.OPEN) ws.send(encodeFrame(FRAME.PING, 0));
-      }, 30_000);
-    });
-
-    ws.on('error', (err) => {
+  await new Promise<void>(resolve => {
+    renderer.keyInput.on('keypress', (key) => {
       if (!live) return;
-      setDisconnected(err.message, C.red);
-    });
-
-    ws.on('close', () => {
-      if (pingTimer) clearInterval(pingTimer);
-      if (!live) return;
-      setDisconnected('DISCONNECTED');
-      for (const s of sockets.values()) s.destroy();
-      sockets.clear();
-      activeStreams = 0;
-      renderTiles();
-    });
-
-    const pending = new Map<number, PendingStream>();
-    let firstMsg = true;
-
-    ws.on('message', (raw: Buffer) => {
-      if (!live) return;
-      bytesRecv += raw.length;
-
-      if (firstMsg) {
-        firstMsg = false;
-        try {
-          const msg = JSON.parse(raw.toString());
-          if (msg.type === 'tunnel_open') setConnected(publicUrl);
-        } catch { /* not JSON */ }
+      if (key.name === 'c' || key.name === 'C') {
+        // "Clear log" in the view: hide all current entries until new ones arrive.
+        const snap = getActiveTunnel();
+        cleared = snap?.log.length ?? 0;
+        renderLog(snap);
         return;
       }
-
-      if (raw.length < 5 || raw[0] === 0x7b) return;
-      const frame = decodeFrame(raw);
-
-      if (frame.type === FRAME.PONG) return;
-      if (frame.type === FRAME.PING) { ws?.send(encodeFrame(FRAME.PONG, 0)); return; }
-
-      switch (frame.type) {
-
-        case FRAME.STREAM_OPEN: {
-          const host = setup.target;
-          const port = setup.port ?? (setup.protocol === 'http' ? 80 : 0);
-
-          if (setup.protocol === 'http') {
-            const parsed = parseHttpRequestLine(frame.payload);
-            if (parsed) {
-              pending.set(frame.streamId, {
-                method: parsed.method, path: parsed.path,
-                startedAt: Date.now(), gotStatus: false,
-                respBuf: Buffer.alloc(0), headersDone: false,
-                contentLength: -1, bodyReceived: 0,
-              });
-            }
-          } else {
-            pushEntry({
-              time:       fmtClock(Date.now()),
-              method:     'TCP',
-              path:       `stream #${frame.streamId}  →  ${host}:${port}`,
-              statusCode: 0,
-            });
-          }
-
-          const sock = net.createConnection({ host, port });
-
-
-          sockets.set(frame.streamId, sock);
-          activeStreams = sockets.size;
-          totalStreams++;
-          renderTiles();
-          if (frame.payload.length > 0) sock.write(frame.payload);
-
-          sock.on('data', (data: Buffer) => {
-            if (ws?.readyState === WebSocket.OPEN)
-              ws.send(encodeFrame(FRAME.STREAM_DATA, frame.streamId, data));
-            bytesSent += data.length;
-            renderTiles();
-
-            if (setup.protocol !== 'http') return;
-            const p = pending.get(frame.streamId);
-            if (!p) return;
-
-            if (!p.gotStatus) {
-              const code = parseHttpStatusCode(data);
-              if (code) {
-                p.gotStatus = true;
-                pushEntry({
-                  time:      fmtClock(Date.now()),
-                  method:    p.method,
-                  path:      p.path,
-                  statusCode: code,
-                  latencyMs: Date.now() - p.startedAt,
-                  size:      0,        // updated when stream ends below
-                });
-              }
-            }
-
-            p.respBuf = Buffer.concat([p.respBuf, data]);
-            if (!p.headersDone) {
-              const sep = p.respBuf.indexOf('\r\n\r\n');
-              if (sep !== -1) {
-                p.headersDone = true;
-                const headerText = p.respBuf.subarray(0, sep).toString();
-                const clMatch    = headerText.match(/content-length:\s*(\d+)/i);
-                p.contentLength  = clMatch ? parseInt(clMatch[1]!, 10) : -1;
-                p.bodyReceived   = p.respBuf.length - sep - 4;
-              }
-            } else if (p.contentLength >= 0) {
-              p.bodyReceived += data.length;
-            }
-
-            if (p.headersDone && p.contentLength >= 0 && p.bodyReceived >= p.contentLength) {
-              const fresh = log[0];
-              if (fresh && fresh.path === p.path) fresh.size = p.contentLength;
-              renderLog();
-
-              pending.delete(frame.streamId);
-              sockets.delete(frame.streamId);
-              activeStreams = sockets.size;
-              renderTiles();
-              sock.destroy();
-              if (ws?.readyState === WebSocket.OPEN)
-                ws.send(encodeFrame(FRAME.STREAM_END, frame.streamId));
-            }
-          });
-
-          sock.on('end', () => {
-            if (!sockets.has(frame.streamId)) return;
-            pending.delete(frame.streamId);
-            sockets.delete(frame.streamId);
-            activeStreams = sockets.size;
-            renderTiles();
-            if (ws?.readyState === WebSocket.OPEN)
-              ws.send(encodeFrame(FRAME.STREAM_END, frame.streamId));
-          });
-
-          sock.on('close', () => {
-            pending.delete(frame.streamId);
-            sockets.delete(frame.streamId);
-            activeStreams = sockets.size;
-            renderTiles();
-          });
-
-          sock.on('error', () => {
-            const p = pending.get(frame.streamId);
-            if (p) {
-              pushEntry({
-                time:       fmtClock(Date.now()),
-                method:     p.method,
-                path:       p.path,
-                statusCode: 502,
-                latencyMs:  Date.now() - p.startedAt,
-              });
-            }
-            pending.delete(frame.streamId);
-            sockets.delete(frame.streamId);
-            activeStreams = sockets.size;
-            renderTiles();
-            if (ws?.readyState === WebSocket.OPEN)
-              ws.send(encodeFrame(FRAME.STREAM_RESET, frame.streamId));
-          });
-
-          break;
-        }
-
-        case FRAME.STREAM_DATA: {
-          const sock = sockets.get(frame.streamId);
-          if (sock && !sock.destroyed) sock.write(frame.payload);
-
-          // The server sends STREAM_OPEN with an empty payload and ships the
-          // request bytes in the first STREAM_DATA frame. Parse the request
-          // line out of that frame so the activity log / latency tracking
-          // has a `pending` entry to attach the response to.
-          if (setup.protocol === 'http' && !pending.has(frame.streamId)) {
-            const parsed = parseHttpRequestLine(frame.payload);
-            if (parsed) {
-              pending.set(frame.streamId, {
-                method: parsed.method, path: parsed.path,
-                startedAt: Date.now(), gotStatus: false,
-                respBuf: Buffer.alloc(0), headersDone: false,
-                contentLength: -1, bodyReceived: 0,
-              });
-            }
-          }
-          break;
-        }
-
-        case FRAME.STREAM_END: {
-          const sock = sockets.get(frame.streamId);
-          if (sock) { sockets.delete(frame.streamId); sock.end(); activeStreams = sockets.size; renderTiles(); }
-          pending.delete(frame.streamId);
-          break;
-        }
-
-        case FRAME.STREAM_RESET: {
-          const sock = sockets.get(frame.streamId);
-          if (sock) { sockets.delete(frame.streamId); sock.destroy(); activeStreams = sockets.size; renderTiles(); }
-          pending.delete(frame.streamId);
-          break;
-        }
+      if (key.name === 'p' || key.name === 'P') {
+        paused = !paused;
+        return;
+      }
+      if (key.ctrl && key.name === 'c') { closeView(); resolve(); return; }
+      if (key.name === 'q' || key.name === 'Q' || key.name === 'b' || key.name === 'B') {
+        closeView(); resolve(); return;
+      }
+      if (key.name === 'x' || key.name === 'X') {
+        void stopAndClose().then(resolve);
+        return;
       }
     });
-  })();
-
-  await inputDone;
-  await tunnelDone.catch(() => {});
+  });
 }

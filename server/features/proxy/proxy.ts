@@ -284,12 +284,22 @@ export default class ConsensusProxy {
     console.log(`[Cache MISS] ${dedupeKey.slice(0, 12)}... | TTL: ${ttl}s`);
 
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
-    if (node && typeof node.id === 'string') {
-      return this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved);
-    }
 
-    console.log('[Self-Fallback] No nodes available, executing directly');
-    return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
+    // In-flight coalescing: register the promise BEFORE awaiting so any
+    // concurrent caller for the same dedupe key joins this work instead of
+    // duplicating the upstream call. Without this, a burst of N concurrent
+    // requests fan out into N upstream fetches and N "Cache MISS" log lines.
+    const promise: Promise<ProxyResponse> = (node && typeof node.id === 'string')
+      ? this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved)
+      : (console.log('[Self-Fallback] No nodes available, executing directly'),
+         this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved));
+
+    this.pendingRequests.set(dedupeKey, promise);
+    try {
+      return await promise;
+    } finally {
+      this.pendingRequests.delete(dedupeKey);
+    }
   }
 
   private async executeViaNode(

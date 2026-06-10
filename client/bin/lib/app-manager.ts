@@ -39,6 +39,11 @@ function writePreloadFile(cwd: string, opts: PreloadOpts): string {
   const lines = [
     'import { ProxyClient, createPaymentFetch } from "@canister-software/consensus-cli";',
     '',
+    // Capture native fetch BEFORE we override globalThis.fetch — used to ship',
+    // stats back to the parent worker without recursing through ProxyClient.',
+    'const __nativeFetch = globalThis.fetch.bind(globalThis);',
+    'const __statsUrl = process.env.CONSENSUS_WORKER_STATS_URL ?? null;',
+    '',
     'const paymentFetch = await createPaymentFetch({',
     ...fetchOpts,
     '});',
@@ -47,7 +52,50 @@ function writePreloadFile(cwd: string, opts: PreloadOpts): string {
     ...clientOpts,
     '});',
     '',
-    'globalThis.fetch = client.fetch as typeof fetch;',
+    'function __targetUrl(input) {',
+    '  if (typeof input === "string") return input;',
+    '  if (input instanceof URL) return input.toString();',
+    '  if (input && typeof input === "object" && "url" in input) return input.url;',
+    '  return String(input);',
+    '}',
+    '',
+    'function __reportStats(payload) {',
+    '  if (!__statsUrl) return;',
+    '  try {',
+    '    __nativeFetch(__statsUrl, {',
+    '      method: "POST",',
+    '      headers: { "content-type": "application/json" },',
+    '      body: JSON.stringify(payload),',
+    '    }).catch(() => {});',
+    '  } catch { /* fire-and-forget */ }',
+    '}',
+    '',
+    'globalThis.fetch = (async (input, init) => {',
+    '  const start = performance.now();',
+    '  const target = __targetUrl(input);',
+    '  try {',
+    '    const res = await client.fetch(input, init);',
+    '    const lenHdr = res.headers.get("content-length");',
+    '    __reportStats({',
+    '      ok:        res.ok,',
+    '      status:    res.status,',
+    '      latencyMs: Math.round(performance.now() - start),',
+    '      target,',
+    '      bytes:     lenHdr ? parseInt(lenHdr, 10) || 0 : 0,',
+    '    });',
+    '    return res;',
+    '  } catch (err) {',
+    '    __reportStats({',
+    '      ok:        false,',
+    '      status:    0,',
+    '      latencyMs: Math.round(performance.now() - start),',
+    '      target,',
+    '      bytes:     0,',
+    '      error:     err && err.message ? err.message : String(err),',
+    '    });',
+    '    throw err;',
+    '  }',
+    '}) as typeof fetch;',
   ];
   fs.writeFileSync(preloadPath, lines.join('\n') + '\n', 'utf8');
   return preloadPath;
@@ -257,9 +305,16 @@ export async function launchManagedApp(
   append(logPath, `\n[${stamp()}] launch command=${launchCommand} cwd=${appCwd}\n`);
   append(logPath, `[${stamp()}] preload written=${preloadPath}\n`);
 
+  const childEnv: Record<string, string> = { ...process.env as Record<string, string> };
+  // Side-channel: the preload fires-and-forgets a tiny POST to this URL after
+  // every fetch so the parent worker's dashboard counters reflect real traffic
+  // even though the actual /proxy request goes direct to the Consensus server.
+  if (opts.proxyPort) {
+    childEnv.CONSENSUS_WORKER_STATS_URL = `http://localhost:${opts.proxyPort}/_consensus/stats`;
+  }
   const proc = Bun.spawn([process.env.SHELL ?? 'zsh', '-lc', launchCommand], {
     cwd: appCwd,
-    env: { ...process.env as Record<string, string> },
+    env: childEnv,
     stdout: 'pipe',
     stderr: 'pipe',
   });

@@ -465,6 +465,45 @@ async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorke
   });
 
   const server = http.createServer(async (req, res) => {
+    // ── Stats side-channel ─────────────────────────────────────────────────
+    // The auto-relaunched app's preload posts here after every fetch so the
+    // dashboard reflects real traffic even though /proxy requests go direct
+    // to the Consensus server. See app-manager.writePreloadFile.
+    if (req.method === 'POST' && (req.url === '/_consensus/stats' || req.url?.startsWith('/_consensus/stats?'))) {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        try {
+          const raw = Buffer.concat(chunks).toString('utf8');
+          const payload = JSON.parse(raw) as {
+            ok?: boolean; status?: number; latencyMs?: number; bytes?: number;
+          };
+          counters.requests++;
+          if (typeof payload.bytes === 'number' && payload.bytes > 0) {
+            counters.bytesRecv += payload.bytes;
+          }
+          recordResult(
+            typeof payload.latencyMs === 'number' ? payload.latencyMs : 0,
+            payload.ok === true,
+            typeof payload.status === 'number' ? payload.status : undefined,
+          );
+          opts.onStats?.(snapshot());
+          res.writeHead(204);
+          res.end();
+        } catch {
+          res.writeHead(400);
+          res.end('bad stats payload');
+        }
+      });
+      req.on('error', () => {
+        if (!res.headersSent) {
+          res.writeHead(400);
+          res.end('bad stats stream');
+        }
+      });
+      return;
+    }
+
     const requestStartedAt = performance.now();
     counters.requests++;
 
@@ -522,6 +561,94 @@ async function startForwardProxy(opts: ForwardWorkerOptions): Promise<ProxyWorke
 
   const port = await bindServer(server, opts.port, 'forward proxy');
   console.log(`[ForwardProxy] listening on :${port}`);
+
+  return {
+    type: 'forward',
+    port,
+    stats: snapshot,
+    stop:  () => new Promise((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    ),
+  };
+}
+
+// ─── Preload-mode stats collector ─────────────────────────────────────────────
+// The forward proxy in this codebase doesn't run its own HTTP proxy — it
+// auto-relaunches the user's app with a preload that wraps `globalThis.fetch`
+// and routes calls straight to the Consensus server. To still surface live
+// counters in the dashboard, the preload fires-and-forgets a tiny POST per
+// fetch to the URL below. This server is the receiver: it owns nothing but
+// counters and the stats endpoint.
+
+export interface PreloadCollectorOptions {
+  /** Preferred listen port. If taken/unspecified, the OS assigns one. */
+  port?: number;
+}
+
+export async function startPreloadCollector(opts: PreloadCollectorOptions = {}): Promise<ProxyWorkerHandle> {
+  const startedAt = Date.now();
+  const counters  = { requests: 0, bytesSent: 0, bytesRecv: 0, spend: 0 };
+  const recentLatencies: number[] = [];
+  const recentOutcomes: boolean[] = [];
+  let lastStatusCode: number | undefined;
+
+  const recordResult = (latencyMs: number, ok: boolean, statusCode?: number) => {
+    pushRecent(recentLatencies, latencyMs);
+    pushRecent(recentOutcomes, ok);
+    if (statusCode !== undefined) lastStatusCode = statusCode;
+  };
+
+  const snapshot = (): WorkerStats => ({
+    ...counters,
+    uptime: Date.now() - startedAt,
+    currentLatencyMs: recentLatencies.at(-1),
+    avgLatencyMs:     average(recentLatencies),
+    p95LatencyMs:     percentile(recentLatencies, 95),
+    recentLatencies:  [...recentLatencies],
+    recentOutcomes:   [...recentOutcomes],
+    lastStatusCode,
+  });
+
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || !(req.url === '/_consensus/stats' || req.url?.startsWith('/_consensus/stats?'))) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        const payload = JSON.parse(raw) as {
+          ok?: boolean; status?: number; latencyMs?: number; bytes?: number;
+        };
+        counters.requests++;
+        if (typeof payload.bytes === 'number' && payload.bytes > 0) {
+          counters.bytesRecv += payload.bytes;
+        }
+        recordResult(
+          typeof payload.latencyMs === 'number' ? payload.latencyMs : 0,
+          payload.ok === true,
+          typeof payload.status === 'number' ? payload.status : undefined,
+        );
+        res.writeHead(204);
+        res.end();
+      } catch {
+        res.writeHead(400);
+        res.end('bad stats payload');
+      }
+    });
+    req.on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(400);
+        res.end('bad stats stream');
+      }
+    });
+  });
+
+  const port = await bindServer(server, opts.port, 'preload stats');
+  console.log(`[PreloadCollector] listening on :${port}`);
 
   return {
     type: 'forward',

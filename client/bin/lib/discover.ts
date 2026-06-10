@@ -49,14 +49,29 @@ function parseCommand(cmd: string): { service: string; rawEntry: string | null }
   else if (/tsx/i.test(binaryBase))  service = 'tsx';
 
   const SKIP = new Set(['run', 'exec', 'start', 'dev', 'x', '--smol', '--hot']);
-  let rawEntry: string | null = null;
+  // Flags that consume the NEXT positional arg as their value. Without this
+  // list, `bun --preload preload.ts entry.ts` mis-parses preload.ts as the
+  // entry file (preload.ts is .ts and isn't itself a flag).
+  const FLAGS_WITH_VALUE = new Set([
+    '--preload', '-r', '--require', '--import',
+    '--inspect-brk', '--inspect-wait',
+    '--env-file', '--config', '--tsconfig',
+    '--define', '--external', '--loader',
+  ]);
+  const candidates: string[] = [];
 
   for (let i = 1; i < parts.length; i++) {
     const p = parts[i]!;
+    if (FLAGS_WITH_VALUE.has(p)) { i++; continue; }      // skip flag AND its value
     if (p.startsWith('-') || SKIP.has(p) || p.includes('=')) continue;
-    if (/\.(ts|js|mjs|cjs|tsx|jsx)$/.test(p)) { rawEntry = p; break; }
-    if (p.includes('/') && !p.startsWith('-'))  { rawEntry = p; break; }
+    if (/\.(ts|js|mjs|cjs|tsx|jsx)$/.test(p)) { candidates.push(p); continue; }
+    if (p.includes('/') && !p.startsWith('-'))  { candidates.push(p); continue; }
   }
+
+  // Runtimes consume their own args left-to-right; the user's entry is the
+  // last positional. Prefer scripts (.ts/.js/etc) over bare paths.
+  const scriptCandidates = candidates.filter(c => /\.(ts|js|mjs|cjs|tsx|jsx)$/.test(c));
+  const rawEntry: string | null = scriptCandidates.at(-1) ?? candidates.at(-1) ?? null;
 
   return { service, rawEntry };
 }
