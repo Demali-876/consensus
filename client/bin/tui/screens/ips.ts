@@ -11,7 +11,7 @@ import { makeBadge, makeKeyBar, makeTopBar } from '../chrome.ts';
 import { makeSpin } from '../../lib/spinners';
 import { isFreeMode } from '../../lib/server-config';
 import { loadConfig } from '../../lib/config.ts';
-import { listNodes, leaseNode, releaseNode } from '../../lib/ip.ts';
+import { listBrowserNodes, leaseNode, releaseNode } from '../../lib/ip.ts';
 import type { NodeInfo } from '../../lib/ip.ts';
 const VISIBLE_ROWS = 8;
 
@@ -101,12 +101,17 @@ function makeLoadBar(renderer: CliRenderer): { box: BoxRenderable; fill: TextRen
   return { box, fill, pct };
 }
 
-function renderLoadBar(refs: { fill: TextRenderable; pct: TextRenderable }, loadPct?: number, focused = false): void {
+function renderLoadBar(
+  refs: { fill: TextRenderable; pct: TextRenderable },
+  loadPct?: number,
+  focused = false,
+  activeTotal?: number,
+): void {
   if (loadPct == null) {
     refs.fill.content = '─'.repeat(LOAD_BAR_WIDTH);
     refs.fill.fg = C.line2;
-    refs.pct.content = '  —';
-    refs.pct.fg = C.dim;
+    refs.pct.content = activeTotal == null ? '  —' : `${String(activeTotal).padStart(3)}x`;
+    refs.pct.fg = focused ? C.white : C.dim;
     return;
   }
   const clamped = Math.max(0, Math.min(100, loadPct));
@@ -339,7 +344,8 @@ function fillRow(refs: RowRefs, node: NodeInfo | undefined, focused: boolean, le
   refs.latency.content = ms != null ? `${Math.round(ms)} ms` : '—';
   refs.latency.fg      = latencyColor(ms);
 
-  renderLoadBar(refs.loadBar, undefined, focused);
+  const activeTotal = (node.activeRequests ?? 0) + (node.activeSessions ?? 0);
+  renderLoadBar(refs.loadBar, undefined, focused, activeTotal);
 
   while (refs.capsBox.getChildrenCount() > 0) {
     const child = refs.capsBox.getChildren()[0];
@@ -422,7 +428,7 @@ function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
 
   const row2 = mkStatRow();
   const loadCell = mkStatCell('LOAD');
-  const slaCell  = mkStatCell('SLA');
+  const slaCell  = mkStatCell('AVAILABILITY');
   row2.add(loadCell.cell);
   row2.add(slaCell.cell);
   box.add(row2);
@@ -493,10 +499,11 @@ function makeModal(renderer: CliRenderer, root: RootRenderable): ModalRefs {
       const ms = node.latencyMs;
       latencyCell.value.content = ms != null ? `${Math.round(ms)} ms` : '—';
       latencyCell.value.fg      = latencyColor(ms);
-      loadCell.value.content = '—';
-      loadCell.value.fg      = C.dim;
-      slaCell.value.content  = '—';
-      slaCell.value.fg       = C.dim;
+      const activeTotal = (node.activeRequests ?? 0) + (node.activeSessions ?? 0);
+      loadCell.value.content = `${activeTotal} active`;
+      loadCell.value.fg      = activeTotal > 0 ? C.amber : C.emerald;
+      slaCell.value.content  = node.availability ?? 'unknown';
+      slaCell.value.fg       = node.availability === 'online' ? C.emerald : C.amber;
       capsCell.value.content = fmtCaps(node.capabilities);
       capsCell.value.fg      = C.slate;
       ipCell.value.content   = fmtIp(node);
@@ -738,7 +745,7 @@ export async function showIps(): Promise<'back'> {
 
     try {
       const cfg = loadConfig();
-      nodes = await listNodes({ config: cfg, noCache: true });
+      nodes = await listBrowserNodes({ config: cfg });
       lastFetchedAt = Date.now();
       cursor = 0;
       offset = 0;

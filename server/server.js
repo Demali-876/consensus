@@ -17,6 +17,7 @@ import { ExactIcpScheme } from '@canister-software/x402-icp/server';
 import { registerWhitepaperSignup } from './data/whitepaperSignup.js';
 import { registerWebSocket } from './features/websocket/wss.ts';
 import { registerNodes } from './features/nodes/orchestrator.js';
+import { registerNodeBrowser } from './features/nodes/browser.js';
 import { registerTunnel } from './features/tunnel/tunnel.ts';
 import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
@@ -100,6 +101,7 @@ registerUpdater(app, { adminKey: process.env.ADMIN_KEY });
 
 const server = http.createServer(app);
 const nodeTunnelStats = registerNodeTunnel(app, server, { router });
+registerNodeBrowser(app, { router, nodeTunnel: nodeTunnelStats });
 const tunnelStats = registerTunnel(app, server, { router, nodeTunnel: nodeTunnelStats });
 const wsStats = registerWebSocket(
   app,

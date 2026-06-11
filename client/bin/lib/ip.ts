@@ -2,6 +2,27 @@ import { saveConfig, loadConfig, type ConsensusConfig } from './store.ts';
 export type { NodeInfo } from './store.ts';
 import { type NodeInfo, loadNodeCache, saveNodeCache }  from './store.ts';
 
+function nodeArray(data: unknown): unknown[] {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray((data as any)?.nodes)) return (data as any).nodes;
+  if (Array.isArray((data as any)?.data)) return (data as any).data;
+  return [];
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  if (value == null || value === '') return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function baseUrl(config: ConsensusConfig): string {
+  return (
+    config.x402_proxy_url ||
+    process.env.X402_PROXY_URL ||
+    'https://consensus.proxy.canister.software:3001'
+  ).replace(/\/$/, '');
+}
+
 export async function listNodes(opts: {
   config:   ConsensusConfig;
   region?:  string;
@@ -12,14 +33,10 @@ export async function listNodes(opts: {
     if (cached) return cached.nodes;
   }
 
-  const baseUrl = (
-    opts.config.x402_proxy_url ||
-    process.env.X402_PROXY_URL ||
-    'https://consensus.proxy.canister.software:3001'
-  ).replace(/\/$/, '');
+  const proxyUrl = baseUrl(opts.config);
 
   const apiKey = opts.config.api_key ?? '';
-  let url = `${baseUrl}/nodes`;
+  let url = `${proxyUrl}/nodes`;
   if (opts.region) url += `?region=${encodeURIComponent(opts.region)}`;
 
   const res = await fetch(url, {
@@ -32,11 +49,7 @@ export async function listNodes(opts: {
   }
 
   const data = await res.json() as unknown;
-  let rawNodes: unknown[];
-  if (Array.isArray(data))                    rawNodes = data;
-  else if (Array.isArray((data as any).nodes)) rawNodes = (data as any).nodes;
-  else if (Array.isArray((data as any).data))  rawNodes = (data as any).data;
-  else rawNodes = [];
+  const rawNodes = nodeArray(data);
 
   const nodes = rawNodes
     .filter((n): n is Record<string, unknown> => !!n && typeof n === 'object')
@@ -49,6 +62,44 @@ export async function listNodes(opts: {
 
   saveNodeCache(nodes);
   return nodes;
+}
+
+export async function listBrowserNodes(opts: {
+  config: ConsensusConfig;
+  region?: string;
+}): Promise<NodeInfo[]> {
+  const apiKey = opts.config.api_key ?? '';
+  let url = `${baseUrl(opts.config)}/nodes/browser`;
+  if (opts.region) url += `?region=${encodeURIComponent(opts.region)}`;
+
+  const res = await fetch(url, {
+    headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+  });
+
+  // Rolling deployments remain compatible while the browser endpoint propagates.
+  if (res.status === 404) return listNodes({ ...opts, noCache: true });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Failed to list browser nodes: ${res.status}${body ? ` — ${body}` : ''}`);
+  }
+
+  return nodeArray(await res.json() as unknown)
+    .filter((node): node is Record<string, unknown> => !!node && typeof node === 'object')
+    .map((node) => ({
+      ...node,
+      node_id: String(node.node_id ?? node.id ?? ''),
+      domain: node.domain == null ? '' : String(node.domain),
+      region: String(node.region ?? ''),
+      ipv4: node.ipv4 == null ? undefined : String(node.ipv4),
+      ipv6: node.ipv6 == null ? undefined : String(node.ipv6),
+      latencyMs: optionalNumber(node.latency_ms),
+      lastSeenAt: optionalNumber(node.last_seen_at),
+      activeRequests: optionalNumber(node.active_requests),
+      activeSessions: optionalNumber(node.active_sessions),
+      availability: node.availability == null ? undefined : String(node.availability),
+      version: node.version == null ? undefined : String(node.version),
+      controlTunnelConnected: node.control_tunnel_connected === true,
+    })) as NodeInfo[];
 }
 
 

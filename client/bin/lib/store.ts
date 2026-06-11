@@ -236,6 +236,11 @@ export interface NodeInfo {
   ipv6?:      string;
   latencyMs?: number;       // locally measured
   lastSeenAt?: number;
+  activeRequests?: number;
+  activeSessions?: number;
+  availability?: string;
+  version?: string;
+  controlTunnelConnected?: boolean;
 }
 
 export interface NodeCache {
