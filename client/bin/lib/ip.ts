@@ -2,6 +2,10 @@ import { saveConfig, loadConfig, type ConsensusConfig } from './store.ts';
 export type { NodeInfo } from './store.ts';
 import { type NodeInfo, loadNodeCache, saveNodeCache }  from './store.ts';
 
+const DEFAULT_SERVER_URL = 'https://consensus.canister.software';
+const LEGACY_PROXY_URL = 'https://consensus.proxy.canister.software:3001';
+const NODE_FETCH_TIMEOUT_MS = 8_000;
+
 function nodeArray(data: unknown): unknown[] {
   if (Array.isArray(data)) return data;
   if (Array.isArray((data as any)?.nodes)) return (data as any).nodes;
@@ -16,11 +20,16 @@ function optionalNumber(value: unknown): number | undefined {
 }
 
 function baseUrl(config: ConsensusConfig): string {
-  return (
-    config.x402_proxy_url ||
-    process.env.X402_PROXY_URL ||
-    'https://consensus.proxy.canister.software:3001'
-  ).replace(/\/$/, '');
+  const configured = (config.x402_proxy_url || process.env.X402_PROXY_URL || '').replace(/\/$/, '');
+  if (configured && configured !== LEGACY_PROXY_URL) return configured;
+  return (process.env.CONSENSUS_SERVER_URL || DEFAULT_SERVER_URL).replace(/\/$/, '');
+}
+
+function nodeFetch(url: string, apiKey: string): Promise<Response> {
+  return fetch(url, {
+    headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(NODE_FETCH_TIMEOUT_MS),
+  });
 }
 
 export async function listNodes(opts: {
@@ -39,9 +48,7 @@ export async function listNodes(opts: {
   let url = `${proxyUrl}/nodes`;
   if (opts.region) url += `?region=${encodeURIComponent(opts.region)}`;
 
-  const res = await fetch(url, {
-    headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
-  });
+  const res = await nodeFetch(url, apiKey);
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -72,9 +79,7 @@ export async function listBrowserNodes(opts: {
   let url = `${baseUrl(opts.config)}/nodes/browser`;
   if (opts.region) url += `?region=${encodeURIComponent(opts.region)}`;
 
-  const res = await fetch(url, {
-    headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
-  });
+  const res = await nodeFetch(url, apiKey);
 
   // Rolling deployments remain compatible while the browser endpoint propagates.
   if (res.status === 404) return listNodes({ ...opts, noCache: true });

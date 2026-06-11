@@ -665,6 +665,7 @@ export async function showIps(): Promise<'back'> {
   let loading = false;
   let lastFetchedAt = Date.now();
   let modalOpen = false;
+  let fetchError: string | null = null;
 
   function applyFilter(): void {
     filtered = activeRegion === 'all'
@@ -676,8 +677,14 @@ export async function showIps(): Promise<'back'> {
   }
 
   function renderStats(): void {
+    if (fetchError) {
+      statsText.content = `error: ${fetchError}`;
+      statsText.fg = C.red;
+      return;
+    }
     const stats = `${nodes.length} nodes · ${uniqueRegions(nodes)} regions · refreshed ${fmtRefreshedAge(lastFetchedAt)}`;
     statsText.content = nodes.length ? stats : (loading ? 'loading…' : 'no nodes');
+    statsText.fg = C.dim;
   }
 
   function renderBanner(): void {
@@ -746,6 +753,7 @@ export async function showIps(): Promise<'back'> {
     try {
       const cfg = loadConfig();
       nodes = await listBrowserNodes({ config: cfg });
+      fetchError = null;
       lastFetchedAt = Date.now();
       cursor = 0;
       offset = 0;
@@ -753,13 +761,11 @@ export async function showIps(): Promise<'back'> {
     } catch (err) {
       nodes = [];
       filtered = [];
-      statsText.content = `error: ${err instanceof Error ? err.message : String(err)}`;
-      statsText.fg = C.red;
+      fetchError = err instanceof Error ? err.message : String(err);
     } finally {
       if (spinTimer) { clearInterval(spinTimer); spinTimer = null; }
       loading = false;
       if (live) {
-        statsText.fg = C.dim;
         renderAll();
       }
     }
