@@ -1,7 +1,0 @@
-/node_modules
-.env
-.consensus-config*
-.consensus-preload.ts
-/dist*
-*.pem
-.DS_Store
