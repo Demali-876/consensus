@@ -117,14 +117,35 @@ sequenceDiagram
 6. All remaining requests with the same idempotency key receive the **cached response**.
 7. Replicas process identical responses → **state converges** → **consensus succeeds**.
 
+## Repositories
+
+The protocol spans three repos:
+
+| Repo | Role |
+| --- | --- |
+| [**consensus**](https://github.com/Demali-876/consensus) (this repo) | `server/` — the orchestrator/proxy that runs at the network edge. |
+| [**consensus-client**](https://github.com/Demali-876/consensus-client) | `@canister-software/consensus-cli` — TypeScript SDK + CLI used to interact with the network. |
+| [**consensus-node**](https://github.com/Demali-876/consensus-node) | Bun worker-node runtime that registers with the orchestrator and serves proxied requests. |
+
+> **Architecture direction:** the proxy and tunnel data paths are moving to a **control-plane / data-plane split** — the orchestrator authenticates, charges (x402), selects a node, and issues a signed ticket, after which the client connects **directly to that node**. The orchestrator serves traffic itself only when no other node is available.
+
 ## Quickstart
 
-This library has not yet been published!
+> The CLI is not yet published to npm. For now, clone [**consensus-client**](https://github.com/Demali-876/consensus-client) and run it with Bun.
 
-### 1. Install
+### 1. Install the client
+
+Once published, the CLI + SDK will be available as `@canister-software/consensus-cli`:
 
 ```bash
-npm install consensus
+npm install @canister-software/consensus-cli
+```
+
+Until then, run it from source:
+
+```bash
+git clone https://github.com/Demali-876/consensus-client
+cd consensus-client && bun install
 ```
 
 ### 2. Configure environment
@@ -141,10 +162,10 @@ CDP_WALLET_SECRET=your_wallet_secret
 
 ---
 
-### 3. Setup your client
+### 3. Set up your client
 
 ```bash
-npm run consensus setup
+bun run setup        # in the consensus-client repo
 ```
 
 This generates:

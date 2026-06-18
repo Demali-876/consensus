@@ -12,6 +12,5 @@ node_modules
 ip-pool-history*
 ssrf-poc.ts
 test-server.ts
-claude.md
 /.claude/settings.local.json
 /HANDOFF.md
