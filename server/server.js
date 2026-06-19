@@ -22,6 +22,7 @@ import { registerTunnel } from './features/tunnel/tunnel.ts';
 import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 import { registerUpdater } from './updater.ts';
+import { registerOrchestratorKey } from './features/tickets/pubkey.ts';
 import { assertEmailVerificationEnv } from './utils/email-verification.ts';
 import { log } from './utils/log.ts';
 
@@ -98,6 +99,7 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 registerWhitepaperSignup(app);
 registerUpdater(app, { adminKey: process.env.ADMIN_KEY });
+registerOrchestratorKey(app);
 
 const server = http.createServer(app);
 const nodeTunnelStats = registerNodeTunnel(app, server, { router });
