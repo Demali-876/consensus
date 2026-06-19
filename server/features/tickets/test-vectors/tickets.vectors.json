@@ -1,0 +1,96 @@
+{
+  "_comment": "TEST ONLY. Shared verbatim with consensus-node to lock the routing-ticket wire format. Regenerate: npm run gen:ticket-vectors",
+  "algorithm": "PASETO v4.public (Ed25519)",
+  "secretKeyPkcs8B64": "MC4CAQAwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH",
+  "kid": "--6IM5l0OosLj9yWskISYhUA3n_3CURQkmrYMSha_ck",
+  "publicJwk": {
+    "crv": "Ed25519",
+    "x": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+    "kty": "OKP",
+    "use": "sig",
+    "alg": "EdDSA",
+    "kid": "--6IM5l0OosLj9yWskISYhUA3n_3CURQkmrYMSha_ck"
+  },
+  "vectors": [
+    {
+      "name": "valid",
+      "token": "v4.public.eyJpc3MiOiJjb25zZW5zdXMtb3JjaGVzdHJhdG9yIiwiYXVkIjoibm9kZS10ZXN0Iiwic3ViIjoiZGRrLXZhbGlkIiwic2NvcGUiOiJwcm94eSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAwMDYwLCJqdGkiOiJqdGktdmFsaWQifdASZYlrldo7Le_JXUZti-OGRJ5c92jvxJ7AJL5nEig5gtox2KhfxVbKP4vOHXfqJuQkyEbS--1mYcawWPzfXgk.eyJraWQiOiItLTZJTTVsME9vc0xqOXlXc2tJU1loVUEzbl8zQ1VSUWttcllNU2hhX2NrIn0",
+      "verify": {
+        "expectedNodeId": "node-test",
+        "expectedScope": "proxy",
+        "now": 1700000010
+      },
+      "expect": {
+        "ok": true,
+        "kid": "--6IM5l0OosLj9yWskISYhUA3n_3CURQkmrYMSha_ck",
+        "claims": {
+          "aud": "node-test",
+          "sub": "ddk-valid",
+          "scope": "proxy",
+          "jti": "jti-valid"
+        }
+      }
+    },
+    {
+      "name": "expired",
+      "token": "v4.public.eyJpc3MiOiJjb25zZW5zdXMtb3JjaGVzdHJhdG9yIiwiYXVkIjoibm9kZS10ZXN0Iiwic3ViIjoiZGRrLXZhbGlkIiwic2NvcGUiOiJwcm94eSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAwMDYwLCJqdGkiOiJqdGktdmFsaWQifdASZYlrldo7Le_JXUZti-OGRJ5c92jvxJ7AJL5nEig5gtox2KhfxVbKP4vOHXfqJuQkyEbS--1mYcawWPzfXgk.eyJraWQiOiItLTZJTTVsME9vc0xqOXlXc2tJU1loVUEzbl8zQ1VSUWttcllNU2hhX2NrIn0",
+      "verify": {
+        "expectedNodeId": "node-test",
+        "now": 1700001000
+      },
+      "expect": {
+        "ok": false,
+        "error": "expired"
+      }
+    },
+    {
+      "name": "wrong-node",
+      "token": "v4.public.eyJpc3MiOiJjb25zZW5zdXMtb3JjaGVzdHJhdG9yIiwiYXVkIjoibm9kZS10ZXN0Iiwic3ViIjoiZGRrLXZhbGlkIiwic2NvcGUiOiJwcm94eSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAwMDYwLCJqdGkiOiJqdGktdmFsaWQifdASZYlrldo7Le_JXUZti-OGRJ5c92jvxJ7AJL5nEig5gtox2KhfxVbKP4vOHXfqJuQkyEbS--1mYcawWPzfXgk.eyJraWQiOiItLTZJTTVsME9vc0xqOXlXc2tJU1loVUEzbl8zQ1VSUWttcllNU2hhX2NrIn0",
+      "verify": {
+        "expectedNodeId": "node-other",
+        "now": 1700000010
+      },
+      "expect": {
+        "ok": false,
+        "error": "bad signature"
+      }
+    },
+    {
+      "name": "wrong-scope",
+      "token": "v4.public.eyJpc3MiOiJjb25zZW5zdXMtb3JjaGVzdHJhdG9yIiwiYXVkIjoibm9kZS10ZXN0Iiwic3ViIjoiZGRrLXMiLCJzY29wZSI6InR1bm5lbCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAwMDYwLCJqdGkiOiJqdGktcyJ9JvIT7dxEw5scZGftBnMnH9im8_hza9vaOj_YVHrp2CXX9NcDoBF2EZJ073b1A98Bx493IJ1lETZfglaJ_V3RDA.eyJraWQiOiItLTZJTTVsME9vc0xqOXlXc2tJU1loVUEzbl8zQ1VSUWttcllNU2hhX2NrIn0",
+      "verify": {
+        "expectedNodeId": "node-test",
+        "expectedScope": "proxy",
+        "now": 1700000010
+      },
+      "expect": {
+        "ok": false,
+        "error": "scope"
+      }
+    },
+    {
+      "name": "tampered",
+      "token": "v4.public.eiJpc3MiOiJjb25zZW5zdXMtb3JjaGVzdHJhdG9yIiwiYXVkIjoibm9kZS10ZXN0Iiwic3ViIjoiZGRrLXZhbGlkIiwic2NvcGUiOiJwcm94eSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAwMDYwLCJqdGkiOiJqdGktdmFsaWQifdASZYlrldo7Le_JXUZti-OGRJ5c92jvxJ7AJL5nEig5gtox2KhfxVbKP4vOHXfqJuQkyEbS--1mYcawWPzfXgk.eyJraWQiOiItLTZJTTVsME9vc0xqOXlXc2tJU1loVUEzbl8zQ1VSUWttcllNU2hhX2NrIn0",
+      "verify": {
+        "expectedNodeId": "node-test",
+        "now": 1700000010
+      },
+      "expect": {
+        "ok": false,
+        "error": "bad signature"
+      }
+    },
+    {
+      "name": "future",
+      "token": "v4.public.eyJpc3MiOiJjb25zZW5zdXMtb3JjaGVzdHJhdG9yIiwiYXVkIjoibm9kZS10ZXN0Iiwic3ViIjoiZGRrLWYiLCJzY29wZSI6InByb3h5IiwiaWF0IjoxNzAwMDA1MDAwLCJleHAiOjE3MDAwMDUwNjAsImp0aSI6Imp0aS1mIn2t-5oRxIGk7-3kriUur5D5k2KZmAZWArUhT25xLK0pTPCY8em3sdkBXLD7DVHoLdL2huw1ivipU7OX9frqUIYG.eyJraWQiOiItLTZJTTVsME9vc0xqOXlXc2tJU1loVUEzbl8zQ1VSUWttcllNU2hhX2NrIn0",
+      "verify": {
+        "expectedNodeId": "node-test",
+        "now": 1700000000
+      },
+      "expect": {
+        "ok": false,
+        "error": "future"
+      }
+    }
+  ]
+}
