@@ -1,0 +1,31 @@
+{
+  "_comment": "Shared SSRF allow/block cases. Mirrored verbatim into consensus-node so the ported guard stays in lockstep with the orchestrator. All cases use literal IPs / protocols, so no DNS is performed — deterministic and network-independent.",
+  "cases": [
+    { "url": "http://93.184.216.34/", "expect": "allow" },
+    { "url": "https://8.8.8.8/", "expect": "allow" },
+
+    { "url": "http://127.0.0.1/", "expect": "block" },
+    { "url": "http://10.0.0.1/", "expect": "block" },
+    { "url": "http://172.16.5.4/", "expect": "block" },
+    { "url": "http://192.168.1.1/", "expect": "block" },
+    { "url": "http://169.254.169.254/", "expect": "block" },
+    { "url": "http://100.64.0.1/", "expect": "block" },
+    { "url": "http://0.0.0.0/", "expect": "block" },
+    { "url": "http://192.0.2.5/", "expect": "block" },
+    { "url": "http://198.51.100.5/", "expect": "block" },
+    { "url": "http://203.0.113.5/", "expect": "block" },
+
+    { "url": "http://2130706433/", "expect": "block" },
+    { "url": "http://0x7f000001/", "expect": "block" },
+    { "url": "http://0177.0.0.1/", "expect": "block" },
+
+    { "url": "http://[::1]/", "expect": "block" },
+    { "url": "http://[fe80::1]/", "expect": "block" },
+    { "url": "http://[fc00::1]/", "expect": "block" },
+    { "url": "http://[::ffff:127.0.0.1]/", "expect": "block" },
+
+    { "url": "ftp://93.184.216.34/", "expect": "block" },
+    { "url": "file:///etc/passwd", "expect": "block" },
+    { "url": "not-a-url", "expect": "block" }
+  ]
+}
