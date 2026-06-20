@@ -7,6 +7,7 @@ import NodeStore             from '../../data/node_store.js';
 import { observeNode }       from '../ip-pool/observer.ts';
 import { classifyIpRegion }  from '../../utils/region.ts';
 import { assertEmailVerification, isValidEmail, startEmailVerification, verifyEmailCode } from '../../utils/email-verification.ts';
+import { orchestratorPinForJoin } from '../tickets/pubkey.ts';
 
 const emailStartLimiter = rateLimit({
   windowMs:          10 * 60_000,
@@ -417,6 +418,14 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           console.error(`[Observer] Initial observation failed for ${nodeId}:`, err),
         );
 
+        // Pin the orchestrator's ticket-verification key into the join response so
+        // the node trusts it from registration onward (not whatever is served at
+        // request time). Null when no signing key is configured (e.g. FREE_MODE dev).
+        const pin = orchestratorPinForJoin();
+        if (!pin.orchestrator_pubkey) {
+          console.warn('[Nodes] Orchestrator signing key unset — node registering without a pinned key');
+        }
+
         const processingTime = Date.now() - startTime;
         console.log(`\n✅ Node registered in ${processingTime}ms — price paid: $${paidPrice}\n`);
 
@@ -431,6 +440,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           geo:                geoRegion,
           status:             'active',
           benchmark_score:    benchmarkScore,
+          orchestrator_pubkey: pin.orchestrator_pubkey,
           price_paid:         paidPrice,
           join_request_id:    consumedJoin?.id ?? null,
           processing_time_ms: processingTime,
