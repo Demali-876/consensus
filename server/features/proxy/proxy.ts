@@ -4,11 +4,21 @@ import http                              from 'node:http';
 import https                             from 'node:https';
 import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
-import crypto                            from 'node:crypto';
 import { WebSocket }                     from 'ws';
 import Router                            from '../../router.ts';
 import { resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts';
 import type { PrivateTunnelTarget, TunnelHttpResponse } from '../tunnel/tunnel.ts';
+import {
+  generateDedupeKey,
+  canonicalizeUrl,
+  canonicalizeSemanticHeaders,
+  computeBodyHash,
+  sha256Hex,
+  stableStringify,
+  type RequestBody,
+  type Headers,
+  type DedupeParams,
+} from './dedupe.ts';
 
 const httpAgent  = new http.Agent ({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
@@ -17,8 +27,6 @@ const gunzipAsync           = promisify(gunzip);
 const inflateAsync          = promisify(inflate);
 const brotliDecompressAsync = promisify(brotliDecompress);
 
-type RequestBody = string | Buffer | Record<string, unknown> | unknown[] | null | undefined;
-type Headers     = Record<string, string>;
 
 interface NodeRecord {
   id:     string;
@@ -86,13 +94,6 @@ export interface ProxyStats {
   router_stats:     ReturnType<Router['getStats']>;
 }
 
-interface DedupeParams {
-  target_url: string;
-  method:     string;
-  headers?:   Headers;
-  body?:      RequestBody;
-}
-
 interface TunnelDedupeParams {
   target_ref: PrivateTunnelTarget;
   method:     string;
@@ -122,12 +123,6 @@ const STRIP_REQUEST_HEADERS = new Set([
 ]);
 
 const BODY_METHODS  = new Set(['post', 'put', 'patch']);
-const ALLOW_HEADERS = new Set(['accept', 'content-type']);
-const MULTI_SPACE   = /\s+/g;
-
-function sha256Hex(input: string | Buffer): string {
-  return crypto.createHash('sha256').update(input).digest('hex');
-}
 
 // Rewrites the URL so its host is the pre-resolved IP, eliminating any
 // second DNS lookup by the HTTP stack (closes the SSRF TOCTOU window).
@@ -138,79 +133,11 @@ function buildSafeUrl(originalUrl: string, resolved: SafeResolution): string {
   return u.toString();
 }
 
-function deepSort(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(deepSort);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .map(([k, v]): [string, unknown] => [k, deepSort(v)])
-        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0),
-    );
-  }
-  return value;
-}
-
-function stableStringify(value: unknown): string {
-  return JSON.stringify(deepSort(value));
-}
-
-function canonicalizeUrl(raw: string): string {
-  const u = new URL(raw);  // throws TypeError for invalid URLs — callers must validate first
-  u.hash     = '';
-  u.protocol = u.protocol.toLowerCase();
-  u.hostname = u.hostname.toLowerCase();
-
-  if (
-    (u.protocol === 'https:' && u.port === '443') ||
-    (u.protocol === 'http:'  && u.port === '80')
-  ) u.port = '';
-
-  const params = [...u.searchParams.entries()].sort((a, b) => {
-    if (a[0] < b[0]) return -1;
-    if (a[0] > b[0]) return  1;
-    if (a[1] < b[1]) return -1;
-    if (a[1] > b[1]) return  1;
-    return 0;
-  });
-
-  u.search = '';
-  for (const [k, v] of params) u.searchParams.append(k, v);
-  return u.toString();
-}
-
-function canonicalizeSemanticHeaders(headers: Headers): Headers {
-  // Two-phase: collect the two allowed keys, then emit in fixed alphabetical order
-  // so the result is deterministic without a sort step ('accept' < 'content-type').
-  const result: Headers = {};
-  for (const [k, v] of Object.entries(headers)) {
-    const lower = k.toLowerCase();                          // HTTP names have no surrounding whitespace
-    if (ALLOW_HEADERS.has(lower)) result[lower] = v.trim().replace(MULTI_SPACE, ' ');
-  }
-  const ordered: Headers = {};
-  if (result['accept'])       ordered['accept']       = result['accept'];
-  if (result['content-type']) ordered['content-type'] = result['content-type'];
-  return ordered;
-}
-
-function computeBodyHash(body: RequestBody): string {
-  if (body === undefined || body === null) return 'no-body';
-  if (Buffer.isBuffer(body))              return sha256Hex(body);
-  if (typeof body === 'string')           return sha256Hex(body);
-  return sha256Hex(stableStringify(body));
-}
-
 function encodeRequestBody(body: RequestBody): string | undefined {
   if (body === undefined || body === null) return undefined;
   if (Buffer.isBuffer(body)) return body.toString('utf8');
   if (typeof body === 'string') return body;
   return JSON.stringify(body);
-}
-
-function getScope(headers: Headers): string {
-  for (const k in headers) {
-    if (k.toLowerCase() === 'x-api-key') return sha256Hex(headers[k]!);
-  }
-  return 'global';
 }
 
 function getPrivateTunnelScope(headers: Headers): string {
@@ -222,20 +149,6 @@ function getPrivateTunnelScope(headers: Headers): string {
     }
   }
   return Object.keys(sensitive).length > 0 ? sha256Hex(stableStringify(sensitive)) : 'global';
-}
-
-function generateDedupeKey({ target_url, method, headers = {}, body }: DedupeParams): string {
-  const semanticHeaders = canonicalizeSemanticHeaders(headers);
-  const canonical = {
-    v:         1,
-    scope:     getScope(headers),
-    method:    method.toUpperCase(),
-    url:       canonicalizeUrl(target_url),
-    headers:   semanticHeaders,
-    body_hash: computeBodyHash(body),
-  };
-
-  return sha256Hex(stableStringify(canonical));
 }
 
 function canonicalizeTunnelPath(raw: string): string {

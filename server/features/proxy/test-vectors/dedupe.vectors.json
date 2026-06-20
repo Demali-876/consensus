@@ -1,0 +1,82 @@
+{
+  "_comment": "TEST vectors locking the dedupe-key canonicalization. Mirrored verbatim into consensus-node. Regenerate: npm run gen:dedupe-vectors",
+  "vectors": [
+    {
+      "name": "simple-get",
+      "input": {
+        "target_url": "https://api.example.com/v1/price",
+        "method": "GET"
+      },
+      "key": "b2ac217c7fbb9c9a7f3376f96a2bd713f4c02463391b16d7e544134fa5a968c0"
+    },
+    {
+      "name": "query-sorted",
+      "input": {
+        "target_url": "https://api.example.com/p?b=2&a=1",
+        "method": "GET"
+      },
+      "key": "e2329fbfbd9594be7d5947cfaea89c89409f4633659cf747ca4b7de42b10ba46"
+    },
+    {
+      "name": "default-port-stripped",
+      "input": {
+        "target_url": "https://api.example.com:443/p",
+        "method": "GET"
+      },
+      "key": "7f0eb385c62d00117d8e0685e279731e535c3b4199ba6fb97ce79ac720d165a2"
+    },
+    {
+      "name": "host-lowercased",
+      "input": {
+        "target_url": "https://API.Example.COM/p",
+        "method": "get"
+      },
+      "key": "7f0eb385c62d00117d8e0685e279731e535c3b4199ba6fb97ce79ac720d165a2"
+    },
+    {
+      "name": "api-key-scope",
+      "input": {
+        "target_url": "https://api.example.com/p",
+        "method": "GET",
+        "headers": {
+          "x-api-key": "secret"
+        }
+      },
+      "key": "762942d3cea517745d2919b8fe98c45e8b0a5abcc9c1c94c3b2077014cc4cee9"
+    },
+    {
+      "name": "semantic-headers-only",
+      "input": {
+        "target_url": "https://api.example.com/p",
+        "method": "GET",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "x-other": "ignored"
+        }
+      },
+      "key": "2f112dcafa15f0548a1661bb31187a8d810066860c4a28ce9f21a612333c8dbc"
+    },
+    {
+      "name": "json-body-sorted",
+      "input": {
+        "target_url": "https://api.example.com/p",
+        "method": "POST",
+        "body": {
+          "b": 2,
+          "a": 1
+        }
+      },
+      "key": "347430ffe8edd6521c1f1f23364d768645be5094d3cfcc35e52df2a816cc41e9"
+    },
+    {
+      "name": "string-body",
+      "input": {
+        "target_url": "https://api.example.com/p",
+        "method": "POST",
+        "body": "raw-body"
+      },
+      "key": "da50a27a70b1f74e23fff387734705eed5a5b5848c32a67e80e42b4017ad820a"
+    }
+  ]
+}

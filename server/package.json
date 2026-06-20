@@ -4,12 +4,13 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "test": "npm run test:dedupe && node --import tsx/esm --test --test-timeout 30000 utils/tests/detector.test.ts utils/tests/node-browser.test.ts utils/tests/proxy.test.ts utils/tests/reverse-proxy.test.ts utils/tests/security.test.ts utils/tests/tickets-*.test.ts utils/tests/ssrf-vectors.test.ts",
+    "test": "npm run test:dedupe && node --import tsx/esm --test --test-timeout 30000 utils/tests/detector.test.ts utils/tests/node-browser.test.ts utils/tests/proxy.test.ts utils/tests/reverse-proxy.test.ts utils/tests/security.test.ts utils/tests/tickets-*.test.ts utils/tests/ssrf-vectors.test.ts utils/tests/dedupe-vectors.test.ts",
     "test:dedupe": "node --import tsx/esm utils/tests/proxy-dedupe.test.ts",
     "test:all": "npm run test && node --import tsx/esm --test --test-timeout 30000 utils/tests/wss.test.ts utils/tests/security-perf.test.ts",
     "start": "dotenvx run -- node --import tsx/esm server.js",
     "gen:orchestrator-key": "node --import tsx/esm features/tickets/generate-key.ts",
-    "gen:ticket-vectors": "node --import tsx/esm features/tickets/gen-vectors.ts"
+    "gen:ticket-vectors": "node --import tsx/esm features/tickets/gen-vectors.ts",
+    "gen:dedupe-vectors": "node --import tsx/esm features/proxy/gen-dedupe-vectors.ts"
   },
   "keywords": [],
   "author": "Canister Software, Inc.",
