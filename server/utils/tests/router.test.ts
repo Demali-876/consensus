@@ -77,4 +77,19 @@ describe('Router — prefer downstream nodes, orchestrator as last resort', () =
     const router = new Router(storeOf([node('n1'), node('server')]), { saturationLoad: 100 });
     assert.equal(router.selectNode('k', { 'x-node-exclude': 'n1' }).id, 'server', 'excluded node → self');
   });
+
+  it('never routes an x-node-exclude: server request to self, even under saturation', () => {
+    // Unsaturated: routes to the node as normal.
+    const fresh = new Router(storeOf([node('n1'), node('server')]), { saturationLoad: 100 });
+    assert.equal(fresh.selectNode('a', { 'x-node-exclude': 'server' }).id, 'n1');
+
+    // Node saturated + self excluded: overflow back onto the node, NOT self.
+    const busy = new Router(storeOf([node('n1'), node('server')]), { saturationLoad: 1 });
+    busy.incrementRequest('n1'); // n1 now saturated
+    assert.equal(busy.selectNode('b', { 'x-node-exclude': 'server' }).id, 'n1', 'overflow to node, not self');
+
+    // Self excluded and no downstream node at all: null, never self.
+    const lonely = new Router(storeOf([node('server')]), { saturationLoad: 1 });
+    assert.equal(lonely.selectNode('c', { 'x-node-exclude': 'server' }), null);
+  });
 });

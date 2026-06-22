@@ -105,14 +105,28 @@ export default class Router {
       return selectedNode;
     }
 
-    // No node with spare capacity (all saturated, or none eligible) → fall back
-    // to the orchestrator-as-node. We deliberately do NOT make self sticky, so the
-    // next miss for this key returns to a node as soon as one frees up.
+    // No node with spare capacity (all saturated, or none eligible). Prefer the
+    // orchestrator-as-node — but honour preferences: a caller that excluded
+    // 'server' (x-node-exclude) must not be served by self. The self candidate
+    // goes through the SAME preference filter; we deliberately do NOT make it
+    // sticky, so the next miss returns to a node as soon as one frees up.
     this.stats.fallbacks++;
     const self = allNodes.find((n: any) =>
       n.id === SELF_NODE_ID && n.status === 'active' && !isNodeUpdating(n),
     );
-    return self ?? null;
+    if (self && this.filterByPreferences([self], preferenceHeaders).length > 0) {
+      return self;
+    }
+
+    // Self is excluded (or absent). Rather than violate the exclusion, overflow
+    // onto a (saturated) downstream node if one exists; only when there is truly
+    // nothing left to route to do we give up.
+    if (downstream.length > 0) {
+      const overflowNode = this.powerOfTwoChoices(downstream);
+      this.requestToNode.set(dedupeKey, { nodeId: overflowNode.id, at: Date.now() });
+      return overflowNode;
+    }
+    return null;
   }
 
   /** Combined HTTP + WS load the orchestrator is currently tracking for a node. */
