@@ -14,6 +14,15 @@ const STICKY_SWEEP_MS  = 60 * 1000;
 const STATS_CACHE_MS   = 1_000;
 const NODE_CACHE_TTL_MS = 3_000;  // node list refreshed at most once per 3 s
 
+// The orchestrator registers itself for routing under this id (handled in
+// proxy.ts executeViaNode). It is a last-resort fallback, never an equal peer in
+// load-balancing — see selectNode.
+const SELF_NODE_ID = 'server';
+// A downstream node is treated as "saturated" once its combined (HTTP + WS) load
+// reaches this value. Only when every eligible node is saturated do we serve on
+// the orchestrator itself. Tunable via NODE_SATURATION_LOAD.
+const DEFAULT_SATURATION_LOAD = 100;
+
 export default class Router {
   private activeRequests: Map<string, number>;           // nodeId → HTTP request count
   private activeSessions: Map<string, number>;           // nodeId → WebSocket session count
@@ -22,8 +31,15 @@ export default class Router {
   private statsCache: { value: ReturnType<Router['_buildStats']>; at: number } | null = null;
   private nodeCache:  { nodes: any[]; at: number } | null = null;
   private sweepTimer: ReturnType<typeof setInterval>;
+  private nodeStore:  any;
+  private saturationLoad: number;
 
-  constructor() {
+  constructor(nodeStore: any = NodeStore, options: { saturationLoad?: number } = {}) {
+    this.nodeStore = nodeStore;
+    const envLoad = Number(process.env.NODE_SATURATION_LOAD);
+    this.saturationLoad = options.saturationLoad
+      ?? (Number.isFinite(envLoad) && envLoad > 0 ? envLoad : DEFAULT_SATURATION_LOAD);
+
     this.activeRequests = new Map();
     this.activeSessions = new Map();
     this.requestToNode  = new Map();
@@ -51,7 +67,7 @@ export default class Router {
     if (this.nodeCache && (now - this.nodeCache.at) < NODE_CACHE_TTL_MS) {
       return this.nodeCache.nodes;
     }
-    const nodes = NodeStore.listNodesForRouting();
+    const nodes = this.nodeStore.listNodesForRouting();
     this.nodeCache = { nodes, at: now };
     return nodes;
   }
@@ -61,6 +77,8 @@ export default class Router {
 
     const allNodes = this.getNodes();
 
+    // Sticky: keep a request on the node that previously served it (cache
+    // locality). Honoured even if that node is now busy — we still prefer nodes.
     const sticky = this.requestToNode.get(dedupeKey);
     if (sticky) {
       const node = allNodes.find((n: any) => n.id === sticky.nodeId);
@@ -71,20 +89,35 @@ export default class Router {
       this.requestToNode.delete(dedupeKey);
     }
 
-    let eligibleNodes = allNodes.filter((node: any) =>
-      node.status === 'active' && !isNodeUpdating(node),
+    // Downstream (non-self) nodes are always preferred over the orchestrator.
+    let downstream = allNodes.filter((node: any) =>
+      node.id !== SELF_NODE_ID && node.status === 'active' && !isNodeUpdating(node),
     );
+    downstream = this.filterByPreferences(downstream, preferenceHeaders);
 
-    eligibleNodes = this.filterByPreferences(eligibleNodes, preferenceHeaders);
-
-    if (eligibleNodes.length === 0) {
-      this.stats.fallbacks++;
-      return null;
+    // Route everything to nodes that still have spare capacity; among those,
+    // power-of-two-choices balances load. Only spill to self once every eligible
+    // node is saturated.
+    const available = downstream.filter((node: any) => this.load(node.id) < this.saturationLoad);
+    if (available.length > 0) {
+      const selectedNode = this.powerOfTwoChoices(available);
+      this.requestToNode.set(dedupeKey, { nodeId: selectedNode.id, at: Date.now() });
+      return selectedNode;
     }
 
-    const selectedNode = this.powerOfTwoChoices(eligibleNodes);
-    this.requestToNode.set(dedupeKey, { nodeId: selectedNode.id, at: Date.now() });
-    return selectedNode;
+    // No node with spare capacity (all saturated, or none eligible) → fall back
+    // to the orchestrator-as-node. We deliberately do NOT make self sticky, so the
+    // next miss for this key returns to a node as soon as one frees up.
+    this.stats.fallbacks++;
+    const self = allNodes.find((n: any) =>
+      n.id === SELF_NODE_ID && n.status === 'active' && !isNodeUpdating(n),
+    );
+    return self ?? null;
+  }
+
+  /** Combined HTTP + WS load the orchestrator is currently tracking for a node. */
+  private load(nodeId: string): number {
+    return (this.activeRequests.get(nodeId) || 0) + (this.activeSessions.get(nodeId) || 0);
   }
   /**
    * Filter nodes by user preferences
@@ -142,12 +175,7 @@ export default class Router {
     const node1 = eligibleNodes[idx1];
     const node2 = eligibleNodes[idx2];
 
-    const load1 =
-      (this.activeRequests.get(node1.id) || 0) + (this.activeSessions.get(node1.id) || 0);
-    const load2 =
-      (this.activeRequests.get(node2.id) || 0) + (this.activeSessions.get(node2.id) || 0);
-
-    return load1 <= load2 ? node1 : node2;
+    return this.load(node1.id) <= this.load(node2.id) ? node1 : node2;
   }
 
   /**
@@ -185,7 +213,7 @@ export default class Router {
 
   // Separated so the return type can be inferred for statsCache typing.
   private _buildStats() {
-    const allNodes    = NodeStore.listNodes();
+    const allNodes    = this.nodeStore.listNodes();
     const activeNodes = allNodes.filter((n: any) => n.status === 'active');
 
     let totalReqs = 0; for (const v of this.activeRequests.values()) totalReqs += v;
@@ -208,6 +236,7 @@ export default class Router {
     return {
       total_nodes:            allNodes.length,
       active_nodes:           activeNodes.length,
+      saturation_load:        this.saturationLoad,
       total_active_requests:  totalReqs,
       total_active_sessions:  totalSess,
       avg_http_latency_ms:    avgHttpLatencyMs,
@@ -222,7 +251,7 @@ export default class Router {
           : '0%',
       },
       load_distribution: Array.from(this.activeRequests.keys()).map((nodeId) => {
-        const node = NodeStore.getNode(nodeId);
+        const node = this.nodeStore.getNode(nodeId);
         const reqs = this.activeRequests.get(nodeId) ?? 0;
         const sess = this.activeSessions.get(nodeId) ?? 0;
         return { node_id: nodeId, requests: reqs, sessions: sess, total: reqs + sess, region: node?.region, status: node?.status };
