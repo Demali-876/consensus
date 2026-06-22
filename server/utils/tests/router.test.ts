@@ -92,4 +92,13 @@ describe('Router — prefer downstream nodes, orchestrator as last resort', () =
     const lonely = new Router(storeOf([node('server')]), { saturationLoad: 1 });
     assert.equal(lonely.selectNode('c', { 'x-node-exclude': 'server' }), null);
   });
+
+  it('returns null (not a saturated node) when the self row is absent and nothing was excluded', () => {
+    // No 'server' row yet (e.g. before upsertServerNode finishes / it failed) and
+    // the only downstream node is saturated. The caller did NOT exclude self, so
+    // we must fall back to null (local serving) rather than overflow onto the node.
+    const router = new Router(storeOf([node('n1')]), { saturationLoad: 1 });
+    router.incrementRequest('n1'); // n1 saturated
+    assert.equal(router.selectNode('k'), null, 'self absent + not excluded → null');
+  });
 });

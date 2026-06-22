@@ -114,18 +114,27 @@ export default class Router {
     const self = allNodes.find((n: any) =>
       n.id === SELF_NODE_ID && n.status === 'active' && !isNodeUpdating(n),
     );
-    if (self && this.filterByPreferences([self], preferenceHeaders).length > 0) {
-      return self;
+
+    if (self) {
+      // Self exists: serve on it unless the caller explicitly excluded it.
+      if (this.filterByPreferences([self], preferenceHeaders).length > 0) {
+        return self;
+      }
+      // Self was excluded (x-node-exclude: server) — honour that by overflowing
+      // onto a (saturated) downstream node if one exists, rather than violating
+      // the exclusion; null only when there is nothing left to route to.
+      if (downstream.length > 0) {
+        const overflowNode = this.powerOfTwoChoices(downstream);
+        this.requestToNode.set(dedupeKey, { nodeId: overflowNode.id, at: Date.now() });
+        return overflowNode;
+      }
+      return null;
     }
 
-    // Self is excluded (or absent). Rather than violate the exclusion, overflow
-    // onto a (saturated) downstream node if one exists; only when there is truly
-    // nothing left to route to do we give up.
-    if (downstream.length > 0) {
-      const overflowNode = this.powerOfTwoChoices(downstream);
-      this.requestToNode.set(dedupeKey, { nodeId: overflowNode.id, at: Date.now() });
-      return overflowNode;
-    }
+    // Self row is merely ABSENT (e.g. before upsertServerNode() completes, or if
+    // it failed) — not excluded. Preserve the documented fallback: return null so
+    // the caller serves locally, instead of pushing normal traffic onto an
+    // already-saturated node.
     return null;
   }
 
