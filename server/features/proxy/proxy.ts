@@ -6,7 +6,10 @@ import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { promisify }                     from 'node:util';
 import { WebSocket }                     from 'ws';
 import Router                            from '../../router.ts';
+import NodeStore                         from '../../data/node_store.js';
 import { resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts';
+import { getOrchestratorKey, type OrchestratorKey } from '../tickets/keys.ts';
+import { buildNodeRoute, type NodeRoute } from './route.ts';
 import type { PrivateTunnelTarget, TunnelHttpResponse } from '../tunnel/tunnel.ts';
 import {
   generateDedupeKey,
@@ -68,6 +71,12 @@ export interface ProxyConfig {
       body?: RequestBody;
     }): Promise<TunnelHttpResponse>;
   };
+  /** Orchestrator signing key accessor for direct-routing tickets. Defaults to
+   *  the lazy getOrchestratorKey(); tests inject a fixed key. */
+  orchestratorKey?: () => OrchestratorKey;
+  /** Looks up a node's Ed25519 identity (DER SPKI) for the route response.
+   *  Defaults to NodeStore; tests inject a stub. */
+  nodePubkeyLookup?: (nodeId: string) => Buffer | null;
 }
 
 export interface ProxyResponse {
@@ -117,7 +126,7 @@ const MAX_CACHE_TTL_SEC = 3_600;
 const STRIP_REQUEST_HEADERS = new Set([
   'host', 'content-length', 'content-encoding', 'transfer-encoding', 'connection',
   'x-idempotency-key', 'idempotency-key',
-  'x-payment', 'x-verbose', 'x-api-key', 'x-cache-ttl',
+  'x-payment', 'x-verbose', 'x-api-key', 'x-cache-ttl', 'x-direct',
   'x-node-region', 'x-node-domain', 'x-node-exclude',
   'x-forwarded-for', 'x-real-ip', 'forwarded',
 ]);
@@ -182,6 +191,8 @@ export default class ConsensusProxy {
   private nodeTunnel?:     ProxyConfig['nodeTunnel'];
   private privateTunnel?:  ProxyConfig['privateTunnel'];
   private ssrfCheck:       (target_url: string) => Promise<SafeResolution>;
+  private getOrchestratorKey: () => OrchestratorKey;
+  private nodePubkeyLookup:   (nodeId: string) => Buffer | null;
   private cleanupTimer:    ReturnType<typeof setInterval>;
 
   constructor(config: ProxyConfig = {}) {
@@ -199,8 +210,52 @@ export default class ConsensusProxy {
     this.nodeTunnel      = config.nodeTunnel;
     this.privateTunnel   = config.privateTunnel;
     this.ssrfCheck       = config.ssrfCheck ?? resolveAndCheckTarget;
+    this.getOrchestratorKey = config.orchestratorKey ?? getOrchestratorKey;
+    this.nodePubkeyLookup   = config.nodePubkeyLookup
+      ?? ((nodeId: string) => (NodeStore.getNode(nodeId)?.pubkey_ed25519 ?? null));
     this.cleanupTimer    = setInterval(() => this.cleanupExpiredKeys(), 60_000);
     this.cleanupTimer.unref();
+  }
+
+  /**
+   * Direct-routing selection: pick a node and sign a ticket so the client
+   * connects to it directly, or signal that the orchestrator should serve the
+   * request itself (no node available, node missing or with an invalid identity
+   * key, or no signing key configured). SSRF is enforced by the node runtime in
+   * this path, so the orchestrator does not resolve or fetch here.
+   */
+  routeRequest(
+    target_url: string,
+    method:     string,
+    headers:    Headers = {},
+    body?:      RequestBody,
+  ): { mode: 'self'; dedupe_key: string } | ({ mode: 'node' } & NodeRoute) {
+    try { new URL(target_url); } catch {
+      throw new TypeError(`Invalid target_url: ${target_url}`);
+    }
+
+    const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
+    const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
+
+    // Null / self / domain-less node → orchestrator serves it (server-as-node).
+    if (!node || node.id === 'server' || !node.domain) {
+      return { mode: 'self', dedupe_key: dedupeKey };
+    }
+
+    const der = this.nodePubkeyLookup(node.id);
+    if (!der) return { mode: 'self', dedupe_key: dedupeKey };
+
+    try {
+      const key   = this.getOrchestratorKey();
+      const route = buildNodeRoute({ node, nodePubkeyDer: der, dedupeKey, key });
+      return { mode: 'node', ...route };
+    } catch {
+      // No signing key configured, or the node's stored identity key is present
+      // but not a valid Ed25519 SPKI (buildNodeRoute throws) — fall back to
+      // serving inline rather than handing out an unverifiable route or 500-ing a
+      // paid request.
+      return { mode: 'self', dedupe_key: dedupeKey };
+    }
   }
 
   requiresPayment(dedupeKey: string): boolean {

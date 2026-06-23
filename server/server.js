@@ -304,6 +304,42 @@ app.post('/proxy', async (req, res) => {
       headers['x-idempotency-key'] = crypto.randomBytes(16).toString('hex');
     }
 
+    // Direct data plane (opt-in via x-direct): select a node and return a signed
+    // routing ticket + the node's connection info so the client connects to the
+    // node directly. Falls through to inline serving when the orchestrator is the
+    // chosen node (server-as-node fallback).
+    const wantsDirect = Boolean(headers['x-direct'] || headers['X-Direct']);
+    if (wantsDirect && target_ref?.kind !== 'tunnel' && target_url) {
+      const route = proxy.routeRequest(target_url, methodUpper, headers, body);
+      if (route.mode === 'node') {
+        log.info('proxy-http', 'request-routed', {
+          request_id: requestId,
+          method: methodUpper,
+          node_id: route.node_id,
+          dedupe_key: route.dedupe_key.substring(0, 12),
+          total_ms: Date.now() - requestStartedAt,
+          ...proxyRequestTargetForLog(target_url, target_ref),
+        });
+        return res.json({
+          route: {
+            node_id:         route.node_id,
+            domain:          route.domain,
+            node_pubkey_pem: route.node_pubkey_pem,
+            ticket:          route.ticket,
+            ticket_exp:      route.ticket_exp,
+            dedupe_key:      route.dedupe_key,
+          },
+          meta: {
+            direct: true,
+            served_by: route.node_id,
+            dedupe_key: route.dedupe_key,
+            timestamp: new Date().toISOString(),
+          },
+        });
+      }
+      // route.mode === 'self' → fall through to serve inline below.
+    }
+
     const response = target_ref?.kind === 'tunnel'
       ? await proxy.handleTunnelRequest(target_ref, methodUpper, headers, body)
       : await proxy.handleRequest(target_url, methodUpper, headers, body);
