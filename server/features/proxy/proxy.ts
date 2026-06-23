@@ -220,9 +220,9 @@ export default class ConsensusProxy {
   /**
    * Direct-routing selection: pick a node and sign a ticket so the client
    * connects to it directly, or signal that the orchestrator should serve the
-   * request itself (no node available, node missing an identity key, or no
-   * signing key configured). SSRF is enforced by the node runtime in this path,
-   * so the orchestrator does not resolve or fetch here.
+   * request itself (no node available, node missing or with an invalid identity
+   * key, or no signing key configured). SSRF is enforced by the node runtime in
+   * this path, so the orchestrator does not resolve or fetch here.
    */
   routeRequest(
     target_url: string,
@@ -245,17 +245,17 @@ export default class ConsensusProxy {
     const der = this.nodePubkeyLookup(node.id);
     if (!der) return { mode: 'self', dedupe_key: dedupeKey };
 
-    let key: OrchestratorKey;
     try {
-      key = this.getOrchestratorKey();
+      const key   = this.getOrchestratorKey();
+      const route = buildNodeRoute({ node, nodePubkeyDer: der, dedupeKey, key });
+      return { mode: 'node', ...route };
     } catch {
-      // No signing key configured — fall back to serving directly rather than
-      // handing out unverifiable routes.
+      // No signing key configured, or the node's stored identity key is present
+      // but not a valid Ed25519 SPKI (buildNodeRoute throws) — fall back to
+      // serving inline rather than handing out an unverifiable route or 500-ing a
+      // paid request.
       return { mode: 'self', dedupe_key: dedupeKey };
     }
-
-    const route = buildNodeRoute({ node, nodePubkeyDer: der, dedupeKey, key });
-    return { mode: 'node', ...route };
   }
 
   requiresPayment(dedupeKey: string): boolean {

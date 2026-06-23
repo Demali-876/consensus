@@ -97,6 +97,16 @@ describe('ConsensusProxy.routeRequest', () => {
     assert.equal(noKey.routeRequest('https://a.test/', 'GET').mode, 'self');
   });
 
+  it('falls back to self when the node identity key is present but malformed', () => {
+    // A stored pubkey_ed25519 that exists but is not a valid Ed25519 SPKI must
+    // not 500 a paid request — buildNodeRoute throws and we degrade to self.
+    const proxy = makeProxy({
+      node: { id: 'n1', region: 'us', domain: 'n1.test' },
+      lookup: () => Buffer.from([0, 1, 2, 3]),
+    });
+    assert.equal(proxy.routeRequest('https://a.test/', 'GET').mode, 'self');
+  });
+
   it('falls back to self when no signing key is configured', () => {
     const proxy = makeProxy({
       node: { id: 'n1', region: 'us', domain: 'n1.test' },
