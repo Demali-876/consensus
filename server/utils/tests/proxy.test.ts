@@ -707,6 +707,34 @@ describe('Node routing', () => {
       p.destroy();
     }
   });
+
+  it('does not use the consensus gateway domain as a legacy direct node upstream', async () => {
+    let tunnelCalls = 0;
+    const p = new ConsensusProxy({
+      router: fixedRouter({
+        id: 'offline-node',
+        region: 'test',
+        domain: 'offline-node.consensus.canister.software',
+      }),
+      nodeTunnel: {
+        getNodeSession: () => null,
+        requestProxy: async () => {
+          tunnelCalls++;
+          throw new Error('disconnected tunnel must not be called');
+        },
+      },
+      ssrfCheck: noSsrf,
+    });
+
+    try {
+      const r = await p.handleRequest(`${BASE}/offline-gateway-node`, 'GET', {}, undefined, 60);
+      assert.equal(r.status, 200);
+      assert.equal(r.served_by, 'proxy-direct');
+      assert.equal(tunnelCalls, 0);
+    } finally {
+      p.destroy();
+    }
+  });
 });
 
 after(() => {

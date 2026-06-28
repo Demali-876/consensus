@@ -17,9 +17,14 @@ function makeProxy(opts: {
   node?: any;
   key?: () => ReturnType<typeof generateOrchestratorKey>;
   lookup?: (id: string) => Buffer | null;
+  nodeTunnel?: any;
 } = {}) {
   return new ConsensusProxy({
     router: { selectNode: () => opts.node ?? null, incrementRequest() {}, decrementRequest() {} } as any,
+    nodeTunnel: opts.nodeTunnel ?? {
+      requestProxy: async () => { throw new Error('not used'); },
+      getNodeSession: () => ({ mode: 'control', ws: { readyState: 1 } }),
+    },
     orchestratorKey: opts.key ?? (() => orchestrator),
     nodePubkeyLookup: opts.lookup ?? (() => Buffer.from(nodeDer)),
   });
@@ -44,6 +49,7 @@ describe('route — node pubkey + signed routing ticket', () => {
     });
     assert.equal(route.node_id, 'n1');
     assert.equal(route.domain, 'n1.consensus.test');
+    assert.equal(route.connect_url, 'wss://n1.consensus.test/connect');
     assert.equal(route.dedupe_key, 'ddk-1');
     assert.equal(route.ticket_exp, 1120);
 
@@ -95,6 +101,17 @@ describe('ConsensusProxy.routeRequest', () => {
     assert.equal(makeProxy({ node: { id: 'n1', region: 'us' } }).routeRequest('https://a.test/', 'GET').mode, 'self');
     const noKey = makeProxy({ node: { id: 'n1', region: 'us', domain: 'n1.test' }, lookup: () => null });
     assert.equal(noKey.routeRequest('https://a.test/', 'GET').mode, 'self');
+  });
+
+  it('falls back to self when the node has no connected control tunnel', () => {
+    const proxy = makeProxy({
+      node: { id: 'n1', region: 'us', domain: 'n1.test' },
+      nodeTunnel: {
+        requestProxy: async () => { throw new Error('not used'); },
+        getNodeSession: () => null,
+      },
+    });
+    assert.equal(proxy.routeRequest('https://a.test/', 'GET').mode, 'self');
   });
 
   it('falls back to self when the node identity key is present but malformed', () => {

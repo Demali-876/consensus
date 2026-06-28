@@ -11,6 +11,7 @@ import { resolveAndCheckTarget, type SafeResolution } from '../../utils/ssrf.ts'
 import { getOrchestratorKey, type OrchestratorKey } from '../tickets/keys.ts';
 import { buildNodeRoute, type NodeRoute } from './route.ts';
 import type { PrivateTunnelTarget, TunnelHttpResponse } from '../tunnel/tunnel.ts';
+import { isNodeGatewayDomain } from '../node-gateway/domain.ts';
 import {
   generateDedupeKey,
   canonicalizeUrl,
@@ -242,6 +243,11 @@ export default class ConsensusProxy {
       return { mode: 'self', dedupe_key: dedupeKey };
     }
 
+    const session = this.nodeTunnel?.getNodeSession?.(node.id);
+    if (session?.mode !== 'control' || session.ws?.readyState !== WebSocket.OPEN) {
+      return { mode: 'self', dedupe_key: dedupeKey };
+    }
+
     const der = this.nodePubkeyLookup(node.id);
     if (!der) return { mode: 'self', dedupe_key: dedupeKey };
 
@@ -440,8 +446,8 @@ export default class ConsensusProxy {
         }
       }
 
-      if (!node.domain) {
-        console.log('[Fallback to Self] Selected node has no domain/control tunnel');
+      if (!node.domain || isNodeGatewayDomain(node.domain)) {
+        console.log('[Fallback to Self] Selected node has no direct domain/control tunnel');
         return this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved);
       }
 

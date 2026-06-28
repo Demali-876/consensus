@@ -17,6 +17,7 @@ const DEFAULT_TICKET_TTL_SEC = 120;
 export interface NodeRoute {
   node_id:         string;
   domain:          string;
+  connect_url:     string;
   node_pubkey_pem: string;
   ticket:          string;
   dedupe_key:      string;
@@ -59,6 +60,7 @@ export function buildNodeRoute(params: {
   return {
     node_id:         params.node.id,
     domain:          params.node.domain,
+    connect_url:     `wss://${params.node.domain}/connect`,
     node_pubkey_pem: nodePublicKeyPem(params.nodePubkeyDer),
     ticket,
     dedupe_key:      params.dedupeKey,
