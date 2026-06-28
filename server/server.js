@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import ConsensusProxy from './features/proxy/proxy.ts';
 import Router from './router.ts';
+import NodeStore from './data/node_store.js';
 import { fileURLToPath } from 'url';
 import { paymentMiddleware, x402ResourceServer } from '@x402/express';
 import { ExactEvmScheme } from '@x402/evm/exact/server';
@@ -20,6 +21,7 @@ import { registerNodes } from './features/nodes/orchestrator.js';
 import { registerNodeBrowser } from './features/nodes/browser.js';
 import { registerTunnel } from './features/tunnel/tunnel.ts';
 import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
+import { registerNodeGateway } from './features/node-gateway/gateway.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 import { registerUpdater } from './updater.ts';
 import { registerOrchestratorKey } from './features/tickets/pubkey.ts';
@@ -103,6 +105,7 @@ registerOrchestratorKey(app);
 
 const server = http.createServer(app);
 const nodeTunnelStats = registerNodeTunnel(app, server, { router });
+const nodeGatewayStats = registerNodeGateway(server, { nodeStore: NodeStore, nodeTunnel: nodeTunnelStats });
 registerNodeBrowser(app, { router, nodeTunnel: nodeTunnelStats });
 const tunnelStats = registerTunnel(app, server, { router, nodeTunnel: nodeTunnelStats });
 const wsStats = registerWebSocket(
@@ -166,6 +169,7 @@ app.get('/health', publicLimiter, (_req, res) => {
     },
     websocket: ws,
     tunnels,
+    node_gateway: nodeGatewayStats.getStats(),
     node_tunnel: nodeTunnelStats.getStats(),
     network: {
       avg_http_latency_ms: routerStats.avg_http_latency_ms,
