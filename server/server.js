@@ -328,6 +328,7 @@ app.post('/proxy', async (req, res) => {
           route: {
             node_id:         route.node_id,
             domain:          route.domain,
+            connect_url:     route.connect_url,
             node_pubkey_pem: route.node_pubkey_pem,
             ticket:          route.ticket,
             ticket_exp:      route.ticket_exp,
