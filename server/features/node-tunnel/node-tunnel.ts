@@ -250,6 +250,7 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
       if (session.nodeId && byNodeId.get(session.nodeId) === session.id) {
         byNodeId.delete(session.nodeId);
       }
+      closeActiveStreams(session, 'node tunnel disconnected');
       rejectPendingProxyRequests(session, new Error(`Node tunnel disconnected: ${session.nodeId ?? session.id}`));
       if (session.nodeId && session.update?.state === 'updating') {
         NodeStore.setNodeUpdateState(session.nodeId, 'updating', {
@@ -302,6 +303,11 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
       const session = getControlSession(nodeId);
       if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
       return attachProxySession(session, clientWs);
+    },
+    attachDataPlaneSession: (nodeId: string, clientWs: WebSocket) => {
+      const session = getControlSession(nodeId);
+      if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
+      return attachDataPlaneSession(session, clientWs);
     },
     attachRawTunnelStream: (
       nodeId: string,
@@ -1000,6 +1006,89 @@ function attachProxySession(session: NodeTunnelSession, clientWs: WebSocket): { 
   return { streamId, close };
 }
 
+function attachDataPlaneSession(session: NodeTunnelSession, clientWs: WebSocket): { streamId: string; close: (reason?: string) => void } {
+  const streamId = crypto.randomUUID();
+  let closed = false;
+
+  log.info('node-tunnel', 'data-plane-stream-open', {
+    session_id: session.id,
+    node_id: session.nodeId ?? null,
+    stream_id: streamId,
+  });
+
+  const close = (reason = 'closed') => {
+    if (closed) return;
+    closed = true;
+    session.streams.delete(streamId);
+    log.info('node-tunnel', 'data-plane-stream-close-send', {
+      session_id: session.id,
+      node_id: session.nodeId ?? null,
+      stream_id: streamId,
+      reason,
+    });
+    void sendEncrypted(session, {
+      type: MESSAGE_TYPE.STREAM_CLOSE,
+      timestamp: nowSeconds(),
+      stream_id: streamId,
+      reason,
+    }).catch(() => undefined);
+  };
+
+  session.streams.set(streamId, {
+    streamId,
+    onData: (data) => {
+      if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
+    },
+    onClose: (reason?: string) => {
+      if (closed) return;
+      closed = true;
+      session.streams.delete(streamId);
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close(reason && reason !== 'target closed' ? 1011 : 1000, reason ?? 'node data-plane stream closed');
+      }
+    },
+  });
+
+  void sendEncrypted(session, {
+    type: MESSAGE_TYPE.STREAM_OPEN,
+    timestamp: nowSeconds(),
+    stream_id: streamId,
+    target: JSON.stringify({ kind: 'data-plane' }),
+  }).catch((error) => {
+    session.streams.delete(streamId);
+    closed = true;
+    log.error('node-tunnel', 'data-plane-stream-open-failed', {
+      session_id: session.id,
+      node_id: session.nodeId ?? null,
+      stream_id: streamId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.close(1011, error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  clientWs.on('message', (data: WebSocket.RawData) => {
+    if (closed || session.ws.readyState !== WebSocket.OPEN) return;
+    void sendEncrypted(session, {
+      type: MESSAGE_TYPE.STREAM_DATA,
+      timestamp: nowSeconds(),
+      stream_id: streamId,
+      data: toBuffer(data).toString('base64'),
+      encoding: 'base64',
+    }).catch((error) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close(1011, error instanceof Error ? error.message : String(error));
+      }
+    });
+  });
+
+  clientWs.on('close', () => close('client websocket closed'));
+  clientWs.on('error', () => close('client websocket error'));
+
+  return { streamId, close };
+}
+
 function attachRawTunnelStream(
   session: NodeTunnelSession,
   input: {
@@ -1312,6 +1401,22 @@ function rejectPendingProxyRequests(session: NodeTunnelSession, error: Error): v
     clearTimeout(pending.timer);
     pending.reject(error);
     session.pending.delete(id);
+  }
+}
+
+function closeActiveStreams(session: NodeTunnelSession, reason: string): void {
+  for (const [streamId, stream] of Array.from(session.streams)) {
+    session.streams.delete(streamId);
+    try {
+      stream.onClose(reason);
+    } catch (error) {
+      log.error('node-tunnel', 'stream-close-handler-failed', {
+        session_id: session.id,
+        node_id: session.nodeId ?? null,
+        stream_id: streamId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
 

@@ -2,12 +2,12 @@ import crypto                from 'crypto';
 import { isIPv4, isIPv6 }   from 'node:net';
 import rateLimit             from 'express-rate-limit';
 import { paymentMiddleware } from '@x402/express';
-import { provisionNodeDNS }  from '../../utils/dns.js';
 import NodeStore             from '../../data/node_store.js';
 import { observeNode }       from '../ip-pool/observer.ts';
 import { classifyIpRegion }  from '../../utils/region.ts';
 import { assertEmailVerification, isValidEmail, startEmailVerification, verifyEmailCode } from '../../utils/email-verification.ts';
 import { orchestratorPinForJoin } from '../tickets/pubkey.ts';
+import { nodeGatewayConnectUrl, publicNodeDomain } from '../node-gateway/domain.ts';
 
 const emailStartLimiter = rateLimit({
   windowMs:          10 * 60_000,
@@ -360,20 +360,14 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         const benchmarkDetails = verifiedJoin?.benchmark_details ?? null;
         console.log(` Encrypted eval benchmark accepted: ${benchmarkScore}/100`);
 
-        const nodeId    = crypto.randomBytes(6).toString('hex');
-        const subdomain = `${nodeId}.consensus.canister.software`;
+        const nodeId     = crypto.randomBytes(6).toString('hex');
+        const subdomain  = publicNodeDomain(nodeId);
+        const connectUrl = nodeGatewayConnectUrl(nodeId);
 
         console.log(`\nNode ID:   ${nodeId}`);
         console.log(`Subdomain: ${subdomain}`);
-        console.log('\nProvisioning DNS...');
-
-        try {
-          await provisionNodeDNS(subdomain, ipv6 || null, ipv4);
-          console.log(' DNS provisioned');
-        } catch (dnsError) {
-          console.error(`DNS failed: ${dnsError.message}\n`);
-          return res.status(500).json({ error: 'DNS provisioning failed', message: dnsError.message });
-        }
+        console.log(`Connect:   ${connectUrl}`);
+        console.log('Gateway routing uses the node control tunnel; no per-node DNS record is provisioned.');
 
         let consumedJoin = null;
         try {
@@ -433,6 +427,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           success:            true,
           node_id:            nodeId,
           domain:             subdomain,
+          connect_url:        connectUrl,
           ipv6:               ipv6 || null,
           ipv4,
           port,
@@ -445,7 +440,8 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           join_request_id:    consumedJoin?.id ?? null,
           processing_time_ms: processingTime,
           next_steps: [
-            'DNS propagation may take up to 5 minutes',
+            `Keep the outbound control tunnel connected at /node/tunnel`,
+            `Clients connect to ${connectUrl}`,
             `Send heartbeat every 5 minutes to /node/heartbeat/${nodeId}`,
             `Monitor status at /node/status/${nodeId}`,
           ],
