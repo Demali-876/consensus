@@ -149,6 +149,47 @@ interface EvalActionOutcome {
   rttMs: number;
 }
 
+// Recent-eval ring buffer for observability. Eval sessions are ephemeral (the
+// live state vanishes when the candidate disconnects), so finalizeEval snapshots
+// each completed eval here — score, errors, and the orchestrator-timed network
+// block — for the loopback-only GET /node/tunnel/eval/recent debug route. This
+// is how a real eval's numbers are read after the fact (and how task-7 gate
+// thresholds get calibrated). In-memory only; capped.
+interface EvalRecord {
+  session_id: string;
+  candidate_id: string | null;
+  node_id: string | null;
+  status: 'passed' | 'failed';
+  score: number;
+  errors: string[];
+  started_at: number;
+  completed_at: number;
+  duration_ms: number;
+  network: NetworkEvalResult | null;
+}
+
+const RECENT_EVAL_LIMIT = 10;
+const recentEvals: EvalRecord[] = [];
+
+function recordEvalResult(session: NodeTunnelSession, score: number): void {
+  if (!session.eval) return;
+  const startedAt = session.eval.startedAt;
+  const completedAt = session.eval.completedAt ?? Date.now();
+  recentEvals.unshift({
+    session_id: session.id,
+    candidate_id: session.candidateId ?? null,
+    node_id: session.nodeId ?? null,
+    status: session.eval.status === 'passed' ? 'passed' : 'failed',
+    score,
+    errors: [...session.eval.errors],
+    started_at: startedAt,
+    completed_at: completedAt,
+    duration_ms: completedAt - startedAt,
+    network: session.eval.network ?? null,
+  });
+  if (recentEvals.length > RECENT_EVAL_LIMIT) recentEvals.length = RECENT_EVAL_LIMIT;
+}
+
 // Router-directed node updates are disabled unless
 // CONSENSUS_NODE_AUTO_UPDATES=true. When enabled, the scheduler picks one idle
 // outdated control session at a time, prepares the artifact on the node, then
@@ -160,6 +201,13 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
 
   app.get('/node/tunnel/stats', (_req, res) => {
     res.json(getStats());
+  });
+
+  // Loopback-only: the last few completed evals, with the full orchestrator-timed
+  // network block. Run `bun run eval` on a candidate, then curl this on the Pi to
+  // read the real numbers. Also the source for task-7 threshold calibration.
+  app.get('/node/tunnel/eval/recent', requireLoopback, (_req, res) => {
+    res.json({ count: recentEvals.length, limit: RECENT_EVAL_LIMIT, evals: recentEvals });
   });
 
   app.post('/node/tunnel/proxy/:node_id', requireLoopback, async (req, res) => {
@@ -985,6 +1033,8 @@ function finalizeEval(session: NodeTunnelSession): void {
     score: evalScore.score,
     errors: session.eval.errors,
   });
+
+  recordEvalResult(session, evalScore.score);
 }
 
 function scoreEvalResults(results: Partial<Record<EvalAction, unknown>>): { score: number; errors: string[]; details: Partial<Record<EvalAction, unknown>> } {
