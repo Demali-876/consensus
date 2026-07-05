@@ -21,6 +21,7 @@ import { registerNodes } from './features/nodes/orchestrator.js';
 import { registerNodeBrowser } from './features/nodes/browser.js';
 import { registerTunnel } from './features/tunnel/tunnel.ts';
 import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
+import { registerSpeedtestTarget } from './features/node-tunnel/speedtest-target.ts';
 import { registerNodeGateway } from './features/node-gateway/gateway.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 import { registerUpdater } from './updater.ts';
@@ -102,6 +103,7 @@ app.use(express.json({ limit: '10mb' }));
 registerWhitepaperSignup(app);
 registerUpdater(app, { adminKey: process.env.ADMIN_KEY });
 registerOrchestratorKey(app);
+registerSpeedtestTarget(app);
 
 const server = http.createServer(app);
 const nodeTunnelStats = registerNodeTunnel(app, server, { router });

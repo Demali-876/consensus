@@ -87,7 +87,9 @@ export type EvalAction =
   | 'benchmark_crypto'
   | 'benchmark_memory'
   | 'benchmark_event_loop'
-  | 'benchmark_memory_pressure';
+  | 'benchmark_memory_pressure'
+  | 'tunnel_echo'
+  | 'speedtest_fetch';
 
 export interface EvalRequestMessage extends BaseMessage {
   type: typeof MESSAGE_TYPE.EVAL_REQUEST;

@@ -8,6 +8,7 @@ import { FRAME_TYPE, type FrameType } from './frames.ts';
 import { acceptClientHandshake, createHandshakeReject, decodeHandshakeMessage, encodeHandshakeMessage } from './handshake.ts';
 import { MESSAGE_TYPE, createErrorMessage, decodeMessage, encodeMessage, nowSeconds, type EvalAction, type EvalResponseMessage, type HelloMessage, type ProxyResponseMessage, type TunnelMessage, type UpdateReadyMessage } from './messages.ts';
 import { openFrame, sealFrame, type SecureSession } from './secure-channel.ts';
+import { speedtestUrl } from './speedtest-target.ts';
 
 interface PendingTunnelRequest {
   kind: 'proxy' | 'update';
@@ -61,9 +62,14 @@ interface NodeTunnelSession {
     };
     startedAt: number;
     completedAt?: number;
-    // Serial-eval waiters: resolved by handleEvalResponse when the action the
-    // loop is currently awaiting reports back. One entry at a time.
-    pending?: Map<EvalAction, () => void>;
+    // In-flight eval requests keyed by request id (EVAL_REQUEST.id ===
+    // EVAL_RESPONSE.reply_to). handleEvalResponse resolves the waiter with the
+    // response message. Id-keyed (not action-keyed) so the same action can be
+    // sent repeatedly and concurrently — the network batteries rely on this.
+    pending?: Map<string, (message: EvalResponseMessage) => void>;
+    // Orchestrator-timed network measurements (tunnel echo + node speed test).
+    // Collected here; folded into scoring under task 7.
+    network?: NetworkEvalResult;
   };
 }
 
@@ -85,6 +91,63 @@ const EVAL_MAX_EVENT_LOOP_P99_NS = 50_000_000;
 // ~1-2s each; 30s tolerates a slow-but-valid machine while bounding a node that
 // never answers so the eval can't hang the session forever.
 const EVAL_ACTION_TIMEOUT_MS = 30_000;
+// Network-eval actions (echo/speedtest) are I/O, not compute — a shorter ceiling
+// keeps a dead speedtest target from stalling the eval (see the warmup-skip in
+// runSpeedBattery). The node's own fetch timeout is 15s.
+const NETWORK_ACTION_TIMEOUT_MS = 20_000;
+const ECHO_SIZES_BYTES = [1024, 16384, 262144];
+const SPEEDTEST_SIZE_BYTES = 16384;
+const SPEEDTEST_SEQUENTIAL_COUNT = 6;
+const SPEEDTEST_CONCURRENCY = 6;
+
+interface EchoProbe {
+  size_bytes: number;
+  ok: boolean;
+  rtt_ms: number;
+  // Round-trip (payload traverses both ways) throughput.
+  throughput_mbps: number;
+}
+
+interface SpeedProbe {
+  ok: boolean;
+  status: number | null;
+  rtt_ms: number;
+  bytes: number;
+  node_ms: number | null;
+}
+
+interface NetworkEvalResult {
+  echo: EchoProbe[];
+  echo_rtt_ms_p50: number | null;
+  speed: {
+    target_url: string;
+    size_bytes: number;
+    count: number;
+    rtt_ms_p50: number | null;
+    rtt_ms_p95: number | null;
+    node_ms_p50: number | null;
+    success_rate: number;
+    samples: SpeedProbe[];
+    skipped?: string;
+  } | null;
+  concurrency: {
+    target_url: string;
+    size_bytes: number;
+    workers: number;
+    batch_ms: number;
+    success_rate: number;
+    rtt_ms_p95: number | null;
+    skipped?: string;
+  } | null;
+}
+
+interface EvalActionOutcome {
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+  // Orchestrator-measured round-trip in milliseconds — the authoritative timing.
+  rttMs: number;
+}
 
 // Router-directed node updates are disabled unless
 // CONSENSUS_NODE_AUTO_UPDATES=true. When enabled, the scheduler picks one idle
@@ -626,9 +689,9 @@ async function startEval(session: NodeTunnelSession): Promise<void> {
     pending: new Map(),
   };
 
-  // Serialize the eval: send one action, await its response (or time out), then
-  // send the next. Firing all requests at once made the node run its CPU,
-  // crypto, and memory benchmarks concurrently, so every measurement was
+  // Serialize the compute eval: send one action, await its response (or time
+  // out), then send the next. Firing all requests at once made the node run its
+  // CPU, crypto, and memory benchmarks concurrently, so every measurement was
   // contended — and those are the numbers the network judges hardware on. One
   // action in flight at a time gives each benchmark an uncontended core.
   // Safe against deadlock: ws 'message' events are independent callbacks (see
@@ -639,35 +702,34 @@ async function startEval(session: NodeTunnelSession): Promise<void> {
       session.eval.errors.push(`${action}: control channel closed before eval completed`);
       break;
     }
+    const outcome = await sendEvalAction(session, action, evalParams(action));
+    if (outcome.ok) {
+      session.eval.results[action] = outcome.result;
+    } else if (!session.eval.errors.some((error) => error.startsWith(`${action}:`))) {
+      session.eval.errors.push(`${action}: ${outcome.error ?? 'unknown error'}`);
+    }
+  }
 
-    log.info('node-eval', 'request', {
-      session_id: session.id,
-      candidate_id: session.candidateId ?? null,
-      action,
-    });
-
-    const responded = new Promise<void>((resolve) => {
-      session.eval!.pending!.set(action, resolve);
-    });
-    await sendEncrypted(session, {
-      type: MESSAGE_TYPE.EVAL_REQUEST,
-      id: crypto.randomUUID(),
-      timestamp: nowSeconds(),
-      action,
-      params: evalParams(action),
-    });
-
+  // Orchestrator-timed network eval: tunnel echo (isolates the channel) + node
+  // speed test (real fetch capability). Additive and non-breaking for now —
+  // results are collected into session.eval.network; scoring folds them in under
+  // task 7, so a skipped/failed network phase does not fail the eval today.
+  if (session.ws.readyState === WebSocket.OPEN) {
     try {
-      await withTimeout(responded, EVAL_ACTION_TIMEOUT_MS);
-    } catch {
-      session.eval.pending!.delete(action);
-      if (!session.eval.errors.some((error) => error.startsWith(`${action}:`))) {
-        session.eval.errors.push(`${action}: timed out after ${EVAL_ACTION_TIMEOUT_MS}ms`);
-      }
-      log.warn('node-eval', 'action-timeout', {
+      session.eval.network = await runNetworkEval(session);
+      log.info('node-eval', 'network-complete', {
         session_id: session.id,
         candidate_id: session.candidateId ?? null,
-        action,
+        echo_p50_ms: session.eval.network.echo_rtt_ms_p50,
+        speed_p50_ms: session.eval.network.speed?.rtt_ms_p50 ?? null,
+        speed_success: session.eval.network.speed?.success_rate ?? null,
+        concurrency_success: session.eval.network.concurrency?.success_rate ?? null,
+      });
+    } catch (error) {
+      log.error('node-eval', 'network-failed', {
+        session_id: session.id,
+        candidate_id: session.candidateId ?? null,
+        message: error instanceof Error ? error.message : String(error),
       });
     }
   }
@@ -675,14 +737,192 @@ async function startEval(session: NodeTunnelSession): Promise<void> {
   finalizeEval(session);
 }
 
-function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('eval action timed out')), ms);
-    promise.then(
-      () => { clearTimeout(timer); resolve(); },
-      (error) => { clearTimeout(timer); reject(error); },
-    );
+// Send one eval action and resolve with the node's response plus the
+// orchestrator-measured round-trip. Never rejects — a timeout or send failure
+// resolves as { ok: false } so callers (serial loop and concurrent batteries)
+// can treat every outcome uniformly.
+function sendEvalAction(
+  session: NodeTunnelSession,
+  action: EvalAction,
+  params?: Record<string, unknown>,
+  timeoutMs: number = EVAL_ACTION_TIMEOUT_MS,
+): Promise<EvalActionOutcome> {
+  if (!session.eval || session.ws.readyState !== WebSocket.OPEN) {
+    return Promise.resolve({ ok: false, error: 'control channel closed', rttMs: 0 });
+  }
+
+  const id = crypto.randomUUID();
+  const startedAt = performance.now();
+  const pending = session.eval.pending!;
+
+  log.info('node-eval', 'request', {
+    session_id: session.id,
+    candidate_id: session.candidateId ?? null,
+    action,
   });
+
+  return new Promise<EvalActionOutcome>((resolve) => {
+    const settle = (outcome: EvalActionOutcome): void => {
+      if (!pending.has(id)) return;
+      pending.delete(id);
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    const timer = setTimeout(() => {
+      log.warn('node-eval', 'action-timeout', {
+        session_id: session.id,
+        candidate_id: session.candidateId ?? null,
+        action,
+      });
+      settle({ ok: false, error: `timed out after ${timeoutMs}ms`, rttMs: performance.now() - startedAt });
+    }, timeoutMs);
+
+    pending.set(id, (message) => {
+      settle({ ok: message.ok, result: message.result, error: message.error, rttMs: performance.now() - startedAt });
+    });
+
+    void sendEncrypted(session, {
+      type: MESSAGE_TYPE.EVAL_REQUEST,
+      id,
+      timestamp: nowSeconds(),
+      action,
+      params,
+    }).catch((error) => {
+      settle({ ok: false, error: error instanceof Error ? error.message : String(error), rttMs: performance.now() - startedAt });
+    });
+  });
+}
+
+async function runNetworkEval(session: NodeTunnelSession): Promise<NetworkEvalResult> {
+  const echo = await runEchoBattery(session);
+  const echoRtts = echo.filter((probe) => probe.ok).map((probe) => probe.rtt_ms);
+
+  const speed = await runSpeedBattery(session);
+  // Only probe concurrency if the sequential battery reached the target — no
+  // point firing six parallel requests at a host we already know is unreachable.
+  const concurrency = speed.skipped ? { ...emptyConcurrency(speed.target_url), skipped: speed.skipped } : await runConcurrencyBattery(session);
+
+  return {
+    echo,
+    echo_rtt_ms_p50: percentileOrNull(echoRtts, 0.5),
+    speed,
+    concurrency,
+  };
+}
+
+async function runEchoBattery(session: NodeTunnelSession): Promise<EchoProbe[]> {
+  const probes: EchoProbe[] = [];
+  for (const size of ECHO_SIZES_BYTES) {
+    const payload = crypto.randomBytes(size).toString('base64');
+    const nonce = crypto.randomUUID();
+    const outcome = await sendEvalAction(session, 'tunnel_echo', { payload, nonce }, NETWORK_ACTION_TIMEOUT_MS);
+    const result = outcome.result as { echo?: string; nonce?: string } | undefined;
+    // Integrity: the echo must come back byte-identical with the matching nonce,
+    // else the tunnel corrupted or misrouted it — not a valid throughput sample.
+    const ok = outcome.ok && result?.echo === payload && result?.nonce === nonce;
+    const throughputMbps = ok && outcome.rttMs > 0 ? (2 * size * 8) / (outcome.rttMs / 1000) / 1e6 : 0;
+    probes.push({
+      size_bytes: size,
+      ok,
+      rtt_ms: round2(outcome.rttMs),
+      throughput_mbps: round2(throughputMbps),
+    });
+  }
+  return probes;
+}
+
+async function runSpeedBattery(session: NodeTunnelSession): Promise<NonNullable<NetworkEvalResult['speed']>> {
+  const targetUrl = speedtestUrl(SPEEDTEST_SIZE_BYTES);
+  const base = {
+    target_url: targetUrl,
+    size_bytes: SPEEDTEST_SIZE_BYTES,
+    count: 0,
+    rtt_ms_p50: null,
+    rtt_ms_p95: null,
+    node_ms_p50: null,
+    success_rate: 0,
+    samples: [] as SpeedProbe[],
+  };
+
+  // Warmup probe: if the orchestrator target is unreachable from this node,
+  // skip the battery rather than eat SPEEDTEST_SEQUENTIAL_COUNT timeouts.
+  const warm = await sendEvalAction(session, 'speedtest_fetch', { target_url: targetUrl }, NETWORK_ACTION_TIMEOUT_MS);
+  if (!warm.ok) {
+    return { ...base, skipped: `target unreachable: ${warm.error ?? 'warmup probe failed'}` };
+  }
+
+  const samples: SpeedProbe[] = [toSpeedProbe(warm)];
+  for (let i = 1; i < SPEEDTEST_SEQUENTIAL_COUNT; i++) {
+    samples.push(toSpeedProbe(await sendEvalAction(session, 'speedtest_fetch', { target_url: targetUrl }, NETWORK_ACTION_TIMEOUT_MS)));
+  }
+
+  const okSamples = samples.filter((sample) => sample.ok);
+  return {
+    ...base,
+    count: samples.length,
+    rtt_ms_p50: percentileOrNull(okSamples.map((s) => s.rtt_ms), 0.5),
+    rtt_ms_p95: percentileOrNull(okSamples.map((s) => s.rtt_ms), 0.95),
+    node_ms_p50: percentileOrNull(okSamples.map((s) => s.node_ms ?? 0), 0.5),
+    success_rate: samples.length ? okSamples.length / samples.length : 0,
+    samples,
+  };
+}
+
+async function runConcurrencyBattery(session: NodeTunnelSession): Promise<NonNullable<NetworkEvalResult['concurrency']>> {
+  const targetUrl = speedtestUrl(SPEEDTEST_SIZE_BYTES);
+  const startedAt = performance.now();
+  // Fire all workers at once — id-keyed pending lets many of the same action be
+  // in flight. This is I/O concurrency (node fetches), the intended behaviour;
+  // it does not reintroduce the compute contention the serial loop fixed.
+  const outcomes = await Promise.all(
+    Array.from({ length: SPEEDTEST_CONCURRENCY }, () =>
+      sendEvalAction(session, 'speedtest_fetch', { target_url: targetUrl }, NETWORK_ACTION_TIMEOUT_MS),
+    ),
+  );
+  const batchMs = performance.now() - startedAt;
+  const okOutcomes = outcomes.filter((outcome) => outcome.ok);
+
+  return {
+    target_url: targetUrl,
+    size_bytes: SPEEDTEST_SIZE_BYTES,
+    workers: SPEEDTEST_CONCURRENCY,
+    batch_ms: round2(batchMs),
+    success_rate: outcomes.length ? okOutcomes.length / outcomes.length : 0,
+    rtt_ms_p95: percentileOrNull(okOutcomes.map((o) => o.rttMs), 0.95),
+  };
+}
+
+function emptyConcurrency(targetUrl: string): NonNullable<NetworkEvalResult['concurrency']> {
+  return {
+    target_url: targetUrl,
+    size_bytes: SPEEDTEST_SIZE_BYTES,
+    workers: 0,
+    batch_ms: 0,
+    success_rate: 0,
+    rtt_ms_p95: null,
+  };
+}
+
+function toSpeedProbe(outcome: EvalActionOutcome): SpeedProbe {
+  const result = outcome.result as { status?: number; bytes?: number; node_ms?: number } | undefined;
+  return {
+    ok: outcome.ok,
+    status: typeof result?.status === 'number' ? result.status : null,
+    rtt_ms: round2(outcome.rttMs),
+    bytes: typeof result?.bytes === 'number' ? result.bytes : 0,
+    node_ms: typeof result?.node_ms === 'number' ? result.node_ms : null,
+  };
+}
+
+function percentileOrNull(values: number[], p: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1));
+  return round2(sorted[index]);
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function evalParams(action: EvalAction): Record<string, unknown> | undefined {
@@ -702,20 +942,12 @@ function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMes
     ok: message.ok,
     error: message.error ?? null,
   });
-  // Record the result/error, then unblock startEval's serial loop for this
-  // action. A late response for an action that already timed out (or one that
-  // arrives after finalizeEval ran) is recorded harmlessly and resolves nothing.
-  if (message.ok) {
-    session.eval.results[message.action] = message.result;
-  } else if (!session.eval.errors.some((error) => error.startsWith(`${message.action}:`))) {
-    session.eval.errors.push(`${message.action}: ${message.error ?? 'unknown error'}`);
-  }
-
-  const resolve = session.eval.pending?.get(message.action);
-  if (resolve) {
-    session.eval.pending!.delete(message.action);
-    resolve();
-  }
+  // Hand the response to the waiter that sent this request id. sendEvalAction
+  // owns recording the result/error (via its returned outcome) and cleaning up
+  // the map entry. A late response whose waiter already timed out finds no entry
+  // and is dropped harmlessly.
+  const waiter = session.eval.pending?.get(message.reply_to);
+  if (waiter) waiter(message);
 }
 
 // Score the collected eval results and, on pass, mint + send the join request.
