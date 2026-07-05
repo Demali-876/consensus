@@ -88,6 +88,13 @@ export type EvalAction =
   | 'benchmark_memory'
   | 'benchmark_event_loop'
   | 'benchmark_memory_pressure'
+  // Admission suites (the bench-cpu model): composite = the real per-request
+  // pipeline, sustained = windowed steady-state (the admission authority),
+  // multicore = effective-core scaling. These replace benchmark_cpu/crypto/memory
+  // as the gate; the older primitives remain in the union as diagnostics.
+  | 'benchmark_composite'
+  | 'benchmark_sustained'
+  | 'benchmark_multicore'
   | 'tunnel_echo'
   | 'speedtest_fetch';
 

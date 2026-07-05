@@ -9,6 +9,7 @@ import { acceptClientHandshake, createHandshakeReject, decodeHandshakeMessage, e
 import { MESSAGE_TYPE, createErrorMessage, decodeMessage, encodeMessage, nowSeconds, type EvalAction, type EvalResponseMessage, type HelloMessage, type ProxyResponseMessage, type TunnelMessage, type UpdateReadyMessage } from './messages.ts';
 import { openFrame, sealFrame, type SecureSession } from './secure-channel.ts';
 import { speedtestUrl } from './speedtest-target.ts';
+import { deriveAdmission, type AdmissionVerdict } from './admission.ts';
 
 interface PendingTunnelRequest {
   kind: 'proxy' | 'update';
@@ -80,13 +81,18 @@ type RouterLike = {
 
 const sessions = new Map<string, NodeTunnelSession>();
 const byNodeId = new Map<string, string>();
-const EVAL_MIN_CPU_HASHES_PER_SECOND = 5_000;
-const EVAL_MIN_CPU_BYTES_PER_SECOND = 5 * 1024 * 1024;
-const EVAL_MIN_CRYPTO_BYTES_PER_SECOND = 10 * 1024 * 1024;
-const EVAL_MIN_MEMORY_ALLOCATED_MB = 128;
-const EVAL_MIN_MEMORY_BYTES_PER_SECOND = 128 * 1024 * 1024;
+// System sanity gates (not CPU benchmarking — basic capability floors that
+// survive the switch to the composite/sustained admission model). The CPU gate
+// itself lives in admission.ts (stable sustained 16KB req/s).
 const EVAL_MIN_SYSTEM_MEMORY_MB = 512;
 const EVAL_MAX_EVENT_LOOP_P99_NS = 50_000_000;
+// Sustained window the server asks the node to hold during eval. 30s = 6×5s
+// windows, enough to read early-vs-late throttle and a conservative floor. The
+// 24h stability trial (task #10) is the long-run authority; this is the gate.
+const SUSTAINED_EVAL_MS = 30_000;
+// Extra head-room over the sustained window for warmup + the sanity round-trip
+// so a valid run never trips the per-action timeout.
+const SUSTAINED_TIMEOUT_MARGIN_MS = 15_000;
 // Per-action ceiling for the serialized eval. The node's benchmark suites run
 // ~1-2s each; 30s tolerates a slow-but-valid machine while bounding a node that
 // never answers so the eval can't hang the session forever.
@@ -161,6 +167,9 @@ interface EvalRecord {
   node_id: string | null;
   status: 'passed' | 'failed';
   score: number;
+  // The admission verdict (stable sustained 16KB capacity + floor + blockers) —
+  // the real ranking/gate data, distinct from the 0-100 health `score`.
+  admission: AdmissionVerdict | null;
   errors: string[];
   started_at: number;
   completed_at: number;
@@ -171,7 +180,11 @@ interface EvalRecord {
 const RECENT_EVAL_LIMIT = 10;
 const recentEvals: EvalRecord[] = [];
 
-function recordEvalResult(session: NodeTunnelSession, score: number): void {
+function recordEvalResult(
+  session: NodeTunnelSession,
+  score: number,
+  admission: AdmissionVerdict | null
+): void {
   if (!session.eval) return;
   const startedAt = session.eval.startedAt;
   const completedAt = session.eval.completedAt ?? Date.now();
@@ -181,6 +194,7 @@ function recordEvalResult(session: NodeTunnelSession, score: number): void {
     node_id: session.nodeId ?? null,
     status: session.eval.status === 'passed' ? 'passed' : 'failed',
     score,
+    admission,
     errors: [...session.eval.errors],
     started_at: startedAt,
     completed_at: completedAt,
@@ -719,14 +733,20 @@ async function handleHello(session: NodeTunnelSession, message: HelloMessage): P
 }
 
 async function startEval(session: NodeTunnelSession): Promise<void> {
+  // The admission battery. capabilities/integrity identify the node; system +
+  // event_loop are basic sanity; composite/sustained/multicore are the bench-cpu
+  // model the network now admits on (replacing the old cpu/crypto/memory
+  // throughput probes). Order matters: sustained runs its 30s window on an
+  // otherwise-idle node, and multicore (all-core load) runs AFTER it so all-core
+  // heat cannot pre-throttle the single-core steady-state read.
   const actions: EvalAction[] = [
     'capabilities',
     'integrity',
     'benchmark_system',
-    'benchmark_cpu',
-    'benchmark_crypto',
-    'benchmark_memory',
     'benchmark_event_loop',
+    'benchmark_composite',
+    'benchmark_sustained',
+    'benchmark_multicore',
   ];
   session.eval = {
     status: 'pending',
@@ -750,7 +770,7 @@ async function startEval(session: NodeTunnelSession): Promise<void> {
       session.eval.errors.push(`${action}: control channel closed before eval completed`);
       break;
     }
-    const outcome = await sendEvalAction(session, action, evalParams(action));
+    const outcome = await sendEvalAction(session, action, evalParams(action), evalActionTimeout(action));
     if (outcome.ok) {
       session.eval.results[action] = outcome.result;
     } else if (!session.eval.errors.some((error) => error.startsWith(`${action}:`))) {
@@ -974,10 +994,17 @@ function round2(value: number): number {
 }
 
 function evalParams(action: EvalAction): Record<string, unknown> | undefined {
-  if (action === 'benchmark_cpu') return { iterations: 5_000, data: 'consensus-node-eval' };
-  if (action === 'benchmark_crypto') return { iterations: 500, payload_size_kb: 16 };
-  if (action === 'benchmark_memory_pressure') return { test_size_mb: 128, rounds: 2 };
+  // The server sets the sustained window; composite and multicore use the node's
+  // own defaults (3 response sizes, powers-of-two worker counts).
+  if (action === 'benchmark_sustained') return { duration_ms: SUSTAINED_EVAL_MS };
   return undefined;
+}
+
+// The sustained suite deliberately runs for SUSTAINED_EVAL_MS, far longer than a
+// compute benchmark, so it needs a longer per-action ceiling than the default.
+function evalActionTimeout(action: EvalAction): number {
+  if (action === 'benchmark_sustained') return SUSTAINED_EVAL_MS + SUSTAINED_TIMEOUT_MARGIN_MS;
+  return EVAL_ACTION_TIMEOUT_MS;
 }
 
 function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMessage): void {
@@ -1034,65 +1061,60 @@ function finalizeEval(session: NodeTunnelSession): void {
     errors: session.eval.errors,
   });
 
-  recordEvalResult(session, evalScore.score);
+  recordEvalResult(session, evalScore.score, evalScore.admission);
 }
 
-function scoreEvalResults(results: Partial<Record<EvalAction, unknown>>): { score: number; errors: string[]; details: Partial<Record<EvalAction, unknown>> } {
+function scoreEvalResults(
+  results: Partial<Record<EvalAction, unknown>>
+): { score: number; errors: string[]; admission: AdmissionVerdict; details: Record<string, unknown> } {
   const errors: string[] = [];
-  const cpu = results.benchmark_cpu as { bytes_per_second?: number; hashes_per_second?: number } | undefined;
-  const cryptoResult = results.benchmark_crypto as { total_bytes_per_second?: number } | undefined;
-  const memory = results.benchmark_memory as { bytes_per_second?: number } | undefined;
-  const legacyMemory = results.benchmark_memory_pressure as { allocated_mb?: number } | undefined;
-  const system = results.benchmark_system as { total_memory_bytes?: number } | undefined;
-  const eventLoop = results.benchmark_event_loop as { ns_per_op?: { p99?: number } } | undefined;
-  const cpuBytesPerSecond = Number(cpu?.bytes_per_second ?? 0);
-  const cpuHashesPerSecond = Number(cpu?.hashes_per_second ?? 0);
-  const cpuValue = cpuBytesPerSecond > 0 ? cpuBytesPerSecond : cpuHashesPerSecond;
-  const cpuMinimum = cpuBytesPerSecond > 0 ? EVAL_MIN_CPU_BYTES_PER_SECOND : EVAL_MIN_CPU_HASHES_PER_SECOND;
-  const memoryBytesPerSecond = Number(memory?.bytes_per_second ?? 0);
-  const legacyMemoryAllocatedMb = Number(legacyMemory?.allocated_mb ?? 0);
-  const memoryScore = memoryBytesPerSecond > 0
-    ? Math.min(100, (memoryBytesPerSecond / EVAL_MIN_MEMORY_BYTES_PER_SECOND) * 70)
-    : Math.min(100, (legacyMemoryAllocatedMb / EVAL_MIN_MEMORY_ALLOCATED_MB) * 70);
-  const eventLoopP99Ns = Number(eventLoop?.ns_per_op?.p99 ?? 0);
-  const eventLoopScore = eventLoopP99Ns > 0
-    ? Math.min(100, (EVAL_MAX_EVENT_LOOP_P99_NS / eventLoopP99Ns) * 70)
-    : 0;
-  const cpuScore = Math.min(100, (cpuValue / cpuMinimum) * 70);
-  const cryptoScore = Math.min(100, (Number(cryptoResult?.total_bytes_per_second ?? 0) / EVAL_MIN_CRYPTO_BYTES_PER_SECOND) * 70);
-  const totalMemoryMb = Number(system?.total_memory_bytes ?? 0) / 1024 / 1024;
-  const systemScore = Math.min(100, (totalMemoryMb / EVAL_MIN_SYSTEM_MEMORY_MB) * 70);
 
-  if (cpuValue < cpuMinimum) {
-    errors.push(cpuBytesPerSecond > 0
-      ? `benchmark_cpu: below minimum ${EVAL_MIN_CPU_BYTES_PER_SECOND} bytes/sec`
-      : `benchmark_cpu: below minimum ${EVAL_MIN_CPU_HASHES_PER_SECOND} hashes/sec`);
+  // PRIMARY gate: stable sustained 16KB capacity — the bench-cpu admission model.
+  // The server derives the verdict from the node's raw composite/sustained
+  // results; a node that throttles, shares its core, or is too slow to serve
+  // fails here (replacing the old cpu/crypto/memory throughput minimums).
+  const admission = deriveAdmission(results);
+  if (!admission.stable) {
+    for (const blocker of admission.blockers) errors.push(`admission: ${blocker}`);
   }
-  if (Number(cryptoResult?.total_bytes_per_second ?? 0) < EVAL_MIN_CRYPTO_BYTES_PER_SECOND) {
-    errors.push(`benchmark_crypto: below minimum ${EVAL_MIN_CRYPTO_BYTES_PER_SECOND} bytes/sec`);
-  }
-  if (memoryBytesPerSecond > 0) {
-    if (memoryBytesPerSecond < EVAL_MIN_MEMORY_BYTES_PER_SECOND) {
-      errors.push(`benchmark_memory: below minimum ${EVAL_MIN_MEMORY_BYTES_PER_SECOND} bytes/sec`);
-    }
-  } else if (legacyMemoryAllocatedMb > 0) {
-    if (legacyMemoryAllocatedMb < EVAL_MIN_MEMORY_ALLOCATED_MB) {
-      errors.push(`benchmark_memory_pressure: below minimum ${EVAL_MIN_MEMORY_ALLOCATED_MB}MB allocated`);
-    }
-  } else {
-    errors.push('benchmark_memory: missing result');
-  }
+
+  // System-memory sanity — a basic capability floor, not a CPU score.
+  const system = results.benchmark_system as { total_memory_bytes?: number } | undefined;
+  const totalMemoryMb = Number(system?.total_memory_bytes ?? 0) / 1024 / 1024;
   if (totalMemoryMb < EVAL_MIN_SYSTEM_MEMORY_MB) {
     errors.push(`benchmark_system: below minimum ${EVAL_MIN_SYSTEM_MEMORY_MB}MB total memory`);
   }
+
+  // Event-loop health — an oversubscribed or busy host shows elevated p99 here.
+  const eventLoop = results.benchmark_event_loop as { ns_per_op?: { p99?: number } } | undefined;
+  const eventLoopP99Ns = Number(eventLoop?.ns_per_op?.p99 ?? 0);
   if (eventLoopP99Ns <= 0 || eventLoopP99Ns > EVAL_MAX_EVENT_LOOP_P99_NS) {
     errors.push(`benchmark_event_loop: p99 above maximum ${EVAL_MAX_EVENT_LOOP_P99_NS}ns`);
   }
+
   return {
-    score: Math.round(cpuScore * 0.2 + cryptoScore * 0.3 + memoryScore * 0.2 + systemScore * 0.15 + eventLoopScore * 0.15),
+    score: computeHealthScore(admission, totalMemoryMb, eventLoopP99Ns),
     errors,
-    details: results,
+    admission,
+    details: { ...results, admission },
   };
+}
+
+// A 0-100 health/stability score for display and the node record — this keeps
+// the existing "/100" semantics. It is NOT the ranking magnitude: rank on
+// admission.capacity_req_s (actual req/s). Stability dominates on purpose — a
+// fast node that throttles is a worse network member than a slower one that
+// holds steady.
+function computeHealthScore(
+  admission: AdmissionVerdict,
+  totalMemoryMb: number,
+  eventLoopP99Ns: number
+): number {
+  const stability = admission.basis !== 'sustained' ? 0 : admission.stable ? 100 : 40;
+  const memory = Math.min(100, (totalMemoryMb / EVAL_MIN_SYSTEM_MEMORY_MB) * 100);
+  const eventLoop =
+    eventLoopP99Ns > 0 ? Math.min(100, (EVAL_MAX_EVENT_LOOP_P99_NS / eventLoopP99Ns) * 100) : 0;
+  return Math.round(stability * 0.6 + memory * 0.2 + eventLoop * 0.2);
 }
 
 async function sendJoinReady(session: NodeTunnelSession): Promise<void> {
@@ -1113,7 +1135,7 @@ async function sendJoinReady(session: NodeTunnelSession): Promise<void> {
   });
 }
 
-function createEvalJoinRequest(publicKeyPem: string, evalScore: { score: number; details: Partial<Record<EvalAction, unknown>> }): EvalJoinRequest {
+function createEvalJoinRequest(publicKeyPem: string, evalScore: { score: number; details: Record<string, unknown> }): EvalJoinRequest {
   const pubkey = crypto.createPublicKey(publicKeyPem).export({ format: 'der', type: 'spki' });
   return NodeStore.createJoinRequest({
     pubkey,

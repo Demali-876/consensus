@@ -391,9 +391,13 @@ export function registerNodes(app, httpsServer, x402Server, config) {
             ip_leasing:       declaredCapabilities?.ip_leasing      ?? false,
             benchmark_score:  benchmarkScore,
             benchmark_details: benchmarkDetails,
-            cpu_performance:  benchmarkDetails?.benchmark_cpu?.bytes_per_second ?? benchmarkDetails?.benchmark_cpu?.hashes_per_second ?? null,
+            // cpu_performance now carries the admission capacity (stable sustained
+            // 16KB req/s) — the honest "what can this node serve" figure. The full
+            // verdict (floor, effective_cores, blockers) lives in benchmark_details
+            // .admission. Old-format fallbacks stay for nodes evaluated pre-switch.
+            cpu_performance:  benchmarkDetails?.admission?.capacity_req_s ?? benchmarkDetails?.benchmark_cpu?.bytes_per_second ?? benchmarkDetails?.benchmark_cpu?.hashes_per_second ?? null,
             crypto_performance: benchmarkDetails?.benchmark_crypto?.total_bytes_per_second ?? null,
-            memory_score:     benchmarkDetails?.benchmark_memory?.bytes_per_second ?? benchmarkDetails?.benchmark_memory_pressure?.allocated_mb ?? null,
+            memory_score:     benchmarkDetails?.admission?.effective_cores ?? benchmarkDetails?.benchmark_memory?.bytes_per_second ?? benchmarkDetails?.benchmark_memory_pressure?.allocated_mb ?? null,
             ipv4,
             ipv6:             ipv6 || null,
             port,
