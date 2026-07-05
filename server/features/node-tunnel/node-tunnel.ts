@@ -61,6 +61,9 @@ interface NodeTunnelSession {
     };
     startedAt: number;
     completedAt?: number;
+    // Serial-eval waiters: resolved by handleEvalResponse when the action the
+    // loop is currently awaiting reports back. One entry at a time.
+    pending?: Map<EvalAction, () => void>;
   };
 }
 
@@ -78,6 +81,10 @@ const EVAL_MIN_MEMORY_ALLOCATED_MB = 128;
 const EVAL_MIN_MEMORY_BYTES_PER_SECOND = 128 * 1024 * 1024;
 const EVAL_MIN_SYSTEM_MEMORY_MB = 512;
 const EVAL_MAX_EVENT_LOOP_P99_NS = 50_000_000;
+// Per-action ceiling for the serialized eval. The node's benchmark suites run
+// ~1-2s each; 30s tolerates a slow-but-valid machine while bounding a node that
+// never answers so the eval can't hang the session forever.
+const EVAL_ACTION_TIMEOUT_MS = 30_000;
 
 // Router-directed node updates are disabled unless
 // CONSENSUS_NODE_AUTO_UPDATES=true. When enabled, the scheduler picks one idle
@@ -616,13 +623,31 @@ async function startEval(session: NodeTunnelSession): Promise<void> {
     results: {},
     errors: [],
     startedAt: Date.now(),
+    pending: new Map(),
   };
 
+  // Serialize the eval: send one action, await its response (or time out), then
+  // send the next. Firing all requests at once made the node run its CPU,
+  // crypto, and memory benchmarks concurrently, so every measurement was
+  // contended — and those are the numbers the network judges hardware on. One
+  // action in flight at a time gives each benchmark an uncontended core.
+  // Safe against deadlock: ws 'message' events are independent callbacks (see
+  // the ws.on('message') dispatch), so the EVAL_RESPONSE that unblocks each
+  // await is still delivered while this loop is suspended.
   for (const action of actions) {
+    if (session.ws.readyState !== WebSocket.OPEN) {
+      session.eval.errors.push(`${action}: control channel closed before eval completed`);
+      break;
+    }
+
     log.info('node-eval', 'request', {
       session_id: session.id,
       candidate_id: session.candidateId ?? null,
       action,
+    });
+
+    const responded = new Promise<void>((resolve) => {
+      session.eval!.pending!.set(action, resolve);
     });
     await sendEncrypted(session, {
       type: MESSAGE_TYPE.EVAL_REQUEST,
@@ -631,7 +656,33 @@ async function startEval(session: NodeTunnelSession): Promise<void> {
       action,
       params: evalParams(action),
     });
+
+    try {
+      await withTimeout(responded, EVAL_ACTION_TIMEOUT_MS);
+    } catch {
+      session.eval.pending!.delete(action);
+      if (!session.eval.errors.some((error) => error.startsWith(`${action}:`))) {
+        session.eval.errors.push(`${action}: timed out after ${EVAL_ACTION_TIMEOUT_MS}ms`);
+      }
+      log.warn('node-eval', 'action-timeout', {
+        session_id: session.id,
+        candidate_id: session.candidateId ?? null,
+        action,
+      });
+    }
   }
+
+  finalizeEval(session);
+}
+
+function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('eval action timed out')), ms);
+    promise.then(
+      () => { clearTimeout(timer); resolve(); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
 }
 
 function evalParams(action: EvalAction): Record<string, unknown> | undefined {
@@ -651,18 +702,26 @@ function handleEvalResponse(session: NodeTunnelSession, message: EvalResponseMes
     ok: message.ok,
     error: message.error ?? null,
   });
+  // Record the result/error, then unblock startEval's serial loop for this
+  // action. A late response for an action that already timed out (or one that
+  // arrives after finalizeEval ran) is recorded harmlessly and resolves nothing.
   if (message.ok) {
     session.eval.results[message.action] = message.result;
-  } else {
+  } else if (!session.eval.errors.some((error) => error.startsWith(`${message.action}:`))) {
     session.eval.errors.push(`${message.action}: ${message.error ?? 'unknown error'}`);
   }
 
-  const complete = session.eval.requested.every((action) =>
-    Object.prototype.hasOwnProperty.call(session.eval!.results, action) ||
-    session.eval!.errors.some((error) => error.startsWith(`${action}:`)),
-  );
+  const resolve = session.eval.pending?.get(message.action);
+  if (resolve) {
+    session.eval.pending!.delete(message.action);
+    resolve();
+  }
+}
 
-  if (!complete) return;
+// Score the collected eval results and, on pass, mint + send the join request.
+// Called once by startEval after every action has responded or timed out.
+function finalizeEval(session: NodeTunnelSession): void {
+  if (!session.eval || session.eval.completedAt) return;
 
   session.eval.completedAt = Date.now();
   const evalScore = scoreEvalResults(session.eval.results);
