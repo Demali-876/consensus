@@ -324,6 +324,20 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           });
         }
 
+        // Eval is mandatory: registration requires a valid, signed, eval-issued
+        // join authorization (except in FREE_MODE dev, which also skips payment).
+        // This closes the eval→join→control chain — only a node that passed the
+        // encrypted eval (proving its identity, integrity, and capacity) can
+        // register, and verifyJoinRequest above proved it still holds that same
+        // identity (pubkey match + nonce signature). Without this, a node could
+        // skip eval entirely and register with benchmark_score 0.
+        if (!verifiedJoin && process.env.FREE_MODE !== 'true') {
+          return res.status(403).json({
+            error: 'Eval required',
+            message: 'Registration requires a valid eval-issued join authorization. Run the node eval first.',
+          });
+        }
+
         console.log('\nPayment verified — processing node registration');
         console.log(`   IPv4: ${ipv4}:${port}`);
         if (ipv6) console.log(`   IPv6: ${ipv6}:${port}`);
