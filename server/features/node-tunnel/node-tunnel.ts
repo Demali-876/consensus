@@ -40,6 +40,11 @@ interface NodeTunnelSession {
   // handleHello overwrites with a self-declared value. Security-critical anchors
   // (integrity verification, the join mint) MUST use this, not publicKeyPem.
   verifiedPublicKeyPem?: string;
+  // The node_id PROVEN at a control handshake (verifyRegisteredControlIdentity
+  // bound init.node_id to the verified key). Immutable — heartbeats and routing
+  // bind to this, never a self-declared message.node_id. Undefined for eval
+  // sessions (candidates have no node_id yet).
+  verifiedNodeId?: string;
   version?: string;
   activeRequests: number;
   activeStreams: number;
@@ -530,8 +535,10 @@ async function handleHandshake(ws: WebSocket, raw: Buffer): Promise<NodeTunnelSe
     nodeId: init.node_id,
     candidateId: init.candidate_id,
     publicKeyPem: init.node_public_key_pem,
-    // Handshake-proven identity (acceptClientHandshake verified this above).
+    // Handshake-proven identity (acceptClientHandshake verified this above; for
+    // control, verifyRegisteredControlIdentity bound init.node_id to that key).
     verifiedPublicKeyPem: init.node_public_key_pem,
+    verifiedNodeId: init.node_id,
     version: init.release_version,
     activeRequests: 0,
     activeStreams: 0,
@@ -601,23 +608,38 @@ async function handleEncryptedMessage(session: NodeTunnelSession, raw: Buffer): 
     return;
   }
   if (message.type === MESSAGE_TYPE.HEARTBEAT) {
-    session.nodeId = message.node_id;
+    // Heartbeats ride only the authenticated tunnel (the unauthenticated HTTP
+    // /node/heartbeat route was removed). Bind to the handshake-PROVEN node_id,
+    // never the message's self-declared one — otherwise an authenticated node
+    // could record liveness and hijack routing (byNodeId) as a DIFFERENT node.
+    const nodeId = session.verifiedNodeId;
+    if (!nodeId) {
+      log.warn('node-tunnel', 'heartbeat-unverified-session', { session_id: session.id });
+      return;
+    }
+    if (message.node_id && message.node_id !== nodeId) {
+      log.warn('node-tunnel', 'heartbeat-node-id-mismatch', {
+        session_id: session.id,
+        verified_node_id: nodeId,
+        claimed_node_id: message.node_id,
+      });
+    }
     session.activeRequests = message.active_requests ?? 0;
     session.activeStreams = message.active_streams ?? 0;
-    byNodeId.set(message.node_id, session.id);
+    byNodeId.set(nodeId, session.id);
     try {
-      NodeStore.heartbeat(message.node_id, {
+      NodeStore.heartbeat(nodeId, {
         rps: message.active_requests ?? null,
         p95_ms: null,
         version: session.version ?? null,
       });
     } catch (error) {
       log.error('node-tunnel', 'heartbeat-store-failed', {
-        node_id: message.node_id,
+        node_id: nodeId,
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    clearCompletedUpdateState(message.node_id, session.version, 'heartbeat');
+    clearCompletedUpdateState(nodeId, session.version, 'heartbeat');
     return;
   }
   if (message.type === MESSAGE_TYPE.EVAL_RESPONSE) {

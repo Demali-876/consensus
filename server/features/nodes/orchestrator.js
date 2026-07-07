@@ -179,20 +179,6 @@ function publicNode(node) {
   };
 }
 
-function clearCompletedUpdateState(nodeId, version, source) {
-  if (!version) return;
-  try {
-    const node = NodeStore.getNode(nodeId);
-    const capabilities = node?.capabilities ?? {};
-    if (!capabilities.update_state || capabilities.update_target_version !== version) return;
-
-    NodeStore.setNodeUpdateState(nodeId, null);
-    console.log(`[Nodes] Cleared update state for ${nodeId} after ${source} reported ${version}`);
-  } catch (error) {
-    console.error(`[Nodes] Failed to clear update state for ${nodeId}:`, error);
-  }
-}
-
 export function registerNodes(app, httpsServer, x402Server, config) {
   const { EVM_PAY_TO, SOLANA_PAY_TO, ICP_PAY_TO } = config;
 
@@ -444,9 +430,8 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           join_request_id:    consumedJoin?.id ?? null,
           processing_time_ms: processingTime,
           next_steps: [
-            `Keep the outbound control tunnel connected at /node/tunnel`,
+            `Keep the outbound control tunnel connected at /node/tunnel (heartbeats ride it automatically)`,
             `Clients connect to ${connectUrl}`,
-            `Send heartbeat every 5 minutes to /node/heartbeat/${nodeId}`,
             `Monitor status at /node/status/${nodeId}`,
           ],
         });
@@ -456,23 +441,6 @@ export function registerNodes(app, httpsServer, x402Server, config) {
       }
     },
   );
-
-  app.post('/node/heartbeat/:node_id', (req, res) => {
-    try {
-      const { node_id } = req.params;
-      const { rps, p95_ms, version } = req.body;
-
-      const node = NodeStore.getNode(node_id);
-      if (!node) return res.status(404).json({ error: 'Node not found' });
-
-      NodeStore.heartbeat(node_id, { rps, p95_ms, version });
-      clearCompletedUpdateState(node_id, version, 'heartbeat');
-      res.json({ success: true, node_id, message: 'Heartbeat recorded', next_heartbeat_in: 300 });
-    } catch (error) {
-      console.error('Heartbeat error:', error);
-      res.status(500).json({ error: 'Heartbeat failed', message: error.message });
-    }
-  });
 
   app.get('/node/status/:node_id', (req, res) => {
     try {
