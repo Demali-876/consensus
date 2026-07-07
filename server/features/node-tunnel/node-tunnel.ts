@@ -10,6 +10,7 @@ import { MESSAGE_TYPE, createErrorMessage, decodeMessage, encodeMessage, nowSeco
 import { openFrame, sealFrame, type SecureSession } from './secure-channel.ts';
 import { speedtestUrl } from './speedtest-target.ts';
 import { deriveAdmission, type AdmissionVerdict } from './admission.ts';
+import { verifyIntegrityPayload, type IntegrityPayload } from '../../utils/integrity.ts';
 
 interface PendingTunnelRequest {
   kind: 'proxy' | 'update';
@@ -34,6 +35,11 @@ interface NodeTunnelSession {
   nodeId?: string;
   candidateId?: string;
   publicKeyPem?: string;
+  // The Ed25519 identity PROVEN in the tunnel handshake (acceptClientHandshake
+  // verified init.node_public_key_pem). Immutable — unlike publicKeyPem, which
+  // handleHello overwrites with a self-declared value. Security-critical anchors
+  // (integrity verification, the join mint) MUST use this, not publicKeyPem.
+  verifiedPublicKeyPem?: string;
   version?: string;
   activeRequests: number;
   activeStreams: number;
@@ -170,6 +176,9 @@ interface EvalRecord {
   // The admission verdict (stable sustained 16KB capacity + floor + blockers) —
   // the real ranking/gate data, distinct from the 0-100 health `score`.
   admission: AdmissionVerdict | null;
+  // Whether the node's signed integrity/manifest payload verified against the
+  // handshake-proven identity (+ the required release, when one is set).
+  integrity: { ok: boolean; reason?: string } | null;
   errors: string[];
   started_at: number;
   completed_at: number;
@@ -183,7 +192,8 @@ const recentEvals: EvalRecord[] = [];
 function recordEvalResult(
   session: NodeTunnelSession,
   score: number,
-  admission: AdmissionVerdict | null
+  admission: AdmissionVerdict | null,
+  integrity: { ok: boolean; reason?: string } | null
 ): void {
   if (!session.eval) return;
   const startedAt = session.eval.startedAt;
@@ -195,6 +205,7 @@ function recordEvalResult(
     status: session.eval.status === 'passed' ? 'passed' : 'failed',
     score,
     admission,
+    integrity,
     errors: [...session.eval.errors],
     started_at: startedAt,
     completed_at: completedAt,
@@ -519,6 +530,8 @@ async function handleHandshake(ws: WebSocket, raw: Buffer): Promise<NodeTunnelSe
     nodeId: init.node_id,
     candidateId: init.candidate_id,
     publicKeyPem: init.node_public_key_pem,
+    // Handshake-proven identity (acceptClientHandshake verified this above).
+    verifiedPublicKeyPem: init.node_public_key_pem,
     version: init.release_version,
     activeRequests: 0,
     activeStreams: 0,
@@ -699,10 +712,37 @@ async function handleEncryptedMessage(session: NodeTunnelSession, raw: Buffer): 
   }
 }
 
+// Compare two PEM public keys by their DER SPKI encoding (formatting-agnostic,
+// timing-safe). Returns false if either fails to parse.
+function samePublicKey(a: string, b: string): boolean {
+  try {
+    const da = crypto.createPublicKey(a).export({ format: 'der', type: 'spki' });
+    const db = crypto.createPublicKey(b).export({ format: 'der', type: 'spki' });
+    return da.length === db.length && crypto.timingSafeEqual(da, db);
+  } catch {
+    return false;
+  }
+}
+
 async function handleHello(session: NodeTunnelSession, message: HelloMessage): Promise<void> {
   session.mode = message.mode;
   session.nodeId = message.node_id;
   session.candidateId = message.candidate_id;
+  // The HELLO rides the authenticated secure channel, but its public_key_pem is a
+  // self-declared field; the handshake already PROVED the identity. Flag a
+  // mismatch for visibility — security-critical paths use verifiedPublicKeyPem,
+  // never this HELLO value. (Hard rejection is task #9: bind eval→join→control.)
+  if (
+    message.public_key_pem &&
+    session.verifiedPublicKeyPem &&
+    !samePublicKey(message.public_key_pem, session.verifiedPublicKeyPem)
+  ) {
+    log.warn('node-tunnel', 'hello-key-mismatch', {
+      session_id: session.id,
+      candidate_id: message.candidate_id ?? null,
+      node_id: message.node_id ?? null,
+    });
+  }
   session.publicKeyPem = message.public_key_pem;
   session.version = message.version;
   if (session.nodeId) byNodeId.set(session.nodeId, session.id);
@@ -1033,9 +1073,20 @@ function finalizeEval(session: NodeTunnelSession): void {
   session.eval.completedAt = Date.now();
   const evalScore = scoreEvalResults(session.eval.results);
   session.eval.errors.push(...evalScore.errors);
+
+  // Integrity: verify the node's signed manifest against the handshake-PROVEN
+  // identity (not the HELLO-declared key) and the required release. A failure
+  // blocks admission — this is what makes the self-reported benchmark numbers
+  // trustworthy: only a node holding the proven identity, running an approved
+  // build, is admitted.
+  const integrity = verifyEvalIntegrity(session);
+  if (!integrity.ok) session.eval.errors.push(`integrity: ${integrity.reason}`);
+
   session.eval.status = session.eval.errors.length === 0 ? 'passed' : 'failed';
-  if (session.eval.status === 'passed' && session.publicKeyPem) {
-    const joinRequest = createEvalJoinRequest(session.publicKeyPem, evalScore);
+  if (session.eval.status === 'passed' && session.verifiedPublicKeyPem) {
+    // Mint the join against the PROVEN identity, so the admitted node is exactly
+    // the one that handshook + passed integrity (not a HELLO-declared key).
+    const joinRequest = createEvalJoinRequest(session.verifiedPublicKeyPem, evalScore);
     session.eval.joinRequest = joinRequest;
     log.info('node-eval', 'join-request-created', {
       session_id: session.id,
@@ -1061,7 +1112,26 @@ function finalizeEval(session: NodeTunnelSession): void {
     errors: session.eval.errors,
   });
 
-  recordEvalResult(session, evalScore.score, evalScore.admission);
+  recordEvalResult(session, evalScore.score, evalScore.admission, integrity);
+}
+
+// Verify the eval's integrity payload against the handshake-PROVEN identity and
+// the required release (bootstrap: none set → signature + identity binding only).
+// Never throws; returns { ok, reason } for both the admission gate and the record.
+function verifyEvalIntegrity(session: NodeTunnelSession): { ok: boolean; reason?: string } {
+  const payload = session.eval?.results.integrity as IntegrityPayload | undefined;
+  if (!payload) return { ok: false, reason: 'integrity payload missing' };
+  if (!session.verifiedPublicKeyPem) return { ok: false, reason: 'no verified handshake identity' };
+
+  let trustedKey: crypto.KeyObject;
+  try {
+    trustedKey = crypto.createPublicKey(session.verifiedPublicKeyPem);
+  } catch {
+    return { ok: false, reason: 'verified identity is not a valid public key' };
+  }
+  const required = NodeStore.getRequiredManifest();
+  const result = verifyIntegrityPayload(payload, trustedKey, required?.manifest ?? null);
+  return result.ok ? { ok: true } : { ok: false, reason: `${result.kind}: ${result.reason}` };
 }
 
 function scoreEvalResults(
