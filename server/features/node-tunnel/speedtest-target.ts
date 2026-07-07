@@ -1,17 +1,27 @@
-// Orchestrator-hosted target for the node speed test. A candidate node fetches
-// `GET /speedtest/:bytes` through its real SSRF-guarded serve path while the
-// orchestrator times the round-trip over the eval tunnel — so the target is
-// known-size, orchestrator-controlled, and can't be gamed (the node reports
-// nothing; the server clocks it). Caching is disabled so an intermediary can't
-// skew the measurement.
+// The node speed test measures a candidate's real internet-egress capability:
+// the orchestrator tells the node which known-size resource to fetch and TIMES
+// the round-trip over the eval tunnel (the node self-reports nothing timing-
+// authoritative — see runSpeedtestFetch in consensus-node). The server clock,
+// not the node, is the measurement.
 //
-// The base URL the node is told to fetch is `EVAL_SPEEDTEST_BASE_URL` (defaults
-// to the public orchestrator host). In an environment where that host is not
-// reachable from the node, the speed battery self-skips after a warmup probe —
-// see runNetworkEval in node-tunnel.ts.
+// TARGET (EVAL_SPEEDTEST_URL): a URL template containing "{bytes}", which the
+// server substitutes per probe. It defaults to Cloudflare's public download
+// endpoint — a real, globally distributed target built for speed testing that
+// returns exactly N bytes, no-store. A PUBLIC target is deliberate:
+//   1. the node's SSRF guard (correctly) refuses private/internal addresses, so
+//      an orchestrator-hosted target that resolves to a private/LAN IP from the
+//      node (e.g. a node co-located with the orchestrator) gets blocked;
+//   2. now that the data plane is direct (client↔node), a node's GENERAL egress
+//      is the relevant metric, not the node↔orchestrator hop.
+//
+// An orchestrator-hosted target (GET /speedtest/:bytes) is still registered for
+// setups that specifically want to measure the node↔orchestrator path — point
+// EVAL_SPEEDTEST_URL at it, e.g. https://your-host/speedtest/{bytes}.
 
-const DEFAULT_BASE_URL = 'https://consensus.canister.software';
-const MAX_SPEEDTEST_BYTES = 1024 * 1024; // 1 MB ceiling per request
+// Public, byte-parameterized, no-store, globally distributed via Cloudflare's
+// edge. {bytes} is substituted by speedtestUrl().
+const DEFAULT_SPEEDTEST_URL = 'https://speed.cloudflare.com/__down?bytes={bytes}';
+const MAX_SPEEDTEST_BYTES = 1024 * 1024; // 1 MB ceiling for the orchestrator-hosted route
 
 // Minimal shape of what we use from the Express app/handlers — avoids taking a
 // hard dependency on @types/express in this .ts module (mirrors the loosely
@@ -29,13 +39,19 @@ interface RouteApp {
   get(path: string, handler: (req: RouteRequest, res: RouteResponse) => void): void;
 }
 
-export function speedtestBaseUrl(): string {
-  const raw = process.env.EVAL_SPEEDTEST_BASE_URL?.trim();
-  return (raw && raw.length > 0 ? raw : DEFAULT_BASE_URL).replace(/\/+$/, '');
+// The configured target template (EVAL_SPEEDTEST_URL) or the Cloudflare default.
+export function speedtestUrlTemplate(): string {
+  const raw = process.env.EVAL_SPEEDTEST_URL?.trim();
+  return raw && raw.length > 0 ? raw : DEFAULT_SPEEDTEST_URL;
 }
 
+// The concrete URL the node is told to fetch for a given size. Substitutes
+// {bytes} in the template; a template with no placeholder is treated as a base
+// and the byte count is appended (tolerates a plain base URL).
 export function speedtestUrl(bytes: number): string {
-  return `${speedtestBaseUrl()}/speedtest/${bytes}`;
+  const template = speedtestUrlTemplate();
+  if (template.includes('{bytes}')) return template.replace(/\{bytes\}/g, String(bytes));
+  return `${template.replace(/\/+$/, '')}/${bytes}`;
 }
 
 export function registerSpeedtestTarget(app: RouteApp): void {

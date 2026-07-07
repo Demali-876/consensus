@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { registerSpeedtestTarget, speedtestUrl, speedtestBaseUrl, MAX_SPEEDTEST_BYTES } from '../../features/node-tunnel/speedtest-target.ts';
+import { registerSpeedtestTarget, speedtestUrl, MAX_SPEEDTEST_BYTES } from '../../features/node-tunnel/speedtest-target.ts';
 
 // Capture the handler registered on GET /speedtest/:bytes without a live server.
 function captureHandler() {
@@ -60,17 +60,30 @@ test('rejects non-integer, negative, and over-cap sizes', () => {
   }
 });
 
-test('speedtestUrl builds against the configured base, trimming slashes', () => {
-  const prev = process.env.EVAL_SPEEDTEST_BASE_URL;
+test('speedtestUrl defaults to the public Cloudflare target with {bytes} substituted', () => {
+  const prev = process.env.EVAL_SPEEDTEST_URL;
   try {
-    process.env.EVAL_SPEEDTEST_BASE_URL = 'https://orch.example.com/';
-    assert.equal(speedtestBaseUrl(), 'https://orch.example.com');
-    assert.equal(speedtestUrl(16384), 'https://orch.example.com/speedtest/16384');
-
-    delete process.env.EVAL_SPEEDTEST_BASE_URL;
-    assert.match(speedtestUrl(1024), /^https:\/\/.+\/speedtest\/1024$/, 'falls back to a default host');
+    delete process.env.EVAL_SPEEDTEST_URL;
+    // Public target: resolves to public IPs, so the node's SSRF guard allows it.
+    assert.equal(speedtestUrl(16384), 'https://speed.cloudflare.com/__down?bytes=16384');
   } finally {
-    if (prev === undefined) delete process.env.EVAL_SPEEDTEST_BASE_URL;
-    else process.env.EVAL_SPEEDTEST_BASE_URL = prev;
+    if (prev === undefined) delete process.env.EVAL_SPEEDTEST_URL;
+    else process.env.EVAL_SPEEDTEST_URL = prev;
+  }
+});
+
+test('speedtestUrl honors EVAL_SPEEDTEST_URL — a {bytes} template or a plain base', () => {
+  const prev = process.env.EVAL_SPEEDTEST_URL;
+  try {
+    process.env.EVAL_SPEEDTEST_URL = 'https://speed.example.com/dl?bytes={bytes}';
+    assert.equal(speedtestUrl(1024), 'https://speed.example.com/dl?bytes=1024');
+
+    // A base with no placeholder (e.g. an orchestrator-hosted target) gets the
+    // byte count appended, trimming a trailing slash.
+    process.env.EVAL_SPEEDTEST_URL = 'https://orch.example.com/speedtest/';
+    assert.equal(speedtestUrl(2048), 'https://orch.example.com/speedtest/2048');
+  } finally {
+    if (prev === undefined) delete process.env.EVAL_SPEEDTEST_URL;
+    else process.env.EVAL_SPEEDTEST_URL = prev;
   }
 });
