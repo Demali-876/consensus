@@ -92,6 +92,14 @@ type RouterLike = {
 
 const sessions = new Map<string, NodeTunnelSession>();
 const byNodeId = new Map<string, string>();
+// Optional stability-trial hooks, wired via the returned handle's setTrialListeners
+// (only when NODE_TRIAL_ENABLED). No-ops while null, so a disabled trial costs
+// nothing on the hot tunnel paths.
+let trialListeners: {
+  onConnect: (nodeId: string) => void;
+  onHeartbeat: (nodeId: string) => void;
+  onDisconnect: (nodeId: string) => void;
+} | null = null;
 // System sanity gates (not CPU benchmarking — basic capability floors that
 // survive the switch to the composite/sustained admission model). The CPU gate
 // itself lives in admission.ts (stable sustained 16KB req/s).
@@ -360,6 +368,16 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
           handshakeComplete = true;
           sessions.set(created.id, created);
           if (created.nodeId) byNodeId.set(created.nodeId, created.id);
+          if (created.mode === 'control' && created.verifiedNodeId && trialListeners) {
+            try {
+              trialListeners.onConnect(created.verifiedNodeId);
+            } catch (error) {
+              log.error('node-tunnel', 'trial-onconnect-failed', {
+                node_id: created.verifiedNodeId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
           ws.on('message', (raw: WebSocket.RawData) => {
             if (!session) return;
             void handleEncryptedMessage(session, toBuffer(raw)).catch((error) => {
@@ -400,6 +418,13 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
       }
       closeActiveStreams(session, 'node tunnel disconnected');
       rejectPendingProxyRequests(session, new Error(`Node tunnel disconnected: ${session.nodeId ?? session.id}`));
+      if (session.mode === 'control' && session.verifiedNodeId && trialListeners) {
+        try {
+          trialListeners.onDisconnect(session.verifiedNodeId);
+        } catch {
+          /* best-effort */
+        }
+      }
       if (session.nodeId && session.update?.state === 'updating') {
         NodeStore.setNodeUpdateState(session.nodeId, 'updating', {
           update_id: session.update.id,
@@ -505,6 +530,16 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
       const sessionId = byNodeId.get(nodeId);
       return sessionId ? sessions.get(sessionId) ?? null : null;
     },
+    // Stability-trial integration (see features/nodes/trial-manager.ts). Wired by
+    // server.js only when NODE_TRIAL_ENABLED; unset = zero overhead.
+    setTrialListeners: (listeners: {
+      onConnect: (nodeId: string) => void;
+      onHeartbeat: (nodeId: string) => void;
+      onDisconnect: (nodeId: string) => void;
+    }) => {
+      trialListeners = listeners;
+    },
+    isControlConnected: (nodeId: string) => getControlSession(nodeId) !== null,
   };
 }
 
@@ -646,6 +681,16 @@ async function handleEncryptedMessage(session: NodeTunnelSession, raw: Buffer): 
       });
     }
     clearCompletedUpdateState(nodeId, session.version, 'heartbeat');
+    if (trialListeners) {
+      try {
+        trialListeners.onHeartbeat(nodeId);
+      } catch (error) {
+        log.error('node-tunnel', 'trial-onheartbeat-failed', {
+          node_id: nodeId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     return;
   }
   if (message.type === MESSAGE_TYPE.EVAL_RESPONSE) {

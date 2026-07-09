@@ -114,6 +114,11 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS node_trials_status_idx ON node_trials(status);
+
+  CREATE TABLE IF NOT EXISTS app_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
 `);
 
 for (const statement of [
@@ -285,6 +290,12 @@ const upsertTrialStmt = db.prepare(`
 const getTrialStmt          = db.prepare(`SELECT * FROM node_trials WHERE node_id = ?`);
 const listRunningTrialsStmt = db.prepare(`SELECT * FROM node_trials WHERE status = 'running'`);
 const deleteTrialStmt       = db.prepare(`DELETE FROM node_trials WHERE node_id = ?`);
+
+const getMetaStmt = db.prepare(`SELECT value FROM app_meta WHERE key = ?`);
+const setMetaStmt = db.prepare(`
+  INSERT INTO app_meta (key, value) VALUES (?, ?)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`);
 
 const countNodesStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM nodes`);
 
@@ -550,6 +561,18 @@ export const NodeStore = {
 
   deleteTrial(nodeId) {
     deleteTrialStmt.run(nodeId);
+  },
+
+  // Small key/value store for orchestrator-level state. The trial scheduler stamps
+  // its last-tick time here so it can tell, on boot, how long it was down and
+  // forgive that gap (orchestrator downtime is not the node's fault).
+  getMeta(key) {
+    const row = getMetaStmt.get(key);
+    return row ? row.value : null;
+  },
+
+  setMeta(key, value) {
+    setMetaStmt.run(key, String(value));
   },
 
   heartbeat(id, { rps = null, p95_ms = null, version = null } = {}) {

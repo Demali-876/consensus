@@ -22,6 +22,7 @@ import { registerNodeBrowser } from './features/nodes/browser.js';
 import { registerTunnel } from './features/tunnel/tunnel.ts';
 import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
 import { registerSpeedtestTarget } from './features/node-tunnel/speedtest-target.ts';
+import { TrialManager } from './features/nodes/trial-manager.ts';
 import { registerNodeGateway } from './features/node-gateway/gateway.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 import { registerUpdater } from './updater.ts';
@@ -405,6 +406,7 @@ app.post('/proxy', async (req, res) => {
   }
 });
 let observerInterval;
+let trialManager;
 
 server.listen(PORT, '::', () => {
   log.info('server', 'listening', {
@@ -415,12 +417,30 @@ server.listen(PORT, '::', () => {
   });
   observerInterval = startObservationScheduler();
   upsertServerNode();
+  // 24h stability trial (#10): nodes register into 'trial' and must prove 24/7
+  // availability + real-URL performance before the Router will route real traffic
+  // to them. Gated so it ships dark until the node-side thermal/integrity probes
+  // and floor calibration land.
+  if (process.env.NODE_TRIAL_ENABLED === 'true') {
+    trialManager = new TrialManager({
+      store: NodeStore,
+      requestProxy: (nodeId, input) => nodeTunnelStats.requestProxy(nodeId, input),
+      isConnected: (nodeId) => nodeTunnelStats.isControlConnected(nodeId),
+    });
+    nodeTunnelStats.setTrialListeners(trialManager.listeners());
+    trialManager.start();
+  } else {
+    log.info('server', 'trial-scheduler-disabled', {
+      hint: 'set NODE_TRIAL_ENABLED=true to enable the 24h stability trial',
+    });
+  }
 });
 
 ['SIGTERM', 'SIGINT'].forEach((signal) => {
   process.on(signal, () => {
     log.warn('server', 'shutdown-signal', { signal });
     clearInterval(observerInterval);
+    trialManager?.stop();
     server.close(() => {
       log.warn('server', 'shutdown-complete', { signal });
       process.exit(0);
