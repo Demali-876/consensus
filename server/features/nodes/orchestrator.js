@@ -377,6 +377,15 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         }
 
         console.log('\nStoring node...');
+        // A node earns 'active' (routable) only after passing the 24h stability
+        // trial, so it registers into 'trial' first and the trial scheduler
+        // graduates it. Gated by NODE_TRIAL_ENABLED so the feature ships dark until
+        // the scheduler + node-side probe handlers are live; FREE_MODE dev skips it.
+        const registrationStatus =
+          process.env.NODE_TRIAL_ENABLED === 'true' && process.env.FREE_MODE !== 'true'
+            ? 'trial'
+            : 'active';
+
         NodeStore.upsertNode({
           id:               nodeId,
           pubkey_secp256k1: pubkeySecp256k1,
@@ -406,7 +415,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           evm_address,
           solana_address,
           icp_address,
-          status: 'active',
+          status: registrationStatus,
         });
 
         NodeStore.setDomain(nodeId, subdomain);
@@ -437,14 +446,16 @@ export function registerNodes(app, httpsServer, x402Server, config) {
           port,
           region,
           geo:                geoRegion,
-          status:             'active',
+          status:             registrationStatus,
           benchmark_score:    benchmarkScore,
           orchestrator_pubkey: pin.orchestrator_pubkey,
           price_paid:         paidPrice,
           join_request_id:    consumedJoin?.id ?? null,
           processing_time_ms: processingTime,
           next_steps: [
-            `Keep the outbound control tunnel connected at /node/tunnel (heartbeats ride it automatically)`,
+            registrationStatus === 'trial'
+              ? `On trial: keep the control tunnel up 24/7 — the orchestrator is measuring stability before it routes real traffic to you`
+              : `Keep the outbound control tunnel connected at /node/tunnel (heartbeats ride it automatically)`,
             `Clients connect to ${connectUrl}`,
             `Monitor status at /node/status/${nodeId}`,
           ],

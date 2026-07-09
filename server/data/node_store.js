@@ -90,6 +90,30 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS email_verifications_token_idx ON email_verifications(token_hash);
+
+  CREATE TABLE IF NOT EXISTS node_trials (
+    node_id           TEXT PRIMARY KEY,
+    attempt           INTEGER NOT NULL DEFAULT 1,
+    strikes           INTEGER NOT NULL DEFAULT 0,
+    started_at        INTEGER NOT NULL,
+    deadline          INTEGER NOT NULL,
+    hb_received       INTEGER NOT NULL DEFAULT 0,
+    worst_gap_ms      INTEGER NOT NULL DEFAULT 0,
+    last_hb_at        INTEGER,
+    reconnects        INTEGER NOT NULL DEFAULT 0,
+    ewma_latency      REAL,
+    ewmv_latency      REAL,
+    fetch_ok          INTEGER NOT NULL DEFAULT 0,
+    fetch_total       INTEGER NOT NULL DEFAULT 0,
+    ewma_capacity     REAL,
+    stability_score   REAL    NOT NULL,
+    last_integrity_ok INTEGER,
+    status            TEXT    NOT NULL DEFAULT 'running',
+    updated_at        INTEGER NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES nodes(id)
+  );
+
+  CREATE INDEX IF NOT EXISTS node_trials_status_idx ON node_trials(status);
 `);
 
 for (const statement of [
@@ -219,6 +243,48 @@ const listNodesForRoutingStmt = db.prepare(`
   FROM nodes
   ORDER BY created_at DESC
 `);
+
+const setNodeStatusStmt = db.prepare(`
+  UPDATE nodes SET status = ?, updated_at = ? WHERE id = ?
+`);
+
+// node_trials: one row per node, every field overwritten in place — storage never
+// grows with trial length (see features/nodes/trial.ts). saveTrial writes the whole
+// scorecard, so this is a single upsert covering start, in-place updates, and the
+// terminal (passed/failed/voided) stamp.
+const upsertTrialStmt = db.prepare(`
+  INSERT INTO node_trials (
+    node_id, attempt, strikes, started_at, deadline, hb_received, worst_gap_ms,
+    last_hb_at, reconnects, ewma_latency, ewmv_latency, fetch_ok, fetch_total,
+    ewma_capacity, stability_score, last_integrity_ok, status, updated_at
+  ) VALUES (
+    @node_id, @attempt, @strikes, @started_at, @deadline, @hb_received, @worst_gap_ms,
+    @last_hb_at, @reconnects, @ewma_latency, @ewmv_latency, @fetch_ok, @fetch_total,
+    @ewma_capacity, @stability_score, @last_integrity_ok, @status, @updated_at
+  )
+  ON CONFLICT(node_id) DO UPDATE SET
+    attempt           = excluded.attempt,
+    strikes           = excluded.strikes,
+    started_at        = excluded.started_at,
+    deadline          = excluded.deadline,
+    hb_received       = excluded.hb_received,
+    worst_gap_ms      = excluded.worst_gap_ms,
+    last_hb_at        = excluded.last_hb_at,
+    reconnects        = excluded.reconnects,
+    ewma_latency      = excluded.ewma_latency,
+    ewmv_latency      = excluded.ewmv_latency,
+    fetch_ok          = excluded.fetch_ok,
+    fetch_total       = excluded.fetch_total,
+    ewma_capacity     = excluded.ewma_capacity,
+    stability_score   = excluded.stability_score,
+    last_integrity_ok = excluded.last_integrity_ok,
+    status            = excluded.status,
+    updated_at        = excluded.updated_at
+`);
+
+const getTrialStmt          = db.prepare(`SELECT * FROM node_trials WHERE node_id = ?`);
+const listRunningTrialsStmt = db.prepare(`SELECT * FROM node_trials WHERE status = 'running'`);
+const deleteTrialStmt       = db.prepare(`DELETE FROM node_trials WHERE node_id = ?`);
 
 const countNodesStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM nodes`);
 
@@ -355,6 +421,32 @@ function rowToEmailVerification(row) {
   };
 }
 
+// Maps a node_trials row to the TrialCard shape used by features/nodes/trial.ts.
+// Nullable REAL/INTEGER columns come back as null and are preserved as such.
+function rowToTrial(row) {
+  if (!row) return null;
+  return {
+    node_id: row.node_id,
+    attempt: row.attempt,
+    strikes: row.strikes,
+    started_at: row.started_at,
+    deadline: row.deadline,
+    hb_received: row.hb_received,
+    worst_gap_ms: row.worst_gap_ms,
+    last_hb_at: row.last_hb_at ?? null,
+    reconnects: row.reconnects,
+    ewma_latency: row.ewma_latency ?? null,
+    ewmv_latency: row.ewmv_latency ?? null,
+    fetch_ok: row.fetch_ok,
+    fetch_total: row.fetch_total,
+    ewma_capacity: row.ewma_capacity ?? null,
+    stability_score: row.stability_score,
+    last_integrity_ok: row.last_integrity_ok ?? null,
+    status: row.status,
+    updated_at: row.updated_at,
+  };
+}
+
 // ─── NodeStore ────────────────────────────────────────────────────────────────
 
 export const NodeStore = {
@@ -407,6 +499,57 @@ export const NodeStore = {
     const res = updateDomainStmt.run(domain, nowSec(), id);
     if (res.changes === 0) throw new Error(`Node not found: ${id}`);
     return this.getNode(id);
+  },
+
+  // Move a node between lifecycle states (provisioning → trial → active, or
+  // trial → failed). The Router only routes `status === 'active'`, so this is the
+  // single lever that admits a node to real traffic or holds it out.
+  setNodeStatus(id, status) {
+    const res = setNodeStatusStmt.run(status, nowSec(), id);
+    if (res.changes === 0) throw new Error(`Node not found: ${id}`);
+    return this.getNode(id);
+  },
+
+  // ─── Stability trials (see features/nodes/trial.ts) ───────────────────────────
+
+  // Persist a scorecard. Writes every column, so it covers starting a trial,
+  // folding a signal in place, and stamping the terminal status.
+  saveTrial(card) {
+    upsertTrialStmt.run({
+      node_id:           card.node_id,
+      attempt:           card.attempt,
+      strikes:           card.strikes,
+      started_at:        card.started_at,
+      deadline:          card.deadline,
+      hb_received:       card.hb_received,
+      worst_gap_ms:      card.worst_gap_ms,
+      last_hb_at:        card.last_hb_at ?? null,
+      reconnects:        card.reconnects,
+      ewma_latency:      card.ewma_latency ?? null,
+      ewmv_latency:      card.ewmv_latency ?? null,
+      fetch_ok:          card.fetch_ok,
+      fetch_total:       card.fetch_total,
+      ewma_capacity:     card.ewma_capacity ?? null,
+      stability_score:   card.stability_score,
+      last_integrity_ok: card.last_integrity_ok ?? null,
+      status:            card.status,
+      updated_at:        card.updated_at,
+    });
+    return this.getTrial(card.node_id);
+  },
+
+  getTrial(nodeId) {
+    return rowToTrial(getTrialStmt.get(nodeId));
+  },
+
+  // Running trials only — the scheduler reloads these on boot to resume in-flight
+  // trials after an orchestrator restart.
+  listRunningTrials() {
+    return listRunningTrialsStmt.all().map(rowToTrial);
+  },
+
+  deleteTrial(nodeId) {
+    deleteTrialStmt.run(nodeId);
   },
 
   heartbeat(id, { rps = null, p95_ms = null, version = null } = {}) {
@@ -514,9 +657,15 @@ export const NodeStore = {
   },
 
   deleteNode(id) {
-    deleteNodeHeartbeatsStmt.run(id);
-    const res = deleteNodeStmt.run(id);
-    return res.changes > 0;
+    // Discarding a node (3 trial strikes, or an identity/integrity breach) removes
+    // it and everything hanging off it — including any trial row — so no leftover
+    // blocks re-registration or misroutes. The operator must pay to join again.
+    return db.transaction((nodeId) => {
+      deleteTrialStmt.run(nodeId);
+      deleteNodeHeartbeatsStmt.run(nodeId);
+      const res = deleteNodeStmt.run(nodeId);
+      return res.changes > 0;
+    })(id);
   },
 
   upsertManifest(version, manifest, github_url = null, required = true) {
