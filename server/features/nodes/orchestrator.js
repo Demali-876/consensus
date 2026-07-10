@@ -8,6 +8,7 @@ import { classifyIpRegion }  from '../../utils/region.ts';
 import { assertEmailVerification, isValidEmail, startEmailVerification, verifyEmailCode } from '../../utils/email-verification.ts';
 import { orchestratorPinForJoin } from '../tickets/pubkey.ts';
 import { nodeGatewayConnectUrl, publicNodeDomain } from '../node-gateway/domain.ts';
+import { TRIAL_ENABLED } from './trial-config.ts';
 
 const emailStartLimiter = rateLimit({
   windowMs:          10 * 60_000,
@@ -382,7 +383,7 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         // graduates it. Gated by NODE_TRIAL_ENABLED so the feature ships dark until
         // the scheduler + node-side probe handlers are live; FREE_MODE dev skips it.
         const registrationStatus =
-          process.env.NODE_TRIAL_ENABLED === 'true' && process.env.FREE_MODE !== 'true'
+          TRIAL_ENABLED && process.env.FREE_MODE !== 'true'
             ? 'trial'
             : 'active';
 

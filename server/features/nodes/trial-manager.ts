@@ -26,6 +26,7 @@ import {
   TRIAL_DURATION_MS,
   type TrialCard,
 } from './trial.ts';
+import { TRIAL_PROBE_URLS } from './trial-config.ts';
 
 // A rotating set of public, abuse-tolerant, SSRF-safe targets. Rotating spreads
 // load (we never hammer one host), keeps a provider blip from skewing the verdict,
@@ -39,10 +40,7 @@ const DEFAULT_PROBE_URLS = [
 ];
 
 function probeUrls(): string[] {
-  const raw = process.env.TRIAL_PROBE_URLS;
-  if (!raw) return DEFAULT_PROBE_URLS;
-  const urls = raw.split(',').map((u) => u.trim()).filter(Boolean);
-  return urls.length > 0 ? urls : DEFAULT_PROBE_URLS;
+  return TRIAL_PROBE_URLS ?? DEFAULT_PROBE_URLS;
 }
 
 // Aim for ~48 capacity/performance samples across the whole trial, but never probe

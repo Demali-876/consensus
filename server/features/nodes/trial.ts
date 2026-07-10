@@ -19,18 +19,15 @@
 // and probe success-rate are separate hard floors so a node can't pass on a high
 // score alone.
 
-const positiveIntEnv = (name: string, fallback: number): number => {
-  const raw = Number(process.env[name]);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
-};
-
-// The two operator-facing knobs (the rest are internal scoring tuning).
-// 24h in prod; pass a small value in dev/staging to watch a full trial in minutes.
-export const TRIAL_DURATION_MS = positiveIntEnv('TRIAL_DURATION_MS', 24 * 60 * 60 * 1000);
+// Trial timing comes from CLI flags (see trial-config.ts): 24h in prod,
+// overridable for testing. Re-exported here so trial-manager and tests import all
+// trial constants from one place.
+import { TRIAL_DURATION_MS, TRIAL_DISCONNECT_VOID_MS } from './trial-config.ts';
+export { TRIAL_DURATION_MS };
 // A continuous heartbeat gap this long voids the running trial (the node clearly
 // went away) — it restarts fresh on reconnect and costs a strike. Shorter blips
 // only dent the score.
-export const DISCONNECT_VOID_MS = positiveIntEnv('TRIAL_DISCONNECT_VOID_MS', 60 * 60 * 1000);
+export const DISCONNECT_VOID_MS = TRIAL_DISCONNECT_VOID_MS;
 // Three voided/failed attempts and the node is unfit — discarded, must pay to join
 // again. Adversarial failures (integrity/identity) bypass this and discard at once.
 export const MAX_STRIKES = 3;

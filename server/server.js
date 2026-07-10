@@ -23,6 +23,7 @@ import { registerTunnel } from './features/tunnel/tunnel.ts';
 import { registerNodeTunnel } from './features/node-tunnel/node-tunnel.ts';
 import { registerSpeedtestTarget } from './features/node-tunnel/speedtest-target.ts';
 import { TrialManager } from './features/nodes/trial-manager.ts';
+import { TRIAL_ENABLED } from './features/nodes/trial-config.ts';
 import { registerNodeGateway } from './features/node-gateway/gateway.ts';
 import { startObservationScheduler, upsertServerNode } from './features/ip-pool/observer.ts';
 import { registerUpdater } from './updater.ts';
@@ -421,7 +422,7 @@ server.listen(PORT, '::', () => {
   // availability + real-URL performance before the Router will route real traffic
   // to them. Gated so it ships dark until the node-side thermal/integrity probes
   // and floor calibration land.
-  if (process.env.NODE_TRIAL_ENABLED === 'true') {
+  if (TRIAL_ENABLED) {
     trialManager = new TrialManager({
       store: NodeStore,
       requestProxy: (nodeId, input) => nodeTunnelStats.requestProxy(nodeId, input),
@@ -431,7 +432,7 @@ server.listen(PORT, '::', () => {
     trialManager.start();
   } else {
     log.info('server', 'trial-scheduler-disabled', {
-      hint: 'set NODE_TRIAL_ENABLED=true to enable the 24h stability trial',
+      hint: 'pass --trial-enabled to enable the 24h stability trial',
     });
   }
 });
