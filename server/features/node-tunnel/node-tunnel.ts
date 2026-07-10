@@ -13,7 +13,7 @@ import { deriveAdmission, type AdmissionVerdict } from './admission.ts';
 import { verifyIntegrityPayload, type IntegrityPayload } from '../../utils/integrity.ts';
 
 interface PendingTunnelRequest {
-  kind: 'proxy' | 'update';
+  kind: 'proxy' | 'update' | 'probe';
   resolve: (message: TunnelMessage) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -105,6 +105,10 @@ let trialListeners: {
 // itself lives in admission.ts (stable sustained 16KB req/s).
 const EVAL_MIN_SYSTEM_MEMORY_MB = 512;
 const EVAL_MAX_EVENT_LOOP_P99_NS = 50_000_000;
+// A short sustained-bench sample driven over the control tunnel during the trial
+// (thermal / oversubscription check). Kept brief — the node earns nothing during
+// the trial, so we don't cook its CPU.
+const TRIAL_SUSTAINED_MS = 10_000;
 // Sustained window the server asks the node to hold during eval. 30s = 6×5s
 // windows, enough to read early-vs-late throttle and a conservative floor. The
 // 24h stability trial (task #10) is the long-run authority; this is the gate.
@@ -540,6 +544,22 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
       trialListeners = listeners;
     },
     isControlConnected: (nodeId: string) => getControlSession(nodeId) !== null,
+    // Trial probes the fetch path can't cover (see trial-manager.ts): an occasional
+    // sustained-bench sample (thermal) and an integrity re-attestation (hard gate).
+    // Integrity is verified here, where the handshake-proven key lives.
+    runTrialSustainedProbe: async (nodeId: string): Promise<{ capacity_req_s: number | null }> => {
+      const session = getControlSession(nodeId);
+      if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
+      const res = await requestProbe(session, 'benchmark_sustained', { duration_ms: TRIAL_SUSTAINED_MS }, TRIAL_SUSTAINED_MS + 20_000);
+      const result = res.result as { node_rps_mean?: number } | undefined;
+      return { capacity_req_s: typeof result?.node_rps_mean === 'number' ? result.node_rps_mean : null };
+    },
+    reattestNodeIntegrity: async (nodeId: string): Promise<{ ok: boolean; reason?: string }> => {
+      const session = getControlSession(nodeId);
+      if (!session) throw new Error(`Control tunnel not connected for node: ${nodeId}`);
+      const res = await requestProbe(session, 'integrity', {});
+      return verifyProbeIntegrity(session, res.result as IntegrityPayload | undefined);
+    },
   };
 }
 
@@ -694,7 +714,14 @@ async function handleEncryptedMessage(session: NodeTunnelSession, raw: Buffer): 
     return;
   }
   if (message.type === MESSAGE_TYPE.EVAL_RESPONSE) {
-    handleEvalResponse(session, message);
+    // Eval mode drives the onboarding battery (session.eval.pending). In control
+    // mode the same message type carries a trial probe's result, awaited through
+    // the generic pending map.
+    if (session.mode === 'eval') {
+      handleEvalResponse(session, message);
+    } else {
+      resolvePending(session, message);
+    }
     return;
   }
   if (message.type === MESSAGE_TYPE.PROXY_RESPONSE || message.type === MESSAGE_TYPE.ERROR || message.type === MESSAGE_TYPE.ACK) {
@@ -1335,6 +1362,66 @@ async function requestProxy(
     throw new Error(`Unexpected proxy response: ${message.type}`);
   }
   return message;
+}
+
+// Drive an eval-style action over the CONTROL tunnel (a trial probe) and await its
+// EVAL_RESPONSE. The node runs the same runEvalAction dispatch it uses at eval; the
+// result is awaited through the generic pending map (kind: 'probe').
+async function requestProbe(
+  session: NodeTunnelSession,
+  action: EvalAction,
+  params: Record<string, unknown> = {},
+  timeoutMs = 30_000,
+): Promise<EvalResponseMessage> {
+  if (session.ws.readyState !== WebSocket.OPEN) {
+    throw new Error(`Control tunnel not connected for node: ${session.nodeId ?? session.id}`);
+  }
+
+  const id = crypto.randomUUID();
+  const response = new Promise<TunnelMessage>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      session.pending.delete(id);
+      reject(new Error(`Node probe timed out: ${action} (${id})`));
+    }, timeoutMs);
+    session.pending.set(id, { kind: 'probe', resolve, reject, timer });
+  });
+
+  await sendEncrypted(session, {
+    type: MESSAGE_TYPE.EVAL_REQUEST,
+    id,
+    timestamp: nowSeconds(),
+    action,
+    params,
+  });
+
+  const message = await response;
+  if (message.type !== MESSAGE_TYPE.EVAL_RESPONSE) {
+    throw new Error(`Unexpected probe response: ${message.type}`);
+  }
+  if (!message.ok) {
+    throw new Error(`Probe ${action} failed on node: ${message.error ?? 'unknown error'}`);
+  }
+  return message;
+}
+
+// Verify an integrity payload returned by a trial re-attestation. Anchored to the
+// SAME proven identity + required release as eval-time verifyEvalIntegrity, reused
+// here so a mid-trial binary swap is caught.
+function verifyProbeIntegrity(
+  session: NodeTunnelSession,
+  payload: IntegrityPayload | undefined,
+): { ok: boolean; reason?: string } {
+  if (!payload) return { ok: false, reason: 'integrity payload missing' };
+  if (!session.verifiedPublicKeyPem) return { ok: false, reason: 'no verified handshake identity' };
+  let trustedKey: crypto.KeyObject;
+  try {
+    trustedKey = crypto.createPublicKey(session.verifiedPublicKeyPem);
+  } catch {
+    return { ok: false, reason: 'verified identity is not a valid public key' };
+  }
+  const required = NodeStore.getRequiredManifest();
+  const result = verifyIntegrityPayload(payload, trustedKey, required?.manifest ?? null);
+  return result.ok ? { ok: true } : { ok: false, reason: `${result.kind}: ${result.reason}` };
 }
 
 async function prepareNodeUpdate(nodeId: string, manifest: Record<string, unknown>): Promise<UpdateReadyMessage> {

@@ -8,7 +8,10 @@ const DAY = 24 * HOUR;
 
 // In-memory TrialStore + a controllable clock, so the manager's orchestration can
 // be driven deterministically without a DB or a live tunnel.
-function harness() {
+function harness(opts: {
+  sustained?: (nodeId: string) => Promise<{ capacity_req_s: number | null }>;
+  integrity?: (nodeId: string) => Promise<{ ok: boolean; reason?: string }>;
+} = {}) {
   const nodes = new Map<string, { status: string }>();
   const trials = new Map<string, TrialCard>();
   const meta = new Map<string, string>();
@@ -37,6 +40,8 @@ function harness() {
       return { status: proxyStatus };
     },
     isConnected: () => true,
+    runSustainedProbe: opts.sustained,
+    reattestIntegrity: opts.integrity,
     now: () => clock,
     urls: ['https://probe.example/one', 'https://probe.example/two'],
   });
@@ -197,4 +202,33 @@ test('a disconnected node is not probed', async () => {
   h.setClock(2_000_000);
   await offlineManager.tick();
   assert.equal(h.proxyCalls.length, 0, 'no probe should be sent to a disconnected node');
+});
+
+test('a sustained-bench sample is folded into the capacity EWMA (thermal probe)', async () => {
+  const h = harness({ sustained: async () => ({ capacity_req_s: 4000 }) });
+  h.nodes.set('n1', { status: 'trial' });
+  h.store.saveTrial({ ...newTrial('n1', { now: 0, durationMs: DAY }), last_hb_at: 20_000_000 });
+  h.setClock(20_000_000); // past the capacity interval (DAY/6)
+  await h.manager.tick();
+  assert.equal(h.store.getTrial('n1')?.ewma_capacity, 4000);
+});
+
+test('a failed integrity re-attestation discards the node at once (bypasses strikes)', async () => {
+  const h = harness({ integrity: async () => ({ ok: false, reason: 'manifest_mismatch' }) });
+  h.nodes.set('n1', { status: 'trial' });
+  h.store.saveTrial({ ...newTrial('n1', { now: 0, durationMs: DAY, strikes: 0 }), last_hb_at: 30_000_000 });
+  h.setClock(30_000_000); // past the integrity interval (DAY/3)
+  await h.manager.tick();
+  assert.equal(h.store.getNode('n1'), null, 'node discarded immediately, not merely struck');
+  assert.equal(h.store.getTrial('n1'), null);
+});
+
+test('a passing integrity re-attestation is recorded and the node continues', async () => {
+  const h = harness({ integrity: async () => ({ ok: true }) });
+  h.nodes.set('n1', { status: 'trial' });
+  h.store.saveTrial({ ...newTrial('n1', { now: 0, durationMs: DAY }), last_hb_at: 30_000_000 });
+  h.setClock(30_000_000);
+  await h.manager.tick();
+  assert.equal(h.store.getTrial('n1')?.last_integrity_ok, 1);
+  assert.equal(h.nodes.get('n1')?.status, 'trial');
 });

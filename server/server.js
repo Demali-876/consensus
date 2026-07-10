@@ -427,6 +427,8 @@ server.listen(PORT, '::', () => {
       store: NodeStore,
       requestProxy: (nodeId, input) => nodeTunnelStats.requestProxy(nodeId, input),
       isConnected: (nodeId) => nodeTunnelStats.isControlConnected(nodeId),
+      runSustainedProbe: (nodeId) => nodeTunnelStats.runTrialSustainedProbe(nodeId),
+      reattestIntegrity: (nodeId) => nodeTunnelStats.reattestNodeIntegrity(nodeId),
     });
     nodeTunnelStats.setTrialListeners(trialManager.listeners());
     trialManager.start();

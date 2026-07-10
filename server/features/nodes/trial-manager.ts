@@ -23,6 +23,8 @@ import {
   foldReconnect,
   evaluate,
   registerStrike,
+  foldCapacity,
+  foldIntegrity,
   TRIAL_DURATION_MS,
   type TrialCard,
 } from './trial.ts';
@@ -59,6 +61,18 @@ function effectiveProbeIntervalMs(durationMs: number): number {
   return clamp(Math.floor(durationMs / TARGET_PROBES), PROBE_MIN_INTERVAL_MS, PROBE_MAX_INTERVAL_MS);
 }
 
+// The heavier sustained-bench (thermal) and integrity re-attest probes run much
+// less often than the fetch probe — a few times across the whole trial.
+const CAPACITY_SAMPLES_TARGET = 6;
+const INTEGRITY_SAMPLES_TARGET = 3;
+
+function capacityIntervalMs(durationMs: number): number {
+  return clamp(Math.floor(durationMs / CAPACITY_SAMPLES_TARGET), 30_000, 6 * 60 * 60 * 1000);
+}
+function integrityIntervalMs(durationMs: number): number {
+  return clamp(Math.floor(durationMs / INTEGRITY_SAMPLES_TARGET), 60_000, 8 * 60 * 60 * 1000);
+}
+
 // Tick often enough to fire probes on schedule and catch voids promptly: ~15s in
 // prod, a few seconds for short dev trials (so a full trial is watchable in
 // minutes). Void detection latency is bounded by this, which is fine against a 1h
@@ -89,6 +103,10 @@ export interface TrialManagerDeps {
   ) => Promise<{ status: number }>;
   // Is the node's control tunnel currently connected?
   isConnected: (nodeId: string) => boolean;
+  // Optional heavier probes over the control tunnel (need node-side support). When
+  // absent, the trial runs on availability + real-URL fetch alone.
+  runSustainedProbe?: (nodeId: string) => Promise<{ capacity_req_s: number | null }>;
+  reattestIntegrity?: (nodeId: string) => Promise<{ ok: boolean; reason?: string }>;
   now?: () => number;
   urls?: string[];
 }
@@ -106,6 +124,10 @@ export class TrialManager {
   private readonly now: () => number;
   private readonly urls: string[];
   private readonly lastProbeAt = new Map<string, number>();
+  private readonly lastCapacityAt = new Map<string, number>();
+  private readonly lastIntegrityAt = new Map<string, number>();
+  private readonly runSustainedProbe?: TrialManagerDeps['runSustainedProbe'];
+  private readonly reattestIntegrity?: TrialManagerDeps['reattestIntegrity'];
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(deps: TrialManagerDeps) {
@@ -114,6 +136,8 @@ export class TrialManager {
     this.isConnected = deps.isConnected;
     this.now = deps.now ?? Date.now;
     this.urls = deps.urls ?? probeUrls();
+    this.runSustainedProbe = deps.runSustainedProbe;
+    this.reattestIntegrity = deps.reattestIntegrity;
   }
 
   /** The hooks node-tunnel.ts calls on control-tunnel lifecycle events. */
@@ -176,15 +200,24 @@ export class TrialManager {
     // the stale trial row.
     if (!node || node.status !== 'trial') {
       this.store.deleteTrial(card.node_id);
-      this.lastProbeAt.delete(card.node_id);
+      this.clearProbeState(card.node_id);
       return;
     }
 
-    if (this.isConnected(card.node_id) && this.probeDue(card)) {
-      await this.runFetchProbe(card.node_id, card.fetch_total);
+    if (this.isConnected(card.node_id)) {
+      if (this.probeDue(card)) {
+        await this.runFetchProbe(card.node_id, card.fetch_total);
+      }
+      if (this.runSustainedProbe && this.capacityDue(card)) {
+        await this.runCapacityProbe(card.node_id);
+      }
+      if (this.reattestIntegrity && this.integrityDue(card)) {
+        const discarded = await this.runIntegrityProbe(card.node_id);
+        if (discarded) return; // node removed — nothing left to evaluate
+      }
     }
 
-    // Re-read: the probe (and any concurrent heartbeat fold) mutated the row.
+    // Re-read: the probes (and any concurrent heartbeat fold) mutated the row.
     const fresh = this.store.getTrial(card.node_id);
     if (!fresh || fresh.status !== 'running') return;
     this.act(fresh, evaluate(fresh, this.now()));
@@ -213,6 +246,64 @@ export class TrialManager {
     this.store.saveTrial(foldFetch(card, { ok, latencyMs }, this.now()));
   }
 
+  private capacityDue(card: TrialCard): boolean {
+    const last = this.lastCapacityAt.get(card.node_id) ?? 0;
+    return this.now() - last >= capacityIntervalMs(card.deadline - card.started_at);
+  }
+
+  private integrityDue(card: TrialCard): boolean {
+    const last = this.lastIntegrityAt.get(card.node_id) ?? 0;
+    return this.now() - last >= integrityIntervalMs(card.deadline - card.started_at);
+  }
+
+  // Occasional sustained-bench sample → capacity EWMA (thermal / oversubscription
+  // that a fetch can't see).
+  private async runCapacityProbe(nodeId: string): Promise<void> {
+    this.lastCapacityAt.set(nodeId, this.now()); // set before await so a failure still respects the interval
+    let capacity: number | null = null;
+    try {
+      const result = await this.runSustainedProbe!(nodeId);
+      capacity = result.capacity_req_s;
+    } catch {
+      return; // transient tunnel/probe error — try again next interval
+    }
+    if (capacity == null) return;
+    const card = this.store.getTrial(nodeId);
+    if (!card || card.status !== 'running') return;
+    this.store.saveTrial(foldCapacity(card, capacity, this.now()));
+  }
+
+  // Integrity re-attestation — a HARD gate. A verified failure (swapped binary /
+  // changed identity) discards the node immediately, bypassing the strike budget.
+  // Returns true if the node was discarded. A transient tunnel error is not a
+  // failure; it just retries next interval.
+  private async runIntegrityProbe(nodeId: string): Promise<boolean> {
+    this.lastIntegrityAt.set(nodeId, this.now());
+    let verdict: { ok: boolean; reason?: string };
+    try {
+      verdict = await this.reattestIntegrity!(nodeId);
+    } catch {
+      return false;
+    }
+    const card = this.store.getTrial(nodeId);
+    if (!card || card.status !== 'running') return false;
+    if (!verdict.ok) {
+      this.store.saveTrial(foldIntegrity(card, false, this.now()));
+      this.store.deleteNode(nodeId);
+      this.clearProbeState(nodeId);
+      log.warn('trial', 'integrity-breach-discard', { node_id: nodeId, reason: verdict.reason });
+      return true;
+    }
+    this.store.saveTrial(foldIntegrity(card, true, this.now()));
+    return false;
+  }
+
+  private clearProbeState(nodeId: string): void {
+    this.lastProbeAt.delete(nodeId);
+    this.lastCapacityAt.delete(nodeId);
+    this.lastIntegrityAt.delete(nodeId);
+  }
+
   private act(card: TrialCard, decision: ReturnType<typeof evaluate>): void {
     if (decision.kind === 'continue') return;
     const now = this.now();
@@ -220,7 +311,7 @@ export class TrialManager {
     if (decision.kind === 'pass') {
       this.store.setNodeStatus(card.node_id, 'active');
       this.store.saveTrial({ ...card, status: 'passed', updated_at: now });
-      this.lastProbeAt.delete(card.node_id);
+      this.clearProbeState(card.node_id);
       log.info('trial', 'graduated', {
         node_id: card.node_id,
         attempt: card.attempt,
@@ -231,7 +322,7 @@ export class TrialManager {
 
     const { card: struck, outcome } = registerStrike(card, decision.kind, now);
     this.store.saveTrial(struck);
-    this.lastProbeAt.delete(card.node_id);
+    this.clearProbeState(card.node_id);
 
     if (outcome === 'discard') {
       this.store.deleteNode(card.node_id);
