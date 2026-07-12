@@ -48,3 +48,9 @@ export const TRIAL_PROBE_URLS: string[] | null = (() => {
   const urls = value.split(',').map((u) => u.trim()).filter(Boolean);
   return urls.length > 0 ? urls : null;
 })();
+
+// Admission gate (task #3): the minimum stable sustained 16KB req/s a node must
+// hold to be admitted at eval. Tunable so the floor can be calibrated in
+// production without a redeploy; the default stays permissive (welcomes Pis /
+// small VPSes) until real reference-hardware readings tighten it.
+export const ADMISSION_FLOOR_REQ_S = intFlag('admission-floor-req-s', 50);

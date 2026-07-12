@@ -13,17 +13,20 @@
 // owned core — burst-credit vCPUs and thermally throttled SBCs decay and fail
 // here, which a short benchmark would never catch.
 
+import { ADMISSION_FLOOR_REQ_S } from '../nodes/trial-config.ts';
+
 // Late/early sustained throughput floor. Below this the machine slowed down
 // across the window series — burst credits ran out or the SoC throttled.
 export const STEADY_RATIO_FLOOR = 0.85;
 // process CPU time / wall time floor. Below this the process was not getting a
 // full core — hypervisor steal or host contention, not honest slow silicon.
 export const CPU_TIME_RATIO_FLOOR = 0.9;
-// Conservative capacity floor (slowest sustained window) until calibrated across
-// reference hardware (task #3). Any machine that can actually serve traffic
-// clears this comfortably; it only rejects the truly incapable. Raise once we
-// have Pi + VPS numbers from real evals.
-export const MIN_SUSTAINED_FLOOR_REQ_S = 50;
+// Conservative capacity floor (slowest sustained window). Tunable via the
+// --admission-floor-req-s flag (task #3) so it can be calibrated in production
+// without a redeploy; the default stays permissive (any machine that can actually
+// serve traffic clears it) and only rejects the truly incapable. Raise once real
+// Pi + VPS eval readings give a data-backed number.
+export const MIN_SUSTAINED_FLOOR_REQ_S = ADMISSION_FLOOR_REQ_S;
 
 export type AdmissionBasis = 'sustained' | 'burst' | 'missing';
 
