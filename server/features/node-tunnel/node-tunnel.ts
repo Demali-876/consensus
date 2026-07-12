@@ -619,11 +619,13 @@ function verifyRegisteredControlIdentity(nodeId: string | undefined, publicKeyPe
 
   const node = NodeStore.getNode(nodeId);
   if (!node) throw new Error(`Registered node not found: ${nodeId}`);
-  // A node on trial holds a control tunnel so the orchestrator can probe it, but
-  // the Router still refuses it real traffic (it only routes status === 'active').
-  // That split — "may connect and be probed" vs "may serve users" — is what lets
-  // the 24h trial run. Any other status (provisioning/failed) may not connect.
-  if (node.status !== 'active' && node.status !== 'trial') {
+  // A node on trial (or quarantined) holds a control tunnel so the orchestrator can
+  // probe it, but the Router still refuses it real traffic (it only routes
+  // status === 'active'). That split — "may connect and be probed" vs "may serve
+  // users" — is what lets the 24h trial and post-join monitoring run: a quarantined
+  // node keeps its tunnel so it can be probed back to health. Any other status
+  // (provisioning/failed) may not connect.
+  if (node.status !== 'active' && node.status !== 'trial' && node.status !== 'quarantined') {
     throw new Error(`Registered node is not eligible to connect: ${nodeId} (status ${node.status})`);
   }
   if (!node.pubkey_ed25519) throw new Error(`Registered node has no Ed25519 key: ${nodeId}`);

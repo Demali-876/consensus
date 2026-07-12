@@ -289,6 +289,7 @@ const upsertTrialStmt = db.prepare(`
 
 const getTrialStmt          = db.prepare(`SELECT * FROM node_trials WHERE node_id = ?`);
 const listRunningTrialsStmt = db.prepare(`SELECT * FROM node_trials WHERE status = 'running'`);
+const listMonitoredNodesStmt = db.prepare(`SELECT * FROM node_trials WHERE status IN ('monitoring', 'quarantined')`);
 const deleteTrialStmt       = db.prepare(`DELETE FROM node_trials WHERE node_id = ?`);
 
 const getMetaStmt = db.prepare(`SELECT value FROM app_meta WHERE key = ?`);
@@ -557,6 +558,12 @@ export const NodeStore = {
   // trials after an orchestrator restart.
   listRunningTrials() {
     return listRunningTrialsStmt.all().map(rowToTrial);
+  },
+
+  // Active nodes under post-join monitoring, plus any currently quarantined. The
+  // scheduler reloads these on boot to resume the ongoing watch (task #11).
+  listMonitoredNodes() {
+    return listMonitoredNodesStmt.all().map(rowToTrial);
   },
 
   deleteTrial(nodeId) {

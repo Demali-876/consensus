@@ -25,6 +25,10 @@ import {
   registerStrike,
   foldCapacity,
   foldIntegrity,
+  newMonitor,
+  readyToRecover,
+  MONITOR_QUARANTINE_FLOOR,
+  MONITOR_QUARANTINE_GRACE_MS,
   TRIAL_DURATION_MS,
   type TrialCard,
 } from './trial.ts';
@@ -57,6 +61,12 @@ const LAST_TICK_KEY = 'trial_last_tick';
 
 const clamp = (value: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, value));
 
+// A scorecard is "live" — probes fold into it — while a node is on trial, being
+// monitored, or quarantined; not once it has reached a terminal state.
+function isLiveCard(status: TrialCard['status']): boolean {
+  return status === 'running' || status === 'monitoring' || status === 'quarantined';
+}
+
 function effectiveProbeIntervalMs(durationMs: number): number {
   return clamp(Math.floor(durationMs / TARGET_PROBES), PROBE_MIN_INTERVAL_MS, PROBE_MAX_INTERVAL_MS);
 }
@@ -87,6 +97,7 @@ export interface TrialStore {
   getTrial(nodeId: string): TrialCard | null;
   saveTrial(card: TrialCard): unknown;
   listRunningTrials(): TrialCard[];
+  listMonitoredNodes(): TrialCard[];
   setNodeStatus(id: string, status: string): unknown;
   deleteNode(id: string): unknown;
   deleteTrial(nodeId: string): unknown;
@@ -126,6 +137,11 @@ export class TrialManager {
   private readonly lastProbeAt = new Map<string, number>();
   private readonly lastCapacityAt = new Map<string, number>();
   private readonly lastIntegrityAt = new Map<string, number>();
+  // Per-node timestamp of when a monitored node's score first dropped below the
+  // quarantine floor; cleared when it recovers. Quarantine needs this to persist
+  // across the grace window (in-memory, so an orchestrator restart resets it —
+  // erring toward NOT quarantining, which suits the high bar).
+  private readonly belowFloorSince = new Map<string, number>();
   private readonly runSustainedProbe?: TrialManagerDeps['runSustainedProbe'];
   private readonly reattestIntegrity?: TrialManagerDeps['reattestIntegrity'];
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -184,13 +200,18 @@ export class TrialManager {
 
   /** One scheduler pass: probe + evaluate every running trial, then stamp the tick. */
   async tick(): Promise<void> {
-    const running = this.store.listRunningTrials();
-    await Promise.all(running.map((card) => this.processTrial(card).catch((error) => {
+    const onError = (card: TrialCard) => (error: unknown) => {
       log.error('trial', 'process-failed', {
         node_id: card.node_id,
         message: error instanceof Error ? error.message : String(error),
       });
-    })));
+    };
+    const running = this.store.listRunningTrials();
+    const monitored = this.store.listMonitoredNodes();
+    await Promise.all([
+      ...running.map((card) => this.processTrial(card).catch(onError(card))),
+      ...monitored.map((card) => this.processMonitor(card).catch(onError(card))),
+    ]);
     this.store.setMeta(LAST_TICK_KEY, String(this.now()));
   }
 
@@ -204,23 +225,88 @@ export class TrialManager {
       return;
     }
 
-    if (this.isConnected(card.node_id)) {
-      if (this.probeDue(card)) {
-        await this.runFetchProbe(card.node_id, card.fetch_total);
-      }
-      if (this.runSustainedProbe && this.capacityDue(card)) {
-        await this.runCapacityProbe(card.node_id);
-      }
-      if (this.reattestIntegrity && this.integrityDue(card)) {
-        const discarded = await this.runIntegrityProbe(card.node_id);
-        if (discarded) return; // node removed — nothing left to evaluate
-      }
-    }
+    if (await this.runDueProbes(card.node_id, card)) return; // integrity breach → discarded
 
     // Re-read: the probes (and any concurrent heartbeat fold) mutated the row.
     const fresh = this.store.getTrial(card.node_id);
     if (!fresh || fresh.status !== 'running') return;
     this.act(fresh, evaluate(fresh, this.now()));
+  }
+
+  // Post-join watch of an ACTIVE (or quarantined) node — same probes, lighter
+  // cadence (the monitoring card's far-future deadline pins the intervals at their
+  // caps), acting on quarantine/recovery instead of graduation.
+  private async processMonitor(card: TrialCard): Promise<void> {
+    const node = this.store.getNode(card.node_id);
+    if (!node) {
+      this.store.deleteTrial(card.node_id);
+      this.clearProbeState(card.node_id);
+      return;
+    }
+    // Node left the monitorable set (e.g. entered the update lifecycle) — drop the row.
+    if (node.status !== 'active' && node.status !== 'quarantined') {
+      this.store.deleteTrial(card.node_id);
+      this.clearProbeState(card.node_id);
+      return;
+    }
+
+    if (await this.runDueProbes(card.node_id, card)) return; // integrity breach → discarded
+
+    const fresh = this.store.getTrial(card.node_id);
+    if (!fresh || (fresh.status !== 'monitoring' && fresh.status !== 'quarantined')) return;
+    this.monitorAct(node.status, fresh);
+  }
+
+  // Runs any due probes over the tunnel. Returns true if an integrity breach
+  // discarded the node (the caller should stop). Shared by trial + monitoring.
+  private async runDueProbes(nodeId: string, card: TrialCard): Promise<boolean> {
+    if (!this.isConnected(nodeId)) return false;
+    if (this.probeDue(card)) {
+      await this.runFetchProbe(nodeId, card.fetch_total);
+    }
+    if (this.runSustainedProbe && this.capacityDue(card)) {
+      await this.runCapacityProbe(nodeId);
+    }
+    if (this.reattestIntegrity && this.integrityDue(card)) {
+      return await this.runIntegrityProbe(nodeId);
+    }
+    return false;
+  }
+
+  // Quarantine an active node ONLY after its score has stayed below the floor
+  // continuously for the grace window (never on a transient dip); restore a
+  // quarantined node once it climbs back to the higher recovery floor.
+  private monitorAct(nodeStatus: string, card: TrialCard): void {
+    const now = this.now();
+    if (nodeStatus === 'active') {
+      if (card.stability_score < MONITOR_QUARANTINE_FLOOR) {
+        const since = this.belowFloorSince.get(card.node_id);
+        if (since == null) {
+          this.belowFloorSince.set(card.node_id, now); // start the grace clock
+          return;
+        }
+        if (now - since >= MONITOR_QUARANTINE_GRACE_MS) {
+          this.store.setNodeStatus(card.node_id, 'quarantined');
+          this.store.saveTrial({ ...card, status: 'quarantined', updated_at: now });
+          this.belowFloorSince.delete(card.node_id);
+          log.warn('trial', 'quarantined', {
+            node_id: card.node_id,
+            score: Math.round(card.stability_score),
+            floor: MONITOR_QUARANTINE_FLOOR,
+            sustained_ms: now - since,
+          });
+        }
+      } else {
+        this.belowFloorSince.delete(card.node_id); // healthy again — reset the grace clock
+      }
+      return;
+    }
+    // quarantined → recover once healthy (hysteresis via the higher recovery floor)
+    if (readyToRecover(card)) {
+      this.store.setNodeStatus(card.node_id, 'active');
+      this.store.saveTrial({ ...card, status: 'monitoring', updated_at: now });
+      log.info('trial', 'recovered', { node_id: card.node_id, score: Math.round(card.stability_score) });
+    }
   }
 
   private probeDue(card: TrialCard): boolean {
@@ -242,7 +328,7 @@ export class TrialManager {
     this.lastProbeAt.set(nodeId, this.now());
 
     const card = this.store.getTrial(nodeId);
-    if (!card || card.status !== 'running') return;
+    if (!card || !isLiveCard(card.status)) return;
     this.store.saveTrial(foldFetch(card, { ok, latencyMs }, this.now()));
   }
 
@@ -269,7 +355,7 @@ export class TrialManager {
     }
     if (capacity == null) return;
     const card = this.store.getTrial(nodeId);
-    if (!card || card.status !== 'running') return;
+    if (!card || !isLiveCard(card.status)) return;
     this.store.saveTrial(foldCapacity(card, capacity, this.now()));
   }
 
@@ -286,7 +372,7 @@ export class TrialManager {
       return false;
     }
     const card = this.store.getTrial(nodeId);
-    if (!card || card.status !== 'running') return false;
+    if (!card || !isLiveCard(card.status)) return false;
     if (!verdict.ok) {
       this.store.saveTrial(foldIntegrity(card, false, this.now()));
       this.store.deleteNode(nodeId);
@@ -302,6 +388,7 @@ export class TrialManager {
     this.lastProbeAt.delete(nodeId);
     this.lastCapacityAt.delete(nodeId);
     this.lastIntegrityAt.delete(nodeId);
+    this.belowFloorSince.delete(nodeId);
   }
 
   private act(card: TrialCard, decision: ReturnType<typeof evaluate>): void {
@@ -310,7 +397,8 @@ export class TrialManager {
 
     if (decision.kind === 'pass') {
       this.store.setNodeStatus(card.node_id, 'active');
-      this.store.saveTrial({ ...card, status: 'passed', updated_at: now });
+      // Graduated: hand the node to ongoing post-join monitoring (task #11).
+      this.store.saveTrial(newMonitor(card.node_id, { now }));
       this.clearProbeState(card.node_id);
       log.info('trial', 'graduated', {
         node_id: card.node_id,

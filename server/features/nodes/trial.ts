@@ -35,6 +35,15 @@ export const MAX_STRIKES = 3;
 // count derives from this, which drives the continuity ratio.
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 
+// Post-join monitoring (task #11): once ACTIVE, a node keeps a lighter watch. The
+// bar to quarantine is deliberately HIGH — an established node is pulled from
+// rotation only after its score stays below the floor CONTINUOUSLY for the grace
+// window, never on a transient dip. Recovery uses hysteresis (a higher floor) so a
+// node doesn't flap between active and quarantined.
+export const MONITOR_QUARANTINE_FLOOR = 40;
+export const MONITOR_QUARANTINE_GRACE_MS = 60 * 60 * 1000;
+export const MONITOR_RECOVERY_FLOOR = 60;
+
 // ─── Scoring tuning (internal; calibratable under task #3) ──────────────────────
 const SCORE_START = 75;
 const SCORE_MIN = 0;
@@ -53,7 +62,14 @@ const RECONNECT_PENALTY = 8;
 const CAPACITY_DROP_FRACTION = 0.25; // sustained-bench sample this far below its EWMA = throttling
 const CAPACITY_PENALTY = 10;
 
-export type TrialStatus = 'running' | 'passed' | 'failed' | 'voided' | 'discarded';
+export type TrialStatus =
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'voided'
+  | 'discarded'
+  | 'monitoring' // active node under ongoing post-join watch (task #11)
+  | 'quarantined'; // active node pulled from rotation, probing for recovery
 
 // The scorecard = the `node_trials` row. Timestamps are epoch milliseconds (this
 // module and the scheduler use Date.now(); the rest of node_store uses seconds).
@@ -115,6 +131,21 @@ export function newTrial(
     status: 'running',
     updated_at: opts.now,
   };
+}
+
+// A monitoring scorecard for a freshly-graduated (active) node. Monitoring is
+// continuous (no deadline), so a far-future sentinel keeps the shared probe-interval
+// math — which scales off (deadline - started_at) — pinned at its capped, light
+// cadence (~30min fetch, hourly-plus sustained/integrity).
+export function newMonitor(nodeId: string, opts: { now: number }): TrialCard {
+  const base = newTrial(nodeId, { now: opts.now });
+  return { ...base, status: 'monitoring', deadline: opts.now + 3650 * 24 * 60 * 60 * 1000 };
+}
+
+// A quarantined node returns to active only when its score climbs back to the
+// (higher) recovery floor — hysteresis against flapping.
+export function readyToRecover(card: TrialCard): boolean {
+  return card.stability_score >= MONITOR_RECOVERY_FLOOR;
 }
 
 /** Fold one heartbeat: bump the received count, track the worst gap, advance the

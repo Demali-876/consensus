@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TrialManager, type TrialStore } from '../../features/nodes/trial-manager.ts';
-import { newTrial, HEARTBEAT_INTERVAL_MS, type TrialCard } from '../../features/nodes/trial.ts';
+import { newTrial, newMonitor, HEARTBEAT_INTERVAL_MS, MONITOR_QUARANTINE_GRACE_MS, type TrialCard } from '../../features/nodes/trial.ts';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -25,6 +25,7 @@ function harness(opts: {
     getTrial: (id) => trials.get(id) ?? null,
     saveTrial: (card) => { trials.set(card.node_id, { ...card }); return card; },
     listRunningTrials: () => [...trials.values()].filter((c) => c.status === 'running'),
+    listMonitoredNodes: () => [...trials.values()].filter((c) => c.status === 'monitoring' || c.status === 'quarantined'),
     setNodeStatus: (id, status) => { const n = nodes.get(id); if (n) n.status = status; },
     deleteNode: (id) => { nodes.delete(id); trials.delete(id); },
     deleteTrial: (id) => { trials.delete(id); },
@@ -144,7 +145,7 @@ test('tick graduates a node that cleared every floor at the deadline', async () 
   h.setClock(DAY);
   await h.manager.tick();
   assert.equal(h.nodes.get('n1')?.status, 'active', 'node should graduate to active');
-  assert.equal(h.store.getTrial('n1')?.status, 'passed');
+  assert.equal(h.store.getTrial('n1')?.status, 'monitoring', 'graduation hands off to post-join monitoring');
 });
 
 test('tick voids a long-disconnected trial and restarts it, carrying a strike', async () => {
@@ -231,4 +232,55 @@ test('a passing integrity re-attestation is recorded and the node continues', as
   await h.manager.tick();
   assert.equal(h.store.getTrial('n1')?.last_integrity_ok, 1);
   assert.equal(h.nodes.get('n1')?.status, 'trial');
+});
+
+// ─── Post-join monitoring (#11) ───────────────────────────────────────────────
+
+test('a healthy monitored node is not quarantined', async () => {
+  const h = harness();
+  h.nodes.set('n1', { status: 'active' });
+  h.store.saveTrial({ ...newMonitor('n1', { now: 0 }), stability_score: 80 });
+  h.setClock(2_000_000);
+  await h.manager.tick();
+  assert.equal(h.nodes.get('n1')?.status, 'active');
+  assert.equal(h.store.getTrial('n1')?.status, 'monitoring');
+});
+
+test('a monitored node is quarantined only after SUSTAINED sub-floor, not on a dip', async () => {
+  const h = harness();
+  h.nodes.set('n1', { status: 'active' });
+  h.store.saveTrial({ ...newMonitor('n1', { now: 0 }), stability_score: 20 }); // below the 40 floor
+  h.setProxy(500); // failing probes keep the score down
+
+  // First observation below the floor: start the grace clock, do NOT quarantine.
+  h.setClock(2_000_000);
+  await h.manager.tick();
+  assert.equal(h.nodes.get('n1')?.status, 'active', 'a single sub-floor observation must not quarantine');
+
+  // Still sub-floor past the grace window → quarantined.
+  h.setClock(2_000_000 + MONITOR_QUARANTINE_GRACE_MS + 1);
+  await h.manager.tick();
+  assert.equal(h.nodes.get('n1')?.status, 'quarantined');
+  assert.equal(h.store.getTrial('n1')?.status, 'quarantined');
+});
+
+test('a quarantined node recovers to active once its score climbs back', async () => {
+  const h = harness();
+  h.nodes.set('n1', { status: 'quarantined' });
+  h.store.saveTrial({ ...newMonitor('n1', { now: 0 }), status: 'quarantined', stability_score: 58 });
+  h.setProxy(200); // healthy probes heal it back above the recovery floor
+  h.setClock(2_000_000);
+  await h.manager.tick();
+  assert.equal(h.nodes.get('n1')?.status, 'active');
+  assert.equal(h.store.getTrial('n1')?.status, 'monitoring');
+});
+
+test('an integrity failure on a monitored node discards it (even while healthy)', async () => {
+  const h = harness({ integrity: async () => ({ ok: false, reason: 'manifest_mismatch' }) });
+  h.nodes.set('n1', { status: 'active' });
+  h.store.saveTrial({ ...newMonitor('n1', { now: 0 }), stability_score: 90 });
+  h.setClock(9 * 60 * 60 * 1000); // past the ~8h integrity interval for a monitoring card
+  await h.manager.tick();
+  assert.equal(h.store.getNode('n1'), null, 'integrity breach discards even a healthy active node');
+  assert.equal(h.store.getTrial('n1'), null);
 });
