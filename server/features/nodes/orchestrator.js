@@ -380,12 +380,11 @@ export function registerNodes(app, httpsServer, x402Server, config) {
         console.log('\nStoring node...');
         // A node earns 'active' (routable) only after passing the 24h stability
         // trial, so it registers into 'trial' first and the trial scheduler
-        // graduates it. Gated by NODE_TRIAL_ENABLED so the feature ships dark until
-        // the scheduler + node-side probe handlers are live; FREE_MODE dev skips it.
-        const registrationStatus =
-          TRIAL_ENABLED && process.env.FREE_MODE !== 'true'
-            ? 'trial'
-            : 'active';
+        // graduates it. Gated by --trial-enabled so it ships dark until enabled.
+        // Deliberately DECOUPLED from FREE_MODE: nodes that join for FREE (no x402
+        // fee, to grow the network) must STILL pass the trial, so a free network
+        // stays a quality network. FREE_MODE only waives payment, nothing else here.
+        const registrationStatus = TRIAL_ENABLED ? 'trial' : 'active';
 
         NodeStore.upsertNode({
           id:               nodeId,
