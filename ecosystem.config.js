@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'consensus-main',
       script: './node_modules/.bin/dotenvx',
-      args: 'run --env-file .env -- node server.js',
+      args: 'run --env-file .env -- node server.js --trial-enabled',
       interpreter: 'none',
       cwd: '/home/icpi/Desktop/consensus/server',
       instances: 1,
