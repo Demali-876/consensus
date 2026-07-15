@@ -10,7 +10,7 @@ The protocol spans three repositories:
 - **[`consensus-client`](https://github.com/Demali-876/consensus-client)** — `@canister-software/consensus-cli`, the TypeScript SDK + CLI that talks to the server. (Formerly `client/` in this repo; extracted to its own repo with full history.)
 - **[`consensus-node`](https://github.com/Demali-876/consensus-node)** — the Bun worker-node runtime that registers with the orchestrator and serves proxied requests.
 
-Everything else in the repo root (`instance/`, `x402-proxy/`, `scripts/`, `assets/`, `test-server.ts`) is out of scope for this guide.
+Everything else in the repo root (`instance/`, `scripts/`, `assets/`, `test-server.ts`) is out of scope for this guide.
 
 **Canonical cross-repo reference:** the architecture + cross-repo contracts live in `consensus-docs` → https://docs.consensus.canister.software/protocol/architecture/ ([source](https://github.com/canister-software/consensus-docs/blob/main/src/content/docs/protocol/architecture.md)). Read it before changing anything that crosses a repo boundary — the `/proxy` request/response shapes, routing/caching headers, node-tunnel frames, or the routing-ticket format. Related repos: [`consensus-client`](https://github.com/Demali-876/consensus-client) (SDK + TUI/CLI), [`consensus-node`](https://github.com/Demali-876/consensus-node) (worker-node runtime), [`consensus-docs`](https://github.com/canister-software/consensus-docs) (docs site, owns the canonical reference), [`consensus-facilitator`](https://github.com/Demali-876/consensus-facilitator) (x402 facilitator).
 
@@ -54,10 +54,8 @@ adapter level via `ConsensusProxy({ ssrfCheck: noSsrf })` — the `noSsrf`
 helper lives in `server/utils/tests/_test-helpers.ts` and returns a
 synthetic `SafeResolution` with `isLiteral: true` so localhost upstreams
 aren't blocked. `npm run test:dedupe` for just the pen test;
-`npm run test:all` adds `wss.test.ts` and `security-perf.test.ts` which
-have pre-existing failures (wss: `isPrivateTarget` isn't injectable yet;
-security-perf: imports `@dotenvx/dotenvx` via a path that doesn't resolve
-from `x402-proxy/`).
+`npm run test:all` adds `wss.test.ts`, which has a pre-existing failure
+(`isPrivateTarget` isn't injectable yet).
 
 Required env in `server/.env` (loaded by `@dotenvx/dotenvx`):
 
