@@ -14,7 +14,6 @@ const cases: Array<{ name: string; input: DedupeParams }> = [
   { name: 'query-sorted', input: { target_url: 'https://api.example.com/p?b=2&a=1', method: 'GET' } },
   { name: 'default-port-stripped', input: { target_url: 'https://api.example.com:443/p', method: 'GET' } },
   { name: 'host-lowercased', input: { target_url: 'https://API.Example.COM/p', method: 'get' } },
-  { name: 'api-key-scope', input: { target_url: 'https://api.example.com/p', method: 'GET', headers: { 'x-api-key': 'secret' } } },
   {
     name: 'semantic-headers-only',
     input: {

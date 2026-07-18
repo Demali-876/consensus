@@ -85,18 +85,11 @@ export function computeBodyHash(body: RequestBody): string {
   return sha256Hex(stableStringify(body));
 }
 
-export function getScope(headers: Headers): string {
-  for (const k in headers) {
-    if (k.toLowerCase() === 'x-api-key') return sha256Hex(headers[k]!);
-  }
-  return 'global';
-}
-
 export function generateDedupeKey({ target_url, method, headers = {}, body }: DedupeParams): string {
   const semanticHeaders = canonicalizeSemanticHeaders(headers);
   const canonical = {
     v: 1,
-    scope: getScope(headers),
+    scope: 'global',
     method: method.toUpperCase(),
     url: canonicalizeUrl(target_url),
     headers: semanticHeaders,

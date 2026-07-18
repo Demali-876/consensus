@@ -87,7 +87,7 @@ The proxy and tunnel **data paths are being migrated** so the orchestrator becom
    - `paymentMiddleware` from `@x402/express` enforces x402 unless `FREE_MODE=true`. Three networks are accepted: Base Sepolia EVM, Solana Devnet, ICP testnet — each registered on `x402ResourceServer` with its own scheme.
    - Post-payment handler hands off to `ConsensusProxy.handleRequest`.
 
-2. **Dedupe key** ([server/features/proxy/proxy.ts](server/features/proxy/proxy.ts)): SHA-256 over a canonical `{ scope, method, canonicalUrl, semanticHeaders, bodyHash }`. `scope` is hashed from `x-api-key` (or `"global"` when absent). Body objects use stable-stringify. Cache TTL is clamped to `[1, 3600]` seconds.
+2. **Dedupe key** ([server/features/proxy/proxy.ts](server/features/proxy/proxy.ts)): SHA-256 over a canonical `{ scope, method, canonicalUrl, semanticHeaders, bodyHash }`. `scope` is always `"global"`; proxy profiles and user identity are not part of canonicalization. Body objects use stable-stringify. Cache TTL is clamped to `[1, 3600]` seconds.
 
 3. **`Router`** ([server/router.ts](server/router.ts)): selects a downstream node per request. Strategy: sticky-by-dedupe-key (10 min TTL) → otherwise **power-of-two-choices** by combined HTTP + WS load. Filters by `x-node-region` / `x-node-domain` / `x-node-exclude` headers. Excludes nodes whose `capabilities.update_state` is in the update lifecycle. Falls back to executing the request directly on the server if no node is eligible.
 
@@ -116,7 +116,7 @@ These bind the `server/` here to the **[`consensus-client`](https://github.com/D
 
 - The CLI publishes to npm as `@canister-software/consensus-cli` (built with Bun's bundler to ESM + CJS + `.d.ts`); it lives in its own repo now, so coordinate releases when the server contract changes.
 - `/proxy` server response shape (`{ status, statusText, data, meta }`, or full `ProxyResponse` when `x-verbose: true`) is consumed by the client; change them together.
-- Server expects the following client-controlled headers to influence routing/caching, all stripped from the upstream request: `x-cache-ttl`, `x-verbose`, `x-api-key`, `x-idempotency-key`, `x-node-region`, `x-node-domain`, `x-node-exclude`. The full strip list is in [proxy.ts:90](server/features/proxy/proxy.ts:90).
+- Server expects the following client-controlled headers to influence routing/caching, all stripped from the upstream request: `x-cache-ttl`, `x-verbose`, `x-idempotency-key`, `x-node-region`, `x-node-domain`, `x-node-exclude`. The deprecated `x-api-key` header is defensively stripped but has no identity or deduplication behavior. The full strip list is in [proxy.ts:90](server/features/proxy/proxy.ts:90).
 - The node tunnel handshake/frame/message formats ([server/features/node-tunnel/](server/features/node-tunnel/)) are mirrored by `consensus-node`'s `src/tunnel/` + `src/crypto/`; the ticket/signing primitives for the direct data plane will be a new shared contract across both.
 
 ## Conventions

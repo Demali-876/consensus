@@ -154,7 +154,7 @@ function getPrivateTunnelScope(headers: Headers): string {
   const sensitive: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase();
-    if (lower === 'authorization' || lower === 'cookie' || lower === 'x-api-key') {
+    if (lower === 'authorization' || lower === 'cookie') {
       sensitive[lower] = sha256Hex(value);
     }
   }

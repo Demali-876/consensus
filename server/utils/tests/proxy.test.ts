@@ -8,7 +8,6 @@
  *    Non-2xx responses are never cached
  *    URL canonicalization (param order, port, fragment, case)
  *    Semantic header canonicalization
- *    x-api-key scoping
  *    Body hashing (key-order normalisation, null/undefined parity)
  *    TTL expiry (wall-clock)
  *    x-cache-ttl request header
@@ -264,6 +263,13 @@ describe('Semantic headers', () => {
     assert.equal(k1, k2);
   });
 
+  it('the deprecated x-api-key identity header does NOT change the dedupe key', () => {
+    const base = { target_url: `${BASE}/hdrs`, method: 'GET' };
+    const k1 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'legacy-a' } });
+    const k2 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'legacy-b' } });
+    assert.equal(k1, k2);
+  });
+
   it('accept header DOES change the dedupe key', () => {
     const base = { target_url: `${BASE}/accept`, method: 'GET' };
     const k1 = proxy.computeDedupeKey({ ...base, headers: { accept: 'application/json' } });
@@ -290,43 +296,6 @@ describe('Semantic headers', () => {
     const k1 = proxy.computeDedupeKey({ ...base, headers: { 'Accept': 'application/json' } });
     const k2 = proxy.computeDedupeKey({ ...base, headers: { 'accept': 'application/json' } });
     assert.equal(k1, k2);
-  });
-});
-
-describe('x-api-key scoping', () => {
-  before(() => { resetUpstream(); freshProxy(); });
-
-  it('different API keys produce different dedupe keys', () => {
-    const base = { target_url: `${BASE}/scoped`, method: 'GET' };
-    const k1 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'alice-token' } });
-    const k2 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'bob-token'   } });
-    assert.notEqual(k1, k2);
-  });
-
-  it('same API key always produces the same dedupe key', () => {
-    const base = { target_url: `${BASE}/scoped`, method: 'GET', headers: { 'x-api-key': 'alice-token' } };
-    assert.equal(proxy.computeDedupeKey(base), proxy.computeDedupeKey(base));
-  });
-
-  it('anonymous (no x-api-key) and authenticated share a "global" vs scoped namespace', () => {
-    const base = { target_url: `${BASE}/scoped`, method: 'GET' };
-    const k1 = proxy.computeDedupeKey({ ...base });
-    const k2 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'alice-token' } });
-    assert.notEqual(k1, k2);
-  });
-
-  it('two different API keys each get their own cache entry', async () => {
-    const url = `${BASE}/scoped-cache`;
-    await proxy.handleRequest(url, 'GET', { 'x-api-key': 'alice' }, undefined, 60);
-    await proxy.handleRequest(url, 'GET', { 'x-api-key': 'bob'   }, undefined, 60);
-    assert.equal(upstreamHits, 2, 'each unique scope is an independent cache key');
-
-    // Second call per key should HIT
-    const ra = await proxy.handleRequest(url, 'GET', { 'x-api-key': 'alice' }, undefined, 60);
-    const rb = await proxy.handleRequest(url, 'GET', { 'x-api-key': 'bob'   }, undefined, 60);
-    assert.equal(ra.cached, true);
-    assert.equal(rb.cached, true);
-    assert.equal(upstreamHits, 2);  // no new upstream calls
   });
 });
 

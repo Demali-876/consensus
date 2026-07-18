@@ -8,14 +8,13 @@
  * What this verifies (module-level, no real network):
  *
  *   1. Dedupe key is stable across non-semantic header changes (User-Agent)
- *      and distinct across body / method / x-api-key scope.
+ *      and distinct across body / method.
  *   2. In-flight coalescing — N concurrent requests for the same key hit
  *      upstream exactly once and all receive the same response. This is the
  *      regression test for the `pendingRequests` write that was missing.
  *   3. Post-completion cache — follow-ups within TTL serve from cache and do
  *      NOT touch upstream.
  *   4. Different dedupe keys do NOT collapse — each gets its own upstream call.
- *   5. Different x-api-key scopes do NOT cross-pollute even with the same URL.
  *   6. Upstream failures (non-2xx) are NOT cached and do NOT poison subsequent
  *      attempts with that key.
  *   7. Concurrent requests across MANY distinct keys still get correct
@@ -161,12 +160,6 @@ async function main(): Promise<void> {
     assert.notEqual(g, p);
   });
 
-  await run('different x-api-key → different scope → different key', async () => {
-    const k1 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/a`, method: 'GET', headers: { 'x-api-key': 'tenant1' } });
-    const k2 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/a`, method: 'GET', headers: { 'x-api-key': 'tenant2' } });
-    assert.notEqual(k1, k2);
-  });
-
   await run('different body → different key', async () => {
     const k1 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/a`, method: 'POST', body: { x: 1 } });
     const k2 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/a`, method: 'POST', body: { x: 2 } });
@@ -219,21 +212,6 @@ async function main(): Promise<void> {
     assert.equal(callsByPath.get('/x'), 1);
     assert.equal(callsByPath.get('/y'), 1);
     assert.equal(callsByPath.get('/z'), 1);
-  });
-
-  await run('different x-api-key scopes do NOT cross-pollute', async () => {
-    resetCounters();
-    const k0 = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/scoped`, method: 'GET' });
-    const kA = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/scoped`, method: 'GET', headers: { 'x-api-key': 'A' } });
-    const kB = proxy.computeDedupeKey({ target_url: `${TARGET_BASE}/scoped`, method: 'GET', headers: { 'x-api-key': 'B' } });
-    proxy.clearKey(k0); proxy.clearKey(kA); proxy.clearKey(kB);
-    await Promise.all([
-      callProxy('/scoped'),
-      callProxy('/scoped', { 'x-api-key': 'A' }),
-      callProxy('/scoped', { 'x-api-key': 'B' }),
-    ]);
-    assert.equal(callsByPath.get('/scoped'), 3,
-      `expected 3 upstream calls (one per scope), got ${callsByPath.get('/scoped')}`);
   });
 
   // ─── 5. Failure isolation ─────────────────────────────────────────────────
