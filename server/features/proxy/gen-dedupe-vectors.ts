@@ -14,13 +14,20 @@ const cases: Array<{ name: string; input: DedupeParams }> = [
   { name: 'query-sorted', input: { target_url: 'https://api.example.com/p?b=2&a=1', method: 'GET' } },
   { name: 'default-port-stripped', input: { target_url: 'https://api.example.com:443/p', method: 'GET' } },
   { name: 'host-lowercased', input: { target_url: 'https://API.Example.COM/p', method: 'get' } },
-  { name: 'api-key-scope', input: { target_url: 'https://api.example.com/p', method: 'GET', headers: { 'x-api-key': 'secret' } } },
   {
     name: 'semantic-headers-only',
     input: {
       target_url: 'https://api.example.com/p',
       method: 'GET',
       headers: { accept: 'application/json', 'content-type': 'application/json', 'x-other': 'ignored' },
+    },
+  },
+  {
+    name: 'credential-headers-hashed',
+    input: {
+      target_url: 'https://api.example.com/private',
+      method: 'GET',
+      headers: { authorization: 'Bearer secret', cookie: 'session=secret' },
     },
   },
   { name: 'json-body-sorted', input: { target_url: 'https://api.example.com/p', method: 'POST', body: { b: 2, a: 1 } } },

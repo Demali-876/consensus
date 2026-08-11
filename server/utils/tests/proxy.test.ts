@@ -8,7 +8,6 @@
  *    Non-2xx responses are never cached
  *    URL canonicalization (param order, port, fragment, case)
  *    Semantic header canonicalization
- *    x-api-key scoping
  *    Body hashing (key-order normalisation, null/undefined parity)
  *    TTL expiry (wall-clock)
  *    x-cache-ttl request header
@@ -24,6 +23,7 @@ import http   from 'node:http';
 import ConsensusProxy from '../../features/proxy/proxy.ts';
 import Router from '../../router.ts';
 import { noSsrf } from './_test-helpers.ts';
+import { PROXY_PROFILE_PROTOCOL, PROXY_PROFILE_VERSION, hashProxyProfileV1 } from '../../features/proxy/profile-v1.ts';
 
 const UPSTREAM_PORT = 19_991;
 const BASE          = `http://localhost:${UPSTREAM_PORT}`;
@@ -115,6 +115,36 @@ describe('Basic caching', () => {
     const r = await proxy.handleRequest(`${BASE}/hello`, 'GET', {}, undefined, 60);
     const miss = await proxy.handleRequest(`${BASE}/served-by-test`, 'GET', {}, undefined, 60);
     assert.equal(miss.served_by, 'proxy-direct');
+  });
+});
+
+describe('profile-v1 main-server execution', () => {
+  before(() => { resetUpstream(); freshProxy(); });
+
+  it('enforces the policy and isolates the profiled cache namespace', async () => {
+    const profile = {
+      protocol: PROXY_PROFILE_PROTOCOL,
+      version: PROXY_PROFILE_VERSION,
+      base_url: BASE,
+      allowed_methods: ['GET'],
+      allowed_paths: ['/profile'],
+      cache_ttl: 60,
+      direct: false,
+    };
+    const first = await proxy.handleRequest(`${BASE}/profile`, 'GET', {}, undefined, undefined, profile);
+    const second = await proxy.handleRequest(`${BASE}/profile`, 'GET', {}, undefined, undefined, profile);
+    assert.equal(first.cached, false);
+    assert.equal(second.cached, true);
+    assert.equal(upstreamHits, 1);
+
+    const profileHash = hashProxyProfileV1(profile);
+    const profiledKey = proxy.computeDedupeKey({ target_url: `${BASE}/profile`, method: 'GET', profile_hash: profileHash });
+    const anonymousKey = proxy.computeDedupeKey({ target_url: `${BASE}/profile`, method: 'GET' });
+    assert.notEqual(profiledKey, anonymousKey);
+    await assert.rejects(
+      () => proxy.handleRequest(`${BASE}/private`, 'GET', {}, undefined, undefined, profile),
+      /not allowed/,
+    );
   });
 });
 
@@ -264,11 +294,25 @@ describe('Semantic headers', () => {
     assert.equal(k1, k2);
   });
 
+  it('the deprecated x-api-key identity header does NOT change the dedupe key', () => {
+    const base = { target_url: `${BASE}/hdrs`, method: 'GET' };
+    const k1 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'legacy-a' } });
+    const k2 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'legacy-b' } });
+    assert.equal(k1, k2);
+  });
+
   it('accept header DOES change the dedupe key', () => {
     const base = { target_url: `${BASE}/accept`, method: 'GET' };
     const k1 = proxy.computeDedupeKey({ ...base, headers: { accept: 'application/json' } });
     const k2 = proxy.computeDedupeKey({ ...base, headers: { accept: 'text/plain' } });
     assert.notEqual(k1, k2);
+  });
+
+  it('upstream credentials isolate cache keys without using API identity', () => {
+    const base = { target_url: `${BASE}/private`, method: 'GET' };
+    const a = proxy.computeDedupeKey({ ...base, headers: { authorization: 'Bearer a', cookie: 'session=a' } });
+    const b = proxy.computeDedupeKey({ ...base, headers: { authorization: 'Bearer b', cookie: 'session=b' } });
+    assert.notEqual(a, b);
   });
 
   it('content-type header DOES change the dedupe key for POST', () => {
@@ -290,43 +334,6 @@ describe('Semantic headers', () => {
     const k1 = proxy.computeDedupeKey({ ...base, headers: { 'Accept': 'application/json' } });
     const k2 = proxy.computeDedupeKey({ ...base, headers: { 'accept': 'application/json' } });
     assert.equal(k1, k2);
-  });
-});
-
-describe('x-api-key scoping', () => {
-  before(() => { resetUpstream(); freshProxy(); });
-
-  it('different API keys produce different dedupe keys', () => {
-    const base = { target_url: `${BASE}/scoped`, method: 'GET' };
-    const k1 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'alice-token' } });
-    const k2 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'bob-token'   } });
-    assert.notEqual(k1, k2);
-  });
-
-  it('same API key always produces the same dedupe key', () => {
-    const base = { target_url: `${BASE}/scoped`, method: 'GET', headers: { 'x-api-key': 'alice-token' } };
-    assert.equal(proxy.computeDedupeKey(base), proxy.computeDedupeKey(base));
-  });
-
-  it('anonymous (no x-api-key) and authenticated share a "global" vs scoped namespace', () => {
-    const base = { target_url: `${BASE}/scoped`, method: 'GET' };
-    const k1 = proxy.computeDedupeKey({ ...base });
-    const k2 = proxy.computeDedupeKey({ ...base, headers: { 'x-api-key': 'alice-token' } });
-    assert.notEqual(k1, k2);
-  });
-
-  it('two different API keys each get their own cache entry', async () => {
-    const url = `${BASE}/scoped-cache`;
-    await proxy.handleRequest(url, 'GET', { 'x-api-key': 'alice' }, undefined, 60);
-    await proxy.handleRequest(url, 'GET', { 'x-api-key': 'bob'   }, undefined, 60);
-    assert.equal(upstreamHits, 2, 'each unique scope is an independent cache key');
-
-    // Second call per key should HIT
-    const ra = await proxy.handleRequest(url, 'GET', { 'x-api-key': 'alice' }, undefined, 60);
-    const rb = await proxy.handleRequest(url, 'GET', { 'x-api-key': 'bob'   }, undefined, 60);
-    assert.equal(ra.cached, true);
-    assert.equal(rb.cached, true);
-    assert.equal(upstreamHits, 2);  // no new upstream calls
   });
 });
 

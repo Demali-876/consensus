@@ -1,0 +1,54 @@
+{
+  "_comment": "Shared profile-v1 canonicalization vectors. This file must remain byte-for-byte identical across consensus, consensus-client, and consensus-node.",
+  "version": 1,
+  "vectors": [
+    {
+      "name": "catalog",
+      "input": {
+        "protocol": "consensus.proxy-profile",
+        "version": 1,
+        "base_url": "https://API.example.com:443/v1/",
+        "allowed_methods": ["get", "HEAD", "GET"],
+        "allowed_paths": ["/search", "/products", "/products"],
+        "cache_ttl": 120,
+        "node_region": "us-east",
+        "direct": false
+      },
+      "normalized": {
+        "protocol": "consensus.proxy-profile",
+        "version": 1,
+        "base_url": "https://api.example.com/v1",
+        "allowed_methods": ["GET", "HEAD"],
+        "allowed_paths": ["/products", "/search"],
+        "cache_ttl": 120,
+        "verbose": false,
+        "node_region": "us-east",
+        "direct": false
+      },
+      "hash": "3ad74b9c2800b3ef39132e89f440a3e8847988351e2daa316ad527770ed52c12"
+    },
+    {
+      "name": "root-defaults-explicit",
+      "input": {
+        "protocol": "consensus.proxy-profile",
+        "version": 1,
+        "base_url": "http://example.com:80/",
+        "allowed_methods": ["HEAD", "GET"],
+        "allowed_paths": ["/"],
+        "verbose": true,
+        "direct": true
+      },
+      "normalized": {
+        "protocol": "consensus.proxy-profile",
+        "version": 1,
+        "base_url": "http://example.com/",
+        "allowed_methods": ["GET", "HEAD"],
+        "allowed_paths": ["/"],
+        "cache_ttl": 300,
+        "verbose": true,
+        "direct": true
+      },
+      "hash": "0576497336ea50afd848a53928cb232e6ec6b5ac0f1c1a299a7137361d70d46a"
+    }
+  ]
+}

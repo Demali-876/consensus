@@ -7,6 +7,11 @@ import { buildNodeRoute, nodePublicKeyPem } from '../../features/proxy/route.ts'
 import { generateOrchestratorKey } from '../../features/tickets/keys.ts';
 import { verifyTicket } from '../../features/tickets/ticket.ts';
 import { generateDedupeKey } from '../../features/proxy/dedupe.ts';
+import {
+  PROXY_PROFILE_PROTOCOL,
+  PROXY_PROFILE_VERSION,
+  hashProxyProfileV1,
+} from '../../features/proxy/profile-v1.ts';
 
 const orchestrator = generateOrchestratorKey();
 const nodeKeyPair = crypto.generateKeyPairSync('ed25519');
@@ -86,6 +91,47 @@ describe('ConsensusProxy.routeRequest', () => {
     assert.equal(result.dedupe_key, expectedKey);
     const { claims } = verifyTicket(result.ticket, orchestrator.publicKey, { expectedNodeId: 'n1' });
     assert.equal(claims.sub, expectedKey, 'ticket sub == dedupe key the node will recompute');
+  });
+
+  it('binds an anonymous profile hash into the node ticket request', () => {
+    const profile = {
+      protocol: PROXY_PROFILE_PROTOCOL,
+      version: PROXY_PROFILE_VERSION,
+      base_url: 'https://api.example.com/v1',
+      allowed_methods: ['GET'],
+      allowed_paths: ['/products'],
+      cache_ttl: 60,
+      direct: true,
+    };
+    const proxy = makeProxy({
+      node: {
+        id: 'n1',
+        region: 'us-east',
+        domain: 'n1.consensus.test',
+        capabilities: {},
+      },
+    });
+    const result = proxy.routeRequest(
+      'https://api.example.com/v1/products/1',
+      'GET',
+      {},
+      undefined,
+      profile,
+    );
+    assert.equal(result.mode, 'node');
+    if (result.mode !== 'node') return;
+    const profileHash = hashProxyProfileV1(profile);
+    assert.equal(result.profile_hash, profileHash);
+    assert.equal(result.dedupe_key, generateDedupeKey({
+      target_url: 'https://api.example.com/v1/products/1',
+      method: 'GET',
+      headers: { 'x-cache-ttl': '60', 'x-direct': 'true' },
+      profile_hash: profileHash,
+    }));
+    assert.throws(
+      () => proxy.routeRequest('https://api.example.com/v1/private', 'GET', {}, undefined, profile),
+      /not allowed/,
+    );
   });
 
   it('falls back to self when no node is available', () => {

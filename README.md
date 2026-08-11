@@ -74,9 +74,9 @@ sequenceDiagram
     participant API as External API
     participant C as Consensus
 
-    R1->>P: HTTP outcall (idempotency: icp23072025, x-api-key: ba137)
-    R2->>P: HTTP outcall (idempotency: icp23072025, x-api-key: ba137)
-    R3->>P: HTTP outcall (idempotency: icp23072025, x-api-key: ba137)
+    R1->>P: HTTP outcall (idempotency: icp23072025)
+    R2->>P: HTTP outcall (idempotency: icp23072025)
+    R3->>P: HTTP outcall (idempotency: icp23072025)
 
     Note right of P: First request → cache MISS → x402 challenge
 
@@ -172,7 +172,6 @@ This generates:
 
 - Your wallet
 - Proxy URL
-- API key
 - A config file with your client information(**DO NOT EXPOSE THIS FILE!!!**)
 
 ---
@@ -181,7 +180,6 @@ This generates:
 
 ```bash
 curl -X POST http://localhost:3001/proxy \
-  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: icp-price-check" \
   -d '{"target_url": "https://api.coingecko.com/api/v3/simple/price?ids=internet-computer&vs_currencies=usd"}'

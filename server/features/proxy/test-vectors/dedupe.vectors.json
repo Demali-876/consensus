@@ -34,17 +34,6 @@
       "key": "7f0eb385c62d00117d8e0685e279731e535c3b4199ba6fb97ce79ac720d165a2"
     },
     {
-      "name": "api-key-scope",
-      "input": {
-        "target_url": "https://api.example.com/p",
-        "method": "GET",
-        "headers": {
-          "x-api-key": "secret"
-        }
-      },
-      "key": "762942d3cea517745d2919b8fe98c45e8b0a5abcc9c1c94c3b2077014cc4cee9"
-    },
-    {
       "name": "semantic-headers-only",
       "input": {
         "target_url": "https://api.example.com/p",
@@ -56,6 +45,18 @@
         }
       },
       "key": "2f112dcafa15f0548a1661bb31187a8d810066860c4a28ce9f21a612333c8dbc"
+    },
+    {
+      "name": "credential-headers-hashed",
+      "input": {
+        "target_url": "https://api.example.com/private",
+        "method": "GET",
+        "headers": {
+          "authorization": "Bearer secret",
+          "cookie": "session=secret"
+        }
+      },
+      "key": "4d3c084eb4e3f72fd7770f28433cd04d83c158f8f9099aaccdc894497e556fcd"
     },
     {
       "name": "json-body-sorted",
