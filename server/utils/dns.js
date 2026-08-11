@@ -2,6 +2,9 @@ import https from 'https';
 
 const ZONE_NAME = 'canister.software';
 const CF_API_BASE = 'api.cloudflare.com';
+const CF_MAX_ATTEMPTS = 3;
+const CF_REQUEST_TIMEOUT_MS = 15_000;
+const CF_RETRY_BASE_DELAY_MS = 500;
 
 // Silent mode flag - set by caller
 let silentMode = false;
@@ -23,50 +26,94 @@ function cfCredentials() {
   return { apiToken, zoneId };
 }
 
-function cfRequest(method, pathname, body = null) {
+function isRetryableStatus(statusCode) {
+  return statusCode === 408 || statusCode === 429 || statusCode >= 500;
+}
+
+function responseSummary(data) {
+  const compact = data.replace(/\s+/g, ' ').trim();
+  return compact ? `: ${compact.slice(0, 300)}` : '';
+}
+
+function retryDelay(attempt, retryAfter) {
+  const retryAfterSeconds = Number(retryAfter);
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+    return retryAfterSeconds * 1_000;
+  }
+  return CF_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function cfRequest(method, pathname, body = null) {
   const { apiToken } = cfCredentials();
   const payload = body ? JSON.stringify(body) : null;
 
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      {
-        hostname: CF_API_BASE,
-        path: pathname,
-        method,
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          'Content-Type': 'application/json',
-          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+  for (let attempt = 1; attempt <= CF_MAX_ATTEMPTS; attempt += 1) {
+    const response = await new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: CF_API_BASE,
+          path: pathname,
+          method,
+          headers: {
+            Authorization: `Bearer ${apiToken}`,
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+          },
         },
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => {
-          let parsed;
-          try {
-            parsed = JSON.parse(data);
-          } catch (parseError) {
-            reject(new Error(`Failed to parse Cloudflare response: ${parseError.message}`));
-            return;
-          }
+        (res) => {
+          let data = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => (data += chunk));
+          res.on('end', () =>
+            resolve({ statusCode: res.statusCode || 0, headers: res.headers, data }),
+          );
+        },
+      );
+      req.setTimeout(CF_REQUEST_TIMEOUT_MS, () => {
+        req.destroy(new Error(`Cloudflare request timed out after ${CF_REQUEST_TIMEOUT_MS}ms`));
+      });
+      req.on('error', reject);
+      if (payload) req.write(payload);
+      req.end();
+    }).catch((error) => ({ networkError: error }));
 
-          if (!parsed.success) {
-            const errorMsg = (parsed.errors || [])
-              .map((e) => e.message || String(e))
-              .join(', ') || `HTTP ${res.statusCode}`;
-            reject(new Error(`Cloudflare API error: ${errorMsg}`));
-            return;
-          }
+    if ('networkError' in response) {
+      if (attempt < CF_MAX_ATTEMPTS) {
+        await sleep(retryDelay(attempt));
+        continue;
+      }
+      throw new Error(
+        `Cloudflare API request failed after ${CF_MAX_ATTEMPTS} attempts: ${response.networkError.message}`,
+      );
+    }
 
-          resolve(parsed.result);
-        });
-      },
-    );
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
+    const { statusCode, headers, data } = response;
+    if (isRetryableStatus(statusCode) && attempt < CF_MAX_ATTEMPTS) {
+      await sleep(retryDelay(attempt, headers['retry-after']));
+      continue;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      throw new Error(`Cloudflare API returned HTTP ${statusCode}${responseSummary(data)}`);
+    }
+
+    if (statusCode < 200 || statusCode >= 300 || !parsed.success) {
+      const errorMsg = (parsed.errors || [])
+        .map((error) => error.message || String(error))
+        .join(', ') || `HTTP ${statusCode}${responseSummary(data)}`;
+      throw new Error(`Cloudflare API error: ${errorMsg}`);
+    }
+
+    return parsed.result;
+  }
 }
 
 async function findDnsRecords(name, type = null) {
