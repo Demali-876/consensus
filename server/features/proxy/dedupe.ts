@@ -14,9 +14,11 @@ export interface DedupeParams {
   method: string;
   headers?: Headers;
   body?: RequestBody;
+  profile_hash?: string;
 }
 
 const ALLOW_HEADERS = new Set(['accept', 'content-type']);
+const HASH_HEADERS = new Set(['authorization', 'cookie']);
 const MULTI_SPACE = /\s+/g;
 
 export function sha256Hex(input: string | Buffer): string {
@@ -65,16 +67,19 @@ export function canonicalizeUrl(raw: string): string {
 }
 
 export function canonicalizeSemanticHeaders(headers: Headers): Headers {
-  // Two-phase: collect the two allowed keys, then emit in fixed alphabetical order
-  // so the result is deterministic without a sort step ('accept' < 'content-type').
+  // Collect public semantic values plus hashes of sensitive upstream credentials,
+  // then emit in fixed alphabetical order. Secrets never enter the canonical form.
   const result: Headers = {};
   for (const [k, v] of Object.entries(headers)) {
     const lower = k.toLowerCase(); // HTTP names have no surrounding whitespace
     if (ALLOW_HEADERS.has(lower)) result[lower] = v.trim().replace(MULTI_SPACE, ' ');
+    else if (HASH_HEADERS.has(lower)) result[lower] = sha256Hex(v);
   }
   const ordered: Headers = {};
   if (result['accept']) ordered['accept'] = result['accept'];
+  if (result['authorization']) ordered['authorization'] = result['authorization'];
   if (result['content-type']) ordered['content-type'] = result['content-type'];
+  if (result['cookie']) ordered['cookie'] = result['cookie'];
   return ordered;
 }
 
@@ -85,7 +90,7 @@ export function computeBodyHash(body: RequestBody): string {
   return sha256Hex(stableStringify(body));
 }
 
-export function generateDedupeKey({ target_url, method, headers = {}, body }: DedupeParams): string {
+export function generateDedupeKey({ target_url, method, headers = {}, body, profile_hash }: DedupeParams): string {
   const semanticHeaders = canonicalizeSemanticHeaders(headers);
   const canonical = {
     v: 1,
@@ -94,6 +99,7 @@ export function generateDedupeKey({ target_url, method, headers = {}, body }: De
     url: canonicalizeUrl(target_url),
     headers: semanticHeaders,
     body_hash: computeBodyHash(body),
+    profile_hash: profile_hash || undefined,
   };
 
   return sha256Hex(stableStringify(canonical));

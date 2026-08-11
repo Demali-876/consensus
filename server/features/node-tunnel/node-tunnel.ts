@@ -11,6 +11,7 @@ import { openFrame, sealFrame, type SecureSession } from './secure-channel.ts';
 import { speedtestUrl } from './speedtest-target.ts';
 import { deriveAdmission, type AdmissionVerdict } from './admission.ts';
 import { verifyIntegrityPayload, type IntegrityPayload } from '../../utils/integrity.ts';
+import type { ProxyExecutionProfileV1 } from '../proxy/profile-v1.ts';
 
 interface PendingTunnelRequest {
   kind: 'proxy' | 'update' | 'probe';
@@ -470,6 +471,7 @@ export function registerNodeTunnel(app: Express, server: Server, options: { rout
         headers?: Record<string, string>;
         body?: string;
         body_encoding?: 'utf8' | 'base64';
+        profile?: ProxyExecutionProfileV1;
       },
     ) => {
       const session = getControlSession(nodeId);
@@ -1333,6 +1335,7 @@ async function requestProxy(
     headers?: Record<string, string>;
     body?: string;
     body_encoding?: 'utf8' | 'base64';
+    profile?: ProxyExecutionProfileV1;
   },
 ): Promise<ProxyResponseMessage> {
   if (session.ws.readyState !== WebSocket.OPEN) {
@@ -1357,6 +1360,7 @@ async function requestProxy(
     headers: input.headers,
     body: input.body,
     body_encoding: input.body_encoding,
+    profile: input.profile,
   });
 
   const message = await response;

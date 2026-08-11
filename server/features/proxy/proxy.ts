@@ -23,6 +23,10 @@ import {
   type Headers,
   type DedupeParams,
 } from './dedupe.ts';
+import {
+  prepareProxyProfileRequestV1,
+  type ProxyExecutionProfileV1,
+} from './profile-v1.ts';
 
 const httpAgent  = new http.Agent ({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, timeout: 30_000 });
@@ -47,6 +51,9 @@ export interface ProxyConfig {
       headers?: Headers;
       body?: string;
       body_encoding?: 'utf8' | 'base64';
+      cached?: boolean;
+      profile_hash?: string;
+      profile?: ProxyExecutionProfileV1;
     }): Promise<{
       status: number;
       status_text?: string;
@@ -90,6 +97,7 @@ export interface ProxyResponse {
   payment_required?: boolean;
   dedupe_key?:       string;
   served_by?:        string;
+  profile_hash?:     string;
 }
 
 export interface ProxyStats {
@@ -230,12 +238,19 @@ export default class ConsensusProxy {
     method:     string,
     headers:    Headers = {},
     body?:      RequestBody,
+    profileInput?: unknown,
   ): { mode: 'self'; dedupe_key: string } | ({ mode: 'node' } & NodeRoute) {
     try { new URL(target_url); } catch {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
-    const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
+    const prepared = profileInput
+      ? prepareProxyProfileRequestV1(profileInput, target_url, method, headers)
+      : undefined;
+    const profile = prepared?.profile;
+    if (prepared) headers = prepared.headers;
+    const profileHash = prepared?.profile_hash;
+    const dedupeKey = generateDedupeKey({ target_url, method, headers, body, profile_hash: profileHash });
     const node = this.router.selectNode(dedupeKey, headers) as NodeRecord | null;
 
     // Null / self / domain-less node → orchestrator serves it (server-as-node).
@@ -253,7 +268,7 @@ export default class ConsensusProxy {
 
     try {
       const key   = this.getOrchestratorKey();
-      const route = buildNodeRoute({ node, nodePubkeyDer: der, dedupeKey, key });
+      const route = buildNodeRoute({ node, nodePubkeyDer: der, dedupeKey, key, profileHash });
       return { mode: 'node', ...route };
     } catch {
       // No signing key configured, or the node's stored identity key is present
@@ -282,14 +297,21 @@ export default class ConsensusProxy {
     headers:    Headers = {},
     body?:      RequestBody,
     cacheTTL?:  number,
+    profileInput?: unknown,
   ): Promise<ProxyResponse> {
     try { new URL(target_url); } catch {
       throw new TypeError(`Invalid target_url: ${target_url}`);
     }
 
+    const prepared = profileInput
+      ? prepareProxyProfileRequestV1(profileInput, target_url, method, headers)
+      : undefined;
+    const profile = prepared?.profile;
+    if (prepared) headers = prepared.headers;
+    const profileHash = prepared?.profile_hash;
     const resolved = await this.ssrfCheck(target_url);
 
-    const dedupeKey = generateDedupeKey({ target_url, method, headers, body });
+    const dedupeKey = generateDedupeKey({ target_url, method, headers, body, profile_hash: profileHash });
     console.log(`[Dedupe] ${dedupeKey.slice(0, 12)}... | ${method} ${target_url}`);
 
     const ttlRaw      = headers['x-cache-ttl']
@@ -327,7 +349,7 @@ export default class ConsensusProxy {
     // duplicating the upstream call. Without this, a burst of N concurrent
     // requests fan out into N upstream fetches and N "Cache MISS" log lines.
     const promise: Promise<ProxyResponse> = (node && typeof node.id === 'string')
-      ? this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved)
+      ? this.executeViaNode(node, target_url, method, headers, body, dedupeKey, ttl, resolved, profile)
       : (console.log('[Self-Fallback] No nodes available, executing directly'),
          this.executeDirect(target_url, method, headers, body, dedupeKey, ttl, resolved));
 
@@ -412,6 +434,7 @@ export default class ConsensusProxy {
     dedupeKey:  string,
     ttl:        number,
     resolved:   SafeResolution,
+    profile?:   ProxyExecutionProfileV1,
   ): Promise<ProxyResponse> {
     this.router.incrementRequest(node.id);
 
@@ -435,8 +458,8 @@ export default class ConsensusProxy {
       const session = this.nodeTunnel?.getNodeSession?.(node.id);
       if (session?.mode === 'control' && session.ws?.readyState === WebSocket.OPEN) {
         try {
-          const result = await this.executeViaTunnel(node, target_url, method, forwardHeaders, body);
-          const finalResult = { ...result, cached: false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id };
+          const result = await this.executeViaTunnel(node, target_url, method, forwardHeaders, body, profile);
+          const finalResult = { ...result, cached: result.cached ?? false, payment_required: true, dedupe_key: dedupeKey, served_by: node.id };
           if (result.status >= 200 && result.status < 300) {
             this.cache.set(dedupeKey, finalResult, ttl);
           }
@@ -455,7 +478,7 @@ export default class ConsensusProxy {
         method:     'POST',
         url:        `https://${node.domain}/proxy`,
         headers:    { 'Content-Type': 'application/json' },
-        data:       { target_url, method, headers: forwardHeaders, body },
+        data:       { target_url, method, headers: forwardHeaders, body, profile },
         timeout:    35_000,
         httpsAgent,
       });
@@ -485,6 +508,7 @@ export default class ConsensusProxy {
     method:     string,
     headers:    Headers,
     body:       RequestBody,
+    profile?:   ProxyExecutionProfileV1,
   ): Promise<ProxyResponse> {
     const result = await this.nodeTunnel!.requestProxy(node.id, {
       target_url,
@@ -492,6 +516,7 @@ export default class ConsensusProxy {
       headers,
       body: encodeRequestBody(body),
       body_encoding: 'utf8',
+      profile,
     });
 
     const text = result.body_encoding === 'base64'
@@ -507,6 +532,8 @@ export default class ConsensusProxy {
       headers:    result.headers ?? {},
       data,
       timestamp:  Date.now(),
+      cached:      result.cached ?? false,
+      ...(result.profile_hash ? { profile_hash: result.profile_hash } : {}),
     };
   }
 

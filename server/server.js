@@ -30,6 +30,9 @@ import { registerUpdater } from './updater.ts';
 import { registerOrchestratorKey } from './features/tickets/pubkey.ts';
 import { assertEmailVerificationEnv } from './utils/email-verification.ts';
 import { log } from './utils/log.ts';
+import {
+  prepareProxyProfileRequestV1,
+} from './features/proxy/profile-v1.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -56,6 +59,17 @@ const SOLANA_PAY_TO = process.env.SOLANA_PAY_TO;
 const ICP_PAY_TO = process.env.ICP_PAY_TO;
 
 const FREE_MODE = process.env.FREE_MODE === 'true';
+
+function prepareProxyProfileRequest(body) {
+  if (body && typeof body === 'object') delete body.profile_hash;
+  if (!body?.profile) return;
+  if (!body.target_url || body.target_ref?.kind === 'tunnel') {
+    throw new TypeError('proxy profiles require a public target_url');
+  }
+  const method = String(body.method || 'GET').toUpperCase();
+  const prepared = prepareProxyProfileRequestV1(body.profile, String(body.target_url), method, body.headers);
+  Object.assign(body, prepared);
+}
 
 function proxyTargetForLog(value) {
   try {
@@ -195,7 +209,12 @@ app.get('/stats', publicLimiter, (_req, res) => {
 });
 
 app.post('/proxy', proxyLimiter, async (req, res, next) => {
-  const { target_url, target_ref, method = 'GET', headers = {}, body } = req.body;
+  try {
+    prepareProxyProfileRequest(req.body);
+  } catch (error) {
+    return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid proxy profile' });
+  }
+  const { target_url, target_ref, method = 'GET', headers = {}, body, profile_hash } = req.body;
   if (!target_url && target_ref?.kind !== 'tunnel') return next();
 
   const requestId = crypto.randomUUID();
@@ -214,7 +233,7 @@ app.post('/proxy', proxyLimiter, async (req, res, next) => {
       await proxy.authorizeTunnelTarget(target_ref);
       dedupeKey = proxy.computeTunnelDedupeKey({ target_ref, method, headers, body });
     } else {
-      dedupeKey = proxy.computeDedupeKey({ target_url, method, headers, body });
+      dedupeKey = proxy.computeDedupeKey({ target_url, method, headers, body, profile_hash });
     }
   } catch (error) {
     const status = Number(error?.statusCode) || 400;
@@ -249,6 +268,7 @@ app.post('/proxy', proxyLimiter, async (req, res, next) => {
       meta: {
         cached: true,
         dedupe_key: dedupeKey,
+        profile_hash,
         served_by: cached.served_by ?? null,
         timestamp: new Date().toISOString(),
       },
@@ -289,7 +309,7 @@ app.post('/proxy', async (req, res) => {
   const requestStartedAt = res.locals.proxyRequestStartedAt ?? startTime;
 
   try {
-    const { target_url, target_ref, method = 'GET', headers = {}, body } = req.body;
+    const { target_url, target_ref, method = 'GET', headers = {}, body, profile, profile_hash } = req.body;
 
     if (!target_url && target_ref?.kind !== 'tunnel') {
       return res.status(400).json({ error: 'Missing target_url or target_ref' });
@@ -318,7 +338,7 @@ app.post('/proxy', async (req, res) => {
     // chosen node (server-as-node fallback).
     const wantsDirect = Boolean(headers['x-direct'] || headers['X-Direct']);
     if (wantsDirect && target_ref?.kind !== 'tunnel' && target_url) {
-      const route = proxy.routeRequest(target_url, methodUpper, headers, body);
+      const route = proxy.routeRequest(target_url, methodUpper, headers, body, profile);
       if (route.mode === 'node') {
         log.info('proxy-http', 'request-routed', {
           request_id: requestId,
@@ -337,11 +357,13 @@ app.post('/proxy', async (req, res) => {
             ticket:          route.ticket,
             ticket_exp:      route.ticket_exp,
             dedupe_key:      route.dedupe_key,
+            profile_hash:    route.profile_hash,
           },
           meta: {
             direct: true,
             served_by: route.node_id,
             dedupe_key: route.dedupe_key,
+            profile_hash: route.profile_hash,
             timestamp: new Date().toISOString(),
           },
         });
@@ -351,7 +373,7 @@ app.post('/proxy', async (req, res) => {
 
     const response = target_ref?.kind === 'tunnel'
       ? await proxy.handleTunnelRequest(target_ref, methodUpper, headers, body)
-      : await proxy.handleRequest(target_url, methodUpper, headers, body);
+      : await proxy.handleRequest(target_url, methodUpper, headers, body, undefined, profile);
 
     const processingTime = Date.now() - startTime;
     log.info('proxy-http', 'request-completed', {
@@ -375,6 +397,7 @@ app.post('/proxy', async (req, res) => {
         cached: response.cached,
         dedupe_key: response.dedupe_key,
         served_by: response.served_by ?? null,
+        profile_hash: profile_hash ?? response.profile_hash,
         processing_ms: processingTime,
         timestamp: new Date().toISOString(),
       },

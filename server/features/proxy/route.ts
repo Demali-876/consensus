@@ -22,6 +22,7 @@ export interface NodeRoute {
   ticket:          string;
   dedupe_key:      string;
   ticket_exp:      number;
+  profile_hash?:   string;
 }
 
 /** Convert a stored Ed25519 public key (DER SPKI) into PEM for the client. */
@@ -44,6 +45,7 @@ export function buildNodeRoute(params: {
   ttlSec?:       number;
   jti?:          string;
   now?:          number;
+  profileHash?:  string;
 }): NodeRoute {
   if (!params.node.domain) throw new TypeError('selected node has no domain');
 
@@ -65,5 +67,6 @@ export function buildNodeRoute(params: {
     ticket,
     dedupe_key:      params.dedupeKey,
     ticket_exp:      now + ttlSec,
+    ...(params.profileHash ? { profile_hash: params.profileHash } : {}),
   };
 }

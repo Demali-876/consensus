@@ -47,6 +47,18 @@
       "key": "2f112dcafa15f0548a1661bb31187a8d810066860c4a28ce9f21a612333c8dbc"
     },
     {
+      "name": "credential-headers-hashed",
+      "input": {
+        "target_url": "https://api.example.com/private",
+        "method": "GET",
+        "headers": {
+          "authorization": "Bearer secret",
+          "cookie": "session=secret"
+        }
+      },
+      "key": "4d3c084eb4e3f72fd7770f28433cd04d83c158f8f9099aaccdc894497e556fcd"
+    },
+    {
       "name": "json-body-sorted",
       "input": {
         "target_url": "https://api.example.com/p",

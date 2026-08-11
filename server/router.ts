@@ -6,6 +6,11 @@ interface RouterStats {
   fallbacks: number;
 }
 
+export interface BatchRouteRequest {
+  dedupeKey: string;
+  preferenceHeaders?: Record<string, string>;
+}
+
 /**
  * Router - Routes requests to available instances
  */
@@ -136,6 +141,39 @@ export default class Router {
     // the caller serves locally, instead of pushing normal traffic onto an
     // already-saturated node.
     return null;
+  }
+
+  /**
+   * Select nodes for a group of requests in one routing pass.
+   *
+   * Selections are provisionally counted while the rest of the batch is
+   * routed. This keeps a large batch from observing the same load snapshot and
+   * piling every item onto one node. The reservations are released before this
+   * method returns; callers still own the normal increment/decrement lifecycle
+   * when they start executing each request.
+   */
+  selectNodes(requests: BatchRouteRequest[]): Array<any | null> {
+    if (!Array.isArray(requests)) throw new TypeError('requests must be an array');
+
+    const reserved = new Map<string, number>();
+    try {
+      return requests.map((request, index) => {
+        if (!request || typeof request.dedupeKey !== 'string' || request.dedupeKey.length === 0) {
+          throw new TypeError(`requests[${index}].dedupeKey must be a non-empty string`);
+        }
+
+        const selected = this.selectNode(request.dedupeKey, request.preferenceHeaders ?? {});
+        if (selected?.id) {
+          this.incrementRequest(selected.id);
+          reserved.set(selected.id, (reserved.get(selected.id) ?? 0) + 1);
+        }
+        return selected;
+      });
+    } finally {
+      for (const [nodeId, count] of reserved) {
+        for (let i = 0; i < count; i++) this.decrementRequest(nodeId);
+      }
+    }
   }
 
   /** Combined HTTP + WS load the orchestrator is currently tracking for a node. */

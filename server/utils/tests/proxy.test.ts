@@ -23,6 +23,7 @@ import http   from 'node:http';
 import ConsensusProxy from '../../features/proxy/proxy.ts';
 import Router from '../../router.ts';
 import { noSsrf } from './_test-helpers.ts';
+import { PROXY_PROFILE_PROTOCOL, PROXY_PROFILE_VERSION, hashProxyProfileV1 } from '../../features/proxy/profile-v1.ts';
 
 const UPSTREAM_PORT = 19_991;
 const BASE          = `http://localhost:${UPSTREAM_PORT}`;
@@ -114,6 +115,36 @@ describe('Basic caching', () => {
     const r = await proxy.handleRequest(`${BASE}/hello`, 'GET', {}, undefined, 60);
     const miss = await proxy.handleRequest(`${BASE}/served-by-test`, 'GET', {}, undefined, 60);
     assert.equal(miss.served_by, 'proxy-direct');
+  });
+});
+
+describe('profile-v1 main-server execution', () => {
+  before(() => { resetUpstream(); freshProxy(); });
+
+  it('enforces the policy and isolates the profiled cache namespace', async () => {
+    const profile = {
+      protocol: PROXY_PROFILE_PROTOCOL,
+      version: PROXY_PROFILE_VERSION,
+      base_url: BASE,
+      allowed_methods: ['GET'],
+      allowed_paths: ['/profile'],
+      cache_ttl: 60,
+      direct: false,
+    };
+    const first = await proxy.handleRequest(`${BASE}/profile`, 'GET', {}, undefined, undefined, profile);
+    const second = await proxy.handleRequest(`${BASE}/profile`, 'GET', {}, undefined, undefined, profile);
+    assert.equal(first.cached, false);
+    assert.equal(second.cached, true);
+    assert.equal(upstreamHits, 1);
+
+    const profileHash = hashProxyProfileV1(profile);
+    const profiledKey = proxy.computeDedupeKey({ target_url: `${BASE}/profile`, method: 'GET', profile_hash: profileHash });
+    const anonymousKey = proxy.computeDedupeKey({ target_url: `${BASE}/profile`, method: 'GET' });
+    assert.notEqual(profiledKey, anonymousKey);
+    await assert.rejects(
+      () => proxy.handleRequest(`${BASE}/private`, 'GET', {}, undefined, undefined, profile),
+      /not allowed/,
+    );
   });
 });
 
@@ -275,6 +306,13 @@ describe('Semantic headers', () => {
     const k1 = proxy.computeDedupeKey({ ...base, headers: { accept: 'application/json' } });
     const k2 = proxy.computeDedupeKey({ ...base, headers: { accept: 'text/plain' } });
     assert.notEqual(k1, k2);
+  });
+
+  it('upstream credentials isolate cache keys without using API identity', () => {
+    const base = { target_url: `${BASE}/private`, method: 'GET' };
+    const a = proxy.computeDedupeKey({ ...base, headers: { authorization: 'Bearer a', cookie: 'session=a' } });
+    const b = proxy.computeDedupeKey({ ...base, headers: { authorization: 'Bearer b', cookie: 'session=b' } });
+    assert.notEqual(a, b);
   });
 
   it('content-type header DOES change the dedupe key for POST', () => {

@@ -101,4 +101,38 @@ describe('Router — prefer downstream nodes, orchestrator as last resort', () =
     router.incrementRequest('n1'); // n1 saturated
     assert.equal(router.selectNode('k'), null, 'self absent + not excluded → null');
   });
+
+  it('routes a batch in input order and accounts for provisional batch load', () => {
+    const router = new Router(storeOf([node('n1'), node('n2'), node('server')]), { saturationLoad: 1 });
+    const selected = router.selectNodes([
+      { dedupeKey: 'a' },
+      { dedupeKey: 'b' },
+      { dedupeKey: 'c' },
+    ]);
+
+    const ids = selected.map((entry) => entry?.id);
+    assert.deepEqual(new Set(ids.slice(0, 2)), new Set(['n1', 'n2']));
+    assert.equal(ids[2], 'server');
+    assert.deepEqual(router.getNodeLoad('n1'), { requests: 0, sessions: 0, total: 0 });
+    assert.deepEqual(router.getNodeLoad('n2'), { requests: 0, sessions: 0, total: 0 });
+    assert.deepEqual(router.getNodeLoad('server'), { requests: 0, sessions: 0, total: 0 });
+  });
+
+  it('applies routing preferences independently to each batch item', () => {
+    const router = new Router(storeOf([node('n1'), node('n2'), node('server')]), { saturationLoad: 10 });
+    const selected = router.selectNodes([
+      { dedupeKey: 'a', preferenceHeaders: { 'x-node-exclude': 'n1' } },
+      { dedupeKey: 'b', preferenceHeaders: { 'x-node-exclude': 'n2' } },
+    ]);
+    assert.deepEqual(selected.map((entry) => entry?.id), ['n2', 'n1']);
+  });
+
+  it('rejects malformed batch entries without leaking provisional load', () => {
+    const router = new Router(storeOf([node('n1'), node('server')]), { saturationLoad: 10 });
+    assert.throws(
+      () => router.selectNodes([{ dedupeKey: 'valid' }, { dedupeKey: '' }]),
+      /requests\[1\]\.dedupeKey/,
+    );
+    assert.deepEqual(router.getNodeLoad('n1'), { requests: 0, sessions: 0, total: 0 });
+  });
 });

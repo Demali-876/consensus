@@ -22,6 +22,14 @@ const cases: Array<{ name: string; input: DedupeParams }> = [
       headers: { accept: 'application/json', 'content-type': 'application/json', 'x-other': 'ignored' },
     },
   },
+  {
+    name: 'credential-headers-hashed',
+    input: {
+      target_url: 'https://api.example.com/private',
+      method: 'GET',
+      headers: { authorization: 'Bearer secret', cookie: 'session=secret' },
+    },
+  },
   { name: 'json-body-sorted', input: { target_url: 'https://api.example.com/p', method: 'POST', body: { b: 2, a: 1 } } },
   { name: 'string-body', input: { target_url: 'https://api.example.com/p', method: 'POST', body: 'raw-body' } },
 ];
