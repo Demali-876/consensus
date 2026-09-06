@@ -153,7 +153,17 @@ const proxy = new ConsensusProxy({
   },
 });
 
-app.get('/', publicLimiter, (req, res) => {
+const FAVICON_PATH = path.join(__dirname, 'public', 'logo.svg');
+
+app.get('/favicon.svg', publicLimiter, (_req, res) => {
+  res.type('image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.sendFile(FAVICON_PATH);
+});
+
+app.get('/favicon.ico', publicLimiter, (_req, res) => res.redirect(301, '/favicon.svg'));
+
+app.get('/', publicLimiter, (_req, res) => {
   res.json({
     name: 'Consensus x402 Server',
     version: '2.0.0',
