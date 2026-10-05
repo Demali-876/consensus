@@ -5,6 +5,7 @@
 <h1 align="center">Consensus Protocol</h1>
 
 <p align="center">
+  Decentralized <strong>HTTP proxy</strong>, <strong>HTTPS &amp; TCP tunnels</strong>, <strong>static outbound IPs</strong>, and metered <strong>WebSockets</strong>, paid per use via <strong>x402</strong><br>
   HTTP deduplication protocol with secure, verifiable payments via <strong>x402</strong><br>
   HTTP as it should be for modern blockchains. Protect your APIs from the chaos of consensus<br>
   Built for decentralization. Runs on a Raspberry Pi
@@ -21,8 +22,10 @@
 </p>
 
 <p align="center">
-  • <a href="#">Docs</a> 
-  • <a href="#">Demo</a> 
+  • <a href="https://docs.consensus.canister.software">Docs</a> 
+  • <a href="https://docs.consensus.canister.software/quickstart/request/">Quickstart</a> 
+  • <a href="https://docs.consensus.canister.software/guides/tunnels/">Tunnels</a> 
+  • <a href="https://docs.consensus.canister.software/guides/static-ip/">Static IPs</a> 
   • <a href="https://sepolia.basescan.org/address/0x32CfC8e7aCe9517523B8884b04e4B3Fb2e064B7f#tokentxns">Testnet Transactions</a>
 </p>
 
